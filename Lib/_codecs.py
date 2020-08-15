@@ -1485,11 +1485,11 @@ def PyUnicode_DecodeUnicodeEscape(s, size, errors):
                         message = "unknown Unicode character name"
                         st = s[pos+1:look]
                         try:
-                            chr = unicodedata.lookup("%s" % st)
+                            chr_codec = unicodedata.lookup("%s" % st)
                         except LookupError as e:
                             x = unicode_call_errorhandler(errors, "unicodeescape", message, s, pos-1, look+1)
                         else:
-                            x = chr, look + 1 
+                            x = chr_codec, look + 1 
                         p += x[0]
                         pos = x[1]
                     else:        
@@ -1610,8 +1610,8 @@ def PyUnicode_DecodeRawUnicodeEscape(s, size, errors):
     while (pos < len(s)):
         ch = s[pos]
     #/* Non-escape characters are interpreted as Unicode ordinals */
-        if (ch != '\\'):
-            p += chr(ord(ch))
+        if (ch != ord('\\')):
+            p.append(chr(ch))
             pos += 1
             continue        
         startinpos = pos
@@ -1619,20 +1619,20 @@ def PyUnicode_DecodeRawUnicodeEscape(s, size, errors):
 ##         backslashes is odd */
         bs = pos
         while pos < size:
-            if (s[pos] != '\\'):
+            if (s[pos] != ord('\\')):
                 break
-            p += chr(ord(s[pos]))
+            p.append(chr(s[pos]))
             pos += 1
     
         if (((pos - bs) & 1) == 0 or
             pos >= size or
-            (s[pos] != 'u' and s[pos] != 'U')) :
-            p += chr(ord(s[pos]))
+            (s[pos] != ord('u') and s[pos] != ord('U'))) :
+            p.append(chr(s[pos]))
             pos += 1
             continue
         
         p.pop(-1)
-        if s[pos] == 'u':
+        if s[pos] == ord('u'):
             count = 4 
         else: 
             count = 8
@@ -1646,7 +1646,7 @@ def PyUnicode_DecodeRawUnicodeEscape(s, size, errors):
             res = unicode_call_errorhandler(
                     errors, "rawunicodeescape", "truncated \\uXXXX",
                     s, size, pos, pos+count)
-            p += res[0]
+            p.append(res[0])
             pos = res[1]
         else:
     #ifndef Py_UNICODE_WIDE
@@ -1656,9 +1656,9 @@ def PyUnicode_DecodeRawUnicodeEscape(s, size, errors):
                         errors, "rawunicodeescape", "\\Uxxxxxxxx out of range",
                         s, size, pos, pos+1)
                     pos = res[1]
-                    p += res[0]
+                    p.append(res[0])
                 else:
-                    p += chr(x)
+                    p.append(chr(x))
                     pos += count
             else:
                 if (x > 0x10000):
@@ -1666,11 +1666,11 @@ def PyUnicode_DecodeRawUnicodeEscape(s, size, errors):
                         errors, "rawunicodeescape", "\\Uxxxxxxxx out of range",
                         s, size, pos, pos+1)
                     pos = res[1]
-                    p += res[0]
+                    p.append(res[0])
 
     #endif
                 else:
-                    p += chr(x)
+                    p.append(chr(x))
                     pos += count
 
     return p

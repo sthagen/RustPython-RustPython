@@ -33,15 +33,13 @@ pub struct PyClassMethod {
 }
 pub type PyClassMethodRef = PyRef<PyClassMethod>;
 
-impl PyClassMethod {
-    pub fn new(value: PyObjectRef) -> Self {
+impl From<PyObjectRef> for PyClassMethod {
+    fn from(value: PyObjectRef) -> Self {
         Self { callable: value }
     }
 }
 
 impl PyValue for PyClassMethod {
-    const HAVE_DICT: bool = true;
-
     fn class(vm: &VirtualMachine) -> PyClassRef {
         vm.ctx.classmethod_type()
     }
@@ -60,7 +58,7 @@ impl SlotDescriptor for PyClassMethod {
     }
 }
 
-#[pyimpl(with(SlotDescriptor), flags(BASETYPE))]
+#[pyimpl(with(SlotDescriptor), flags(BASETYPE, HAS_DICT))]
 impl PyClassMethod {
     #[pyslot]
     fn tp_new(

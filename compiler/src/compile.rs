@@ -298,7 +298,15 @@ impl<O: OutputStream> Compiler<O> {
             SymbolScope::Global => bytecode::NameScope::Global,
             SymbolScope::Nonlocal => bytecode::NameScope::NonLocal,
             SymbolScope::Unknown => bytecode::NameScope::Free,
-            SymbolScope::Local => bytecode::NameScope::Free,
+            SymbolScope::Local => {
+                // Only in function block, we use load local
+                // https://github.com/python/cpython/blob/master/Python/compile.c#L3582
+                if self.ctx.in_func() {
+                    bytecode::NameScope::Local
+                } else {
+                    bytecode::NameScope::Free
+                }
+            }
         }
     }
 
@@ -471,7 +479,9 @@ impl<O: OutputStream> Compiler<O> {
 
                 self.compile_statements(body)?;
 
-                for end_label in end_labels {
+                // sort of "stack up" the layers of with blocks:
+                // with a, b: body -> start_with(a) start_with(b) body() end_with(b) end_with(a)
+                for end_label in end_labels.into_iter().rev() {
                     self.emit(Instruction::PopBlock);
                     self.emit(Instruction::EnterFinally);
                     self.set_label(end_label);

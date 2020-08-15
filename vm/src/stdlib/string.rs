@@ -7,12 +7,13 @@ pub(crate) use _string::make_module;
 mod _string {
     use std::mem;
 
+    use crate::exceptions::IntoPyException;
     use crate::format::{
         FieldName, FieldNamePart, FieldType, FormatPart, FormatString, FromTemplate,
     };
     use crate::obj::objlist::PyList;
     use crate::obj::objstr::PyStringRef;
-    use crate::pyobject::{IntoPyObject, PyObjectRef, PyResult};
+    use crate::pyobject::{BorrowValue, IntoPyObject, PyObjectRef, PyResult};
     use crate::vm::VirtualMachine;
 
     fn create_format_part(
@@ -21,7 +22,7 @@ mod _string {
         format_spec: Option<String>,
         preconversion_spec: Option<char>,
         vm: &VirtualMachine,
-    ) -> PyResult {
+    ) -> PyObjectRef {
         let tuple = (
             literal,
             field_name,
@@ -34,7 +35,7 @@ mod _string {
     #[pyfunction]
     fn formatter_parser(text: PyStringRef, vm: &VirtualMachine) -> PyResult<PyList> {
         let format_string =
-            FormatString::from_str(text.as_str()).map_err(|e| e.into_pyobject(vm))?;
+            FormatString::from_str(text.borrow_value()).map_err(|e| e.into_pyexception(vm))?;
 
         let mut result = Vec::new();
         let mut literal = String::new();
@@ -51,7 +52,7 @@ mod _string {
                         Some(format_spec),
                         preconversion_spec,
                         vm,
-                    )?);
+                    ));
                 }
                 FormatPart::Literal(text) => literal.push_str(&text),
             }
@@ -63,7 +64,7 @@ mod _string {
                 None,
                 None,
                 vm,
-            )?);
+            ));
         }
         Ok(result.into())
     }
@@ -73,21 +74,22 @@ mod _string {
         text: PyStringRef,
         vm: &VirtualMachine,
     ) -> PyResult<(PyObjectRef, PyList)> {
-        let field_name = FieldName::parse(text.as_str()).map_err(|e| e.into_pyobject(vm))?;
+        let field_name =
+            FieldName::parse(text.borrow_value()).map_err(|e| e.into_pyexception(vm))?;
 
         let first = match field_name.field_type {
-            FieldType::Auto => vm.new_str("".to_owned()),
-            FieldType::Index(index) => index.into_pyobject(vm)?,
-            FieldType::Keyword(attribute) => attribute.into_pyobject(vm)?,
+            FieldType::Auto => vm.ctx.new_str("".to_owned()),
+            FieldType::Index(index) => index.into_pyobject(vm),
+            FieldType::Keyword(attribute) => attribute.into_pyobject(vm),
         };
 
         let rest = field_name
             .parts
             .iter()
             .map(|p| match p {
-                FieldNamePart::Attribute(attribute) => (true, attribute).into_pyobject(vm).unwrap(),
-                FieldNamePart::StringIndex(index) => (false, index).into_pyobject(vm).unwrap(),
-                FieldNamePart::Index(index) => (false, *index).into_pyobject(vm).unwrap(),
+                FieldNamePart::Attribute(attribute) => (true, attribute).into_pyobject(vm),
+                FieldNamePart::StringIndex(index) => (false, index).into_pyobject(vm),
+                FieldNamePart::Index(index) => (false, *index).into_pyobject(vm),
             })
             .collect();
 

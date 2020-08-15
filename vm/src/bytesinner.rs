@@ -15,7 +15,8 @@ use crate::obj::objsequence::{PySliceableSequence, SequenceIndex};
 use crate::obj::objslice::PySliceRef;
 use crate::obj::objstr::{self, PyString, PyStringRef};
 use crate::pyobject::{
-    Either, PyComparisonValue, PyIterable, PyObjectRef, PyResult, TryFromObject, TypeProtocol,
+    BorrowValue, Either, PyComparisonValue, PyIterable, PyObjectRef, PyResult, TryFromObject,
+    TypeProtocol,
 };
 use crate::pystr::{self, PyCommonString, PyCommonStringContainer, PyCommonStringWrapper};
 use crate::vm::VirtualMachine;
@@ -36,7 +37,7 @@ impl TryFromObject for PyBytesInner {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
         match_class!(match obj {
             i @ PyBytes => Ok(PyBytesInner {
-                elements: i.get_value().to_vec()
+                elements: i.borrow_value().to_vec()
             }),
             j @ PyByteArray => Ok(PyBytesInner {
                 elements: j.borrow_value().elements.to_vec()
@@ -74,7 +75,7 @@ impl ByteInnerNewOptions {
                 if let Ok(input) = eval.downcast::<PyString>() {
                     let bytes = objstr::encode_string(input, Some(enc), None, vm)?;
                     Ok(PyBytesInner {
-                        elements: bytes.get_value().to_vec(),
+                        elements: bytes.borrow_value().to_vec(),
                     })
                 } else {
                     Err(vm.new_type_error("encoding without a string argument".to_owned()))
@@ -107,7 +108,7 @@ impl ByteInnerNewOptions {
                             vm.new_type_error("string argument without an encoding".to_owned())
                         );
                     }
-                    i @ PyBytes => Ok(i.get_value().to_vec()),
+                    i @ PyBytes => Ok(i.borrow_value().to_vec()),
                     j @ PyByteArray => Ok(j.borrow_value().elements.to_vec()),
                     obj => {
                         // TODO: only support this method in the bytes() constructor
@@ -124,7 +125,7 @@ impl ByteInnerNewOptions {
 
                         let mut data_bytes = vec![];
                         for elem in elements {
-                            let v = objint::to_int(vm, &elem, &BigInt::from(10))?;
+                            let v = objint::to_int(vm, &elem)?;
                             if let Some(i) = v.to_u8() {
                                 data_bytes.push(i);
                             } else {
@@ -165,7 +166,7 @@ impl ByteInnerFindOptions {
     ) -> PyResult<(Vec<u8>, std::ops::Range<usize>)> {
         let sub = match self.sub {
             Either::A(v) => v.elements.to_vec(),
-            Either::B(int) => vec![int.as_bigint().byte_or(vm)?],
+            Either::B(int) => vec![int.borrow_value().byte_or(vm)?],
         };
         let range = pystr::adjust_indices(self.start, self.end, len);
         Ok((sub, range))
@@ -304,7 +305,7 @@ impl PyBytesInner {
     ) -> PyResult<bool> {
         Ok(match needle {
             Either::A(byte) => self.elements.contains_str(byte.elements.as_slice()),
-            Either::B(int) => self.elements.contains(&int.as_bigint().byte_or(vm)?),
+            Either::B(int) => self.elements.contains(&int.borrow_value().byte_or(vm)?),
         })
     }
 
@@ -312,7 +313,7 @@ impl PyBytesInner {
         match needle {
             SequenceIndex::Int(int) => {
                 if let Some(idx) = self.elements.get_pos(int) {
-                    Ok(vm.new_int(self.elements[idx]))
+                    Ok(vm.ctx.new_int(self.elements[idx]))
                 } else {
                     Err(vm.new_index_error("index out of range".to_owned()))
                 }
@@ -327,7 +328,7 @@ impl PyBytesInner {
         if let Some(idx) = self.elements.get_pos(int) {
             let result = match_class!(match object {
                 i @ PyInt => {
-                    if let Some(value) = i.as_bigint().to_u8() {
+                    if let Some(value) = i.borrow_value().to_u8() {
                         Ok(value)
                     } else {
                         Err(vm.new_value_error("byte must be in range(0, 256)".to_owned()))
@@ -337,7 +338,7 @@ impl PyBytesInner {
             });
             let value = result?;
             self.elements[idx] = value;
-            Ok(vm.new_int(value))
+            Ok(vm.ctx.new_int(value))
         } else {
             Err(vm.new_index_error("index out of range".to_owned()))
         }
@@ -883,9 +884,9 @@ impl PyBytesInner {
             return self
                 .elements
                 .iter()
-                .cloned()
+                .copied()
                 .filter(|x| *x != b'\t')
-                .collect::<Vec<u8>>();
+                .collect();
         }
 
         for i in &self.elements {
@@ -1139,7 +1140,7 @@ where
     F: Fn(&[u8]) -> R,
 {
     match_class!(match obj {
-        i @ PyBytes => Some(f(i.get_value())),
+        i @ PyBytes => Some(f(i.borrow_value())),
         j @ PyByteArray => Some(f(&j.borrow_value().elements)),
         _ => None,
     })

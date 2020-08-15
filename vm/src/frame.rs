@@ -24,7 +24,8 @@ use crate::obj::objtraceback::PyTraceback;
 use crate::obj::objtuple::PyTuple;
 use crate::obj::objtype::{self, PyClassRef};
 use crate::pyobject::{
-    IdProtocol, ItemProtocol, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
+    BorrowValue, IdProtocol, ItemProtocol, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    TypeProtocol,
 };
 use crate::scope::{NameProtocol, Scope};
 use crate::vm::VirtualMachine;
@@ -92,6 +93,8 @@ pub struct Frame {
     pub scope: Scope,
     /// index of last instruction ran
     pub lasti: AtomicUsize,
+    /// tracer function for this frame (usually is None)
+    pub trace: PyMutex<PyObjectRef>,
     state: PyMutex<FrameState>,
 }
 
@@ -147,7 +150,7 @@ impl ExecutionResult {
 pub type FrameResult = PyResult<Option<ExecutionResult>>;
 
 impl Frame {
-    pub fn new(code: PyCodeRef, scope: Scope) -> Frame {
+    pub fn new(code: PyCodeRef, scope: Scope, vm: &VirtualMachine) -> Frame {
         //populate the globals and locals
         //TODO: This is wrong, check https://github.com/nedbat/byterun/blob/31e6c4a8212c35b5157919abff43a7daa0f377c6/byterun/pyvm2.py#L95
         /*
@@ -167,6 +170,7 @@ impl Frame {
                 stack: Vec::new(),
                 blocks: Vec::new(),
             }),
+            trace: PyMutex::new(vm.get_none()),
         }
     }
 }
@@ -211,7 +215,7 @@ impl FrameRef {
     }
 
     pub fn current_location(&self) -> bytecode::Location {
-        self.code.locations[self.lasti.load(Ordering::Relaxed)]
+        self.code.locations[self.lasti.load(Ordering::Relaxed) - 1]
     }
 
     pub fn yield_from_target(&self) -> Option<PyObjectRef> {
@@ -663,7 +667,9 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::PrintExpr => {
                 let expr = self.pop_value();
 
-                let displayhook = vm.get_attribute(vm.sys_module.clone(), "displayhook")?;
+                let displayhook = vm
+                    .get_attribute(vm.sys_module.clone(), "displayhook")
+                    .map_err(|_| vm.new_runtime_error("lost sys.displayhook".to_owned()))?;
                 vm.invoke(&displayhook, vec![expr])?;
 
                 Ok(None)
@@ -793,7 +799,7 @@ impl ExecutingFrame<'_> {
         if let Some(dict) = module.dict() {
             for (k, v) in &dict {
                 let k = vm.to_str(&k)?;
-                let k = k.as_str();
+                let k = k.borrow_value();
                 if !k.starts_with('_') {
                     self.scope.store_name(&vm, k, v);
                 }
@@ -945,7 +951,7 @@ impl ExecutingFrame<'_> {
     fn execute_subscript(&mut self, vm: &VirtualMachine) -> FrameResult {
         let b_ref = self.pop_value();
         let a_ref = self.pop_value();
-        let value = a_ref.get_item(&b_ref, vm)?;
+        let value = a_ref.get_item(b_ref, vm)?;
         self.push_value(value);
         Ok(None)
     }
@@ -954,14 +960,14 @@ impl ExecutingFrame<'_> {
         let idx = self.pop_value();
         let obj = self.pop_value();
         let value = self.pop_value();
-        obj.set_item(&idx, value, vm)?;
+        obj.set_item(idx, value, vm)?;
         Ok(None)
     }
 
     fn execute_delete_subscript(&mut self, vm: &VirtualMachine) -> FrameResult {
         let idx = self.pop_value();
         let obj = self.pop_value();
-        obj.del_item(&idx, vm)?;
+        obj.del_item(idx, vm)?;
         Ok(None)
     }
 
@@ -985,21 +991,21 @@ impl ExecutingFrame<'_> {
                 })?;
                 for (key, value) in dict {
                     if for_call {
-                        if map_obj.contains_key(&key, vm) {
+                        if map_obj.contains_key(key.clone(), vm) {
                             let key_repr = vm.to_repr(&key)?;
                             let msg = format!(
                                 "got multiple values for keyword argument {}",
-                                key_repr.as_str()
+                                key_repr.borrow_value()
                             );
                             return Err(vm.new_type_error(msg));
                         }
                     }
-                    map_obj.set_item(&key, value, vm).unwrap();
+                    map_obj.set_item(key, value, vm).unwrap();
                 }
             }
         } else {
             for (key, value) in self.pop_multiple(2 * size).into_iter().tuples() {
-                map_obj.set_item(&key, value, vm).unwrap();
+                map_obj.set_item(key, value, vm).unwrap();
             }
         }
 
@@ -1064,7 +1070,7 @@ impl ExecutingFrame<'_> {
                     let mut kwargs = IndexMap::new();
                     for (key, value) in kw_dict.into_iter() {
                         if let Some(key) = key.payload_if_subclass::<objstr::PyString>(vm) {
-                            kwargs.insert(key.as_str().to_owned(), value);
+                            kwargs.insert(key.borrow_value().to_owned(), value);
                         } else {
                             return Err(vm.new_type_error("keywords must be strings".to_owned()));
                         }
@@ -1283,8 +1289,14 @@ impl ExecutingFrame<'_> {
             .ctx
             .new_pyfunction(code_obj, scope, defaults, kw_only_defaults);
 
-        let name = qualified_name.as_str().split('.').next_back().unwrap();
-        vm.set_attr(&func_obj, "__name__", vm.new_str(name.to_owned()))?;
+        vm.set_attr(&func_obj, "__doc__", vm.get_none())?;
+
+        let name = qualified_name
+            .borrow_value()
+            .split('.')
+            .next_back()
+            .unwrap();
+        vm.set_attr(&func_obj, "__name__", vm.ctx.new_str(name))?;
         vm.set_attr(&func_obj, "__qualname__", qualified_name)?;
         let module = self
             .scope
@@ -1409,12 +1421,12 @@ impl ExecutingFrame<'_> {
             bytecode::ComparisonOperator::LessOrEqual => vm._le(a, b)?,
             bytecode::ComparisonOperator::Greater => vm._gt(a, b)?,
             bytecode::ComparisonOperator::GreaterOrEqual => vm._ge(a, b)?,
-            bytecode::ComparisonOperator::Is => vm.new_bool(self._is(a, b)),
-            bytecode::ComparisonOperator::IsNot => vm.new_bool(self._is_not(a, b)),
-            bytecode::ComparisonOperator::In => vm.new_bool(self._in(vm, a, b)?),
-            bytecode::ComparisonOperator::NotIn => vm.new_bool(self._not_in(vm, a, b)?),
+            bytecode::ComparisonOperator::Is => vm.ctx.new_bool(self._is(a, b)),
+            bytecode::ComparisonOperator::IsNot => vm.ctx.new_bool(self._is_not(a, b)),
+            bytecode::ComparisonOperator::In => vm.ctx.new_bool(self._in(vm, a, b)?),
+            bytecode::ComparisonOperator::NotIn => vm.ctx.new_bool(self._not_in(vm, a, b)?),
             bytecode::ComparisonOperator::ExceptionMatch => {
-                vm.new_bool(builtin_isinstance(a, b, vm)?)
+                vm.ctx.new_bool(builtin_isinstance(a, b, vm)?)
             }
         };
 
@@ -1432,13 +1444,13 @@ impl ExecutingFrame<'_> {
     fn store_attr(&mut self, vm: &VirtualMachine, attr_name: &str) -> FrameResult {
         let parent = self.pop_value();
         let value = self.pop_value();
-        vm.set_attr(&parent, vm.new_str(attr_name.to_owned()), value)?;
+        vm.set_attr(&parent, vm.ctx.new_str(attr_name), value)?;
         Ok(None)
     }
 
     fn delete_attr(&mut self, vm: &VirtualMachine, attr_name: &str) -> FrameResult {
         let parent = self.pop_value();
-        let name = vm.ctx.new_str(attr_name.to_owned());
+        let name = vm.ctx.new_str(attr_name);
         vm.del_attr(&parent, name)?;
         Ok(None)
     }

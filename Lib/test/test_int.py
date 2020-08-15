@@ -233,7 +233,7 @@ class IntTestCases(unittest.TestCase):
         self.assertRaises(ValueError, int, "1__00")
         self.assertRaises(ValueError, int, "100_")
 
-    @support.cpython_only
+    # @support.cpython_only
     def test_small_ints(self):
         # Bug #3236: Return small longs from PyLong_FromString
         self.assertIs(int('10'), 10)
@@ -340,7 +340,8 @@ class IntTestCases(unittest.TestCase):
     def test_string_float(self):
         self.assertRaises(ValueError, int, '1.2')
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_intconversion(self):
         # Test __int__()
         class ClassicMissingMethods:

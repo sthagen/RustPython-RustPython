@@ -20,7 +20,6 @@ impl PyValue for PyBuiltinFunction {
     fn class(vm: &VirtualMachine) -> PyClassRef {
         vm.ctx.builtin_function_or_method_type()
     }
-    const HAVE_DICT: bool = true;
 }
 
 impl fmt::Debug for PyBuiltinFunction {
@@ -29,15 +28,17 @@ impl fmt::Debug for PyBuiltinFunction {
     }
 }
 
-impl PyBuiltinFunction {
-    pub fn new(value: PyNativeFunc) -> Self {
+impl From<PyNativeFunc> for PyBuiltinFunction {
+    fn from(value: PyNativeFunc) -> Self {
         Self {
             value,
             module: None,
             name: None,
         }
     }
+}
 
+impl PyBuiltinFunction {
     pub fn new_with_name(value: PyNativeFunc, module: PyStringRef, name: PyStringRef) -> Self {
         Self {
             value,
@@ -57,7 +58,7 @@ impl SlotCall for PyBuiltinFunction {
     }
 }
 
-#[pyimpl(with(SlotCall))]
+#[pyimpl(with(SlotCall), flags(HAS_DICT))]
 impl PyBuiltinFunction {
     #[pyproperty(magic)]
     fn module(&self) -> Option<PyStringRef> {
@@ -86,12 +87,15 @@ impl fmt::Debug for PyBuiltinMethod {
     }
 }
 
-impl PyBuiltinMethod {
-    pub fn new(value: PyNativeFunc) -> Self {
+impl From<PyNativeFunc> for PyBuiltinMethod {
+    fn from(value: PyNativeFunc) -> Self {
         Self {
-            function: PyBuiltinFunction::new(value),
+            function: value.into(),
         }
     }
+}
+
+impl PyBuiltinMethod {
     pub fn new_with_name(value: PyNativeFunc, module: PyStringRef, name: PyStringRef) -> Self {
         Self {
             function: PyBuiltinFunction::new_with_name(value, module, name),

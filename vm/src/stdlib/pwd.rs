@@ -1,7 +1,7 @@
-use super::os::convert_nix_error;
+use crate::exceptions::IntoPyException;
 use crate::obj::objint::PyIntRef;
 use crate::obj::objstr::PyStringRef;
-use crate::pyobject::{PyClassImpl, PyObjectRef, PyResult};
+use crate::pyobject::{BorrowValue, PyClassImpl, PyObjectRef, PyResult};
 use crate::vm::VirtualMachine;
 use std::convert::TryFrom;
 use std::ptr::NonNull;
@@ -44,22 +44,24 @@ impl From<User> for Passwd {
 }
 
 fn pwd_getpwnam(name: PyStringRef, vm: &VirtualMachine) -> PyResult {
-    match User::from_name(name.as_str()).map_err(|e| convert_nix_error(vm, e))? {
+    match User::from_name(name.borrow_value()).map_err(|err| err.into_pyexception(vm))? {
         Some(user) => Ok(Passwd::from(user)
             .into_struct_sequence(vm, vm.try_class("pwd", "struct_passwd")?)?
             .into_object()),
         None => {
             let name_repr = vm.to_repr(name.as_object())?;
-            let message = vm.new_str(format!("getpwnam(): name not found: {}", name_repr));
+            let message = vm
+                .ctx
+                .new_str(format!("getpwnam(): name not found: {}", name_repr));
             Err(vm.new_key_error(message))
         }
     }
 }
 
 fn pwd_getpwuid(uid: PyIntRef, vm: &VirtualMachine) -> PyResult {
-    let uid_t = libc::uid_t::try_from(uid.as_bigint()).map(unistd::Uid::from_raw);
+    let uid_t = libc::uid_t::try_from(uid.borrow_value()).map(unistd::Uid::from_raw);
     let user = match uid_t {
-        Ok(uid) => User::from_uid(uid).map_err(|e| convert_nix_error(vm, e))?,
+        Ok(uid) => User::from_uid(uid).map_err(|err| err.into_pyexception(vm))?,
         Err(_) => None,
     };
     match user {
@@ -67,7 +69,9 @@ fn pwd_getpwuid(uid: PyIntRef, vm: &VirtualMachine) -> PyResult {
             .into_struct_sequence(vm, vm.try_class("pwd", "struct_passwd")?)?
             .into_object()),
         None => {
-            let message = vm.new_str(format!("getpwuid(): uid not found: {}", uid.as_bigint()));
+            let message = vm
+                .ctx
+                .new_str(format!("getpwuid(): uid not found: {}", uid.borrow_value()));
             Err(vm.new_key_error(message))
         }
     }

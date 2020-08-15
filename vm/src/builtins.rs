@@ -28,13 +28,14 @@ mod decl {
     use crate::obj::objstr::{PyString, PyStringRef};
     use crate::obj::objtype::{self, PyClassRef};
     use crate::pyobject::{
-        Either, IdProtocol, ItemProtocol, PyCallable, PyIterable, PyObjectRef, PyResult, PyValue,
-        TryFromObject, TypeProtocol,
+        BorrowValue, Either, IdProtocol, ItemProtocol, PyCallable, PyIterable, PyObjectRef,
+        PyResult, PyValue, TryFromObject, TypeProtocol,
     };
     use crate::readline::{Readline, ReadlineResult};
     use crate::scope::Scope;
     #[cfg(feature = "rustpython-parser")]
     use crate::stdlib::ast;
+    use crate::sysmodule;
     use crate::vm::VirtualMachine;
     use rustpython_common::hash::PyHash;
 
@@ -69,13 +70,13 @@ mod decl {
     #[pyfunction]
     fn ascii(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<String> {
         let repr = vm.to_repr(&obj)?;
-        let ascii = to_ascii(repr.as_str());
+        let ascii = to_ascii(repr.borrow_value());
         Ok(ascii)
     }
 
     #[pyfunction]
     fn bin(x: PyIntRef) -> String {
-        let x = x.as_bigint();
+        let x = x.borrow_value();
         if x.is_negative() {
             format!("-0b{:b}", x.abs())
         } else {
@@ -120,11 +121,11 @@ mod decl {
     fn compile(args: CompileArgs, vm: &VirtualMachine) -> PyResult {
         // TODO: compile::compile should probably get bytes
         let source = match &args.source {
-            Either::A(string) => string.as_str(),
+            Either::A(string) => string.borrow_value(),
             Either::B(bytes) => std::str::from_utf8(bytes).unwrap(),
         };
 
-        let mode_str = args.mode.as_str();
+        let mode_str = args.mode.borrow_value();
 
         let flags = args
             .flags
@@ -137,7 +138,7 @@ mod decl {
                     .parse::<compile::Mode>()
                     .map_err(|err| vm.new_value_error(err.to_string()))?;
 
-                vm.compile(&source, mode, args.filename.as_str().to_owned())
+                vm.compile(&source, mode, args.filename.borrow_value().to_owned())
                     .map(|o| o.into_object())
                     .map_err(|err| vm.new_syntax_error(&err))
             } else {
@@ -229,7 +230,7 @@ mod decl {
         // Determine code object:
         let code_obj = match source {
             Either::A(string) => vm
-                .compile(string.as_str(), mode, "<string>".to_owned())
+                .compile(string.borrow_value(), mode, "<string>".to_owned())
                 .map_err(|err| vm.new_syntax_error(&err))?,
             Either::B(code_obj) => code_obj,
         };
@@ -337,14 +338,14 @@ mod decl {
 
     #[pyfunction]
     fn hex(number: PyIntRef, vm: &VirtualMachine) -> PyResult {
-        let n = number.as_bigint();
+        let n = number.borrow_value();
         let s = if n.is_negative() {
             format!("-0x{:x}", -n)
         } else {
             format!("0x{:x}", n)
         };
 
-        Ok(vm.new_str(s))
+        Ok(vm.ctx.new_str(s))
     }
 
     #[pyfunction]
@@ -354,7 +355,7 @@ mod decl {
 
     #[pyfunction]
     fn input(prompt: OptionalArg<PyStringRef>, vm: &VirtualMachine) -> PyResult<String> {
-        let prompt = prompt.as_ref().map_or("", |s| s.as_str());
+        let prompt = prompt.as_ref().map_or("", |s| s.borrow_value());
         let mut readline = Readline::new(());
         match readline.readline(prompt) {
             ReadlineResult::Line(s) => Ok(s),
@@ -543,14 +544,14 @@ mod decl {
 
     #[pyfunction]
     fn oct(number: PyIntRef, vm: &VirtualMachine) -> PyResult {
-        let n = number.as_bigint();
+        let n = number.borrow_value();
         let s = if n.is_negative() {
             format!("-0o{:o}", n.abs())
         } else {
             format!("0o{:o}", n)
         };
 
-        Ok(vm.new_str(s))
+        Ok(vm.ctx.new_str(s))
     }
 
     #[pyfunction]
@@ -567,7 +568,7 @@ mod decl {
                 Ok(u32::from(bytes[0]))
             }),
             Either::B(string) => {
-                let string = string.as_str();
+                let string = string.borrow_value();
                 let string_len = string.chars().count();
                 if string_len != 1 {
                     return Err(vm.new_type_error(format!(
@@ -615,19 +616,19 @@ mod decl {
                             .to_owned(),
                     ));
                 }
-                let m = m.as_bigint();
+                let m = m.borrow_value();
                 if m.is_zero() {
                     return Err(vm.new_value_error("pow() 3rd argument cannot be 0".to_owned()));
                 }
                 let x = objint::get_value(&x);
-                Ok(vm.new_int(x.modpow(&y, &m)))
+                Ok(vm.ctx.new_int(x.modpow(&y, &m)))
             }
         }
     }
 
     #[pyfunction]
     pub fn exit(exit_code_arg: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult {
-        let code = exit_code_arg.unwrap_or_else(|| vm.new_int(0));
+        let code = exit_code_arg.unwrap_or_else(|| vm.ctx.new_int(0));
         Err(vm.new_exception(vm.ctx.exceptions.system_exit.clone(), vec![code]))
     }
 
@@ -647,7 +648,7 @@ mod decl {
     pub fn print(objects: Args, options: PrintOptions, vm: &VirtualMachine) -> PyResult<()> {
         let file = match options.file {
             Some(f) => f,
-            None => vm.get_attribute(vm.sys_module.clone(), "stdout")?,
+            None => sysmodule::get_stdout(vm)?,
         };
         let write = |obj: PyStringRef| vm.call_method(&file, "write", vec![obj.into_object()]);
 
@@ -778,8 +779,12 @@ mod decl {
         mut kwargs: KwArgs,
         vm: &VirtualMachine,
     ) -> PyResult {
-        let name = qualified_name.as_str().split('.').next_back().unwrap();
-        let name_obj = vm.new_str(name.to_owned());
+        let name = qualified_name
+            .borrow_value()
+            .split('.')
+            .next_back()
+            .unwrap();
+        let name_obj = vm.ctx.new_str(name);
 
         let mut metaclass = if let Some(metaclass) = kwargs.pop_kwarg("metaclass") {
             PyClassRef::try_from_object(vm, metaclass)?

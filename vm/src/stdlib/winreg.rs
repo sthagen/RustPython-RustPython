@@ -1,15 +1,16 @@
 #![allow(non_snake_case)]
 use crate::common::cell::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
-use std::convert::TryInto;
-use std::io;
-
-use super::os;
+use crate::exceptions::IntoPyException;
 use crate::function::OptionalArg;
 use crate::obj::objstr::PyStringRef;
 use crate::obj::objtype::PyClassRef;
-use crate::pyobject::{PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject};
+use crate::pyobject::{
+    BorrowValue, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+};
 use crate::VirtualMachine;
 
+use std::convert::TryInto;
+use std::io;
 use winapi::shared::winerror;
 use winreg::{enums::RegType, RegKey, RegValue};
 
@@ -113,10 +114,10 @@ fn winreg_OpenKey(
         return Err(vm.new_value_error("reserved param must be 0".to_owned()));
     }
 
-    let subkey = subkey.as_ref().map_or("", |s| s.as_str());
+    let subkey = subkey.as_ref().map_or("", |s| s.borrow_value());
     let key = key
         .with_key(|k| k.open_subkey_with_flags(subkey, access))
-        .map_err(|e| os::convert_io_error(vm, e))?;
+        .map_err(|e| e.into_pyexception(vm))?;
 
     Ok(PyHKEY::new(key))
 }
@@ -126,9 +127,9 @@ fn winreg_QueryValue(
     subkey: Option<PyStringRef>,
     vm: &VirtualMachine,
 ) -> PyResult<String> {
-    let subkey = subkey.as_ref().map_or("", |s| s.as_str());
+    let subkey = subkey.as_ref().map_or("", |s| s.borrow_value());
     key.with_key(|k| k.get_value(subkey))
-        .map_err(|e| os::convert_io_error(vm, e))
+        .map_err(|e| e.into_pyexception(vm))
 }
 
 fn winreg_QueryValueEx(
@@ -136,9 +137,9 @@ fn winreg_QueryValueEx(
     subkey: Option<PyStringRef>,
     vm: &VirtualMachine,
 ) -> PyResult<(PyObjectRef, usize)> {
-    let subkey = subkey.as_ref().map_or("", |s| s.as_str());
+    let subkey = subkey.as_ref().map_or("", |s| s.borrow_value());
     key.with_key(|k| k.get_raw_value(subkey))
-        .map_err(|e| os::convert_io_error(vm, e))
+        .map_err(|e| e.into_pyexception(vm))
         .and_then(|regval| {
             let ty = regval.vtype.clone() as usize;
             Ok((reg_to_py(regval, vm)?, ty))
@@ -152,7 +153,7 @@ fn winreg_EnumKey(key: Hkey, index: u32, vm: &VirtualMachine) -> PyResult<String
                 winerror::ERROR_NO_MORE_ITEMS as i32,
             ))
         })
-        .map_err(|e| os::convert_io_error(vm, e))
+        .map_err(|e| e.into_pyexception(vm))
 }
 
 fn winreg_EnumValue(
@@ -166,7 +167,7 @@ fn winreg_EnumValue(
                 winerror::ERROR_NO_MORE_ITEMS as i32,
             ))
         })
-        .map_err(|e| os::convert_io_error(vm, e))
+        .map_err(|e| e.into_pyexception(vm))
         .and_then(|(name, value)| {
             let ty = value.vtype.clone() as usize;
             Ok((name, reg_to_py(value, vm)?, ty))
@@ -190,7 +191,7 @@ fn reg_to_py(value: RegValue, vm: &VirtualMachine) -> PyResult {
                     vm.new_value_error(format!("{} value is wrong length", stringify!(name)))
                 })
             };
-            i.map(|i| vm.new_int(i))
+            i.map(|i| vm.ctx.new_int(i))
         }};
     };
     let bytes_to_wide = |b: &[u8]| -> Option<&[u16]> {
@@ -214,7 +215,7 @@ fn reg_to_py(value: RegValue, vm: &VirtualMachine) -> PyResult {
                 .position(|w| *w == 0)
                 .unwrap_or_else(|| wide_slice.len());
             let s = String::from_utf16_lossy(&wide_slice[..nul_pos]);
-            Ok(vm.new_str(s))
+            Ok(vm.ctx.new_str(s))
         }
         RegType::REG_MULTI_SZ => {
             if value.bytes.is_empty() {
@@ -232,7 +233,7 @@ fn reg_to_py(value: RegValue, vm: &VirtualMachine) -> PyResult {
             };
             let strings = wide_slice
                 .split(|c| *c == 0)
-                .map(|s| vm.new_str(String::from_utf16_lossy(s)))
+                .map(|s| vm.ctx.new_str(String::from_utf16_lossy(s)))
                 .collect();
             Ok(vm.ctx.new_list(strings))
         }
@@ -252,6 +253,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let module = py_module!(vm, "winreg", {
         "HKEYType" => hkey_type,
         "OpenKey" => ctx.new_function(winreg_OpenKey),
+        "OpenKeyEx" => ctx.new_function(winreg_OpenKey),
         "QueryValue" => ctx.new_function(winreg_QueryValue),
         "QueryValueEx" => ctx.new_function(winreg_QueryValueEx),
         "EnumKey" => ctx.new_function(winreg_EnumKey),

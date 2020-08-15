@@ -1,12 +1,43 @@
+pub(crate) use _posixsubprocess::make_module;
+
+#[pymodule]
+mod _posixsubprocess {
+    use super::{exec, CStrPathLike, ForkExecArgs, ProcArgs};
+    use crate::exceptions::IntoPyException;
+    use crate::pyobject::PyResult;
+    use crate::VirtualMachine;
+
+    #[pyfunction]
+    fn fork_exec(args: ForkExecArgs, vm: &VirtualMachine) -> PyResult<libc::pid_t> {
+        if args.preexec_fn.is_some() {
+            return Err(vm.new_not_implemented_error("preexec_fn not supported yet".to_owned()));
+        }
+        let cstrs_to_ptrs = |cstrs: &[CStrPathLike]| {
+            cstrs
+                .iter()
+                .map(|s| s.s.as_ptr())
+                .chain(std::iter::once(std::ptr::null()))
+                .collect::<Vec<_>>()
+        };
+        let argv = cstrs_to_ptrs(args.args.as_slice());
+        let argv = &argv;
+        let envp = args.env_list.as_ref().map(|s| cstrs_to_ptrs(s.as_slice()));
+        let envp = envp.as_deref();
+        match nix::unistd::fork().map_err(|err| err.into_pyexception(vm))? {
+            nix::unistd::ForkResult::Child => exec(&args, ProcArgs { argv, envp }),
+            nix::unistd::ForkResult::Parent { child } => Ok(child.as_raw()),
+        }
+    }
+}
+
 use nix::{dir, errno::Errno, fcntl, unistd};
 use std::convert::Infallible as Never;
 use std::ffi::{CStr, CString};
 use std::io::{self, prelude::*};
 
+use super::os;
 use crate::pyobject::{PyObjectRef, PyResult, PySequence, TryFromObject};
 use crate::VirtualMachine;
-
-use super::os::{convert_nix_error, set_inheritable, PyPathLike};
 
 macro_rules! gen_args {
     ($($field:ident: $t:ty),*$(,)?) => {
@@ -22,7 +53,7 @@ struct CStrPathLike {
 }
 impl TryFromObject for CStrPathLike {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-        let s = PyPathLike::try_from_object(vm, obj)?.into_bytes();
+        let s = os::PyPathLike::try_from_object(vm, obj)?.into_bytes();
         let s = CString::new(s)
             .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
         Ok(CStrPathLike { s })
@@ -36,27 +67,6 @@ gen_args! {
     p2cread: i32, p2cwrite: i32, c2pread: i32, c2pwrite: i32,
     errread: i32, errwrite: i32, errpipe_read: i32, errpipe_write: i32,
     restore_signals: bool, call_setsid: bool, preexec_fn: Option<PyObjectRef>,
-}
-
-fn _posixsubprocess_fork_exec(args: ForkExecArgs, vm: &VirtualMachine) -> PyResult<libc::pid_t> {
-    if args.preexec_fn.is_some() {
-        return Err(vm.new_not_implemented_error("preexec_fn not supported yet".to_owned()));
-    }
-    let cstrs_to_ptrs = |cstrs: &[CStrPathLike]| {
-        cstrs
-            .iter()
-            .map(|s| s.s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect::<Vec<_>>()
-    };
-    let argv = cstrs_to_ptrs(args.args.as_slice());
-    let argv = &argv;
-    let envp = args.env_list.as_ref().map(|s| cstrs_to_ptrs(s.as_slice()));
-    let envp = envp.as_deref();
-    match nix::unistd::fork().map_err(|e| convert_nix_error(vm, e))? {
-        nix::unistd::ForkResult::Child => exec(&args, ProcArgs { argv, envp }),
-        nix::unistd::ForkResult::Parent { child } => Ok(child.as_raw()),
-    }
 }
 
 // can't reallocate inside of exec(), so we reallocate prior to fork() and pass this along
@@ -84,7 +94,7 @@ fn exec(args: &ForkExecArgs, procargs: ProcArgs) -> ! {
 fn exec_inner(args: &ForkExecArgs, procargs: ProcArgs) -> nix::Result<Never> {
     for &fd in args.fds_to_keep.as_slice() {
         if fd != args.errpipe_write {
-            set_inheritable(fd, true)?
+            os::raw_set_inheritable(fd, true)?
         }
     }
 
@@ -97,7 +107,7 @@ fn exec_inner(args: &ForkExecArgs, procargs: ProcArgs) -> nix::Result<Never> {
 
     let c2pwrite = if args.c2pwrite == 0 {
         let fd = unistd::dup(args.c2pwrite)?;
-        set_inheritable(fd, true)?;
+        os::raw_set_inheritable(fd, true)?;
         fd
     } else {
         args.c2pwrite
@@ -106,12 +116,12 @@ fn exec_inner(args: &ForkExecArgs, procargs: ProcArgs) -> nix::Result<Never> {
     let mut errwrite = args.errwrite;
     while errwrite == 0 || errwrite == 1 {
         errwrite = unistd::dup(errwrite)?;
-        set_inheritable(errwrite, true)?;
+        os::raw_set_inheritable(errwrite, true)?;
     }
 
     let dup_into_stdio = |fd, io_fd| {
         if fd == io_fd {
-            set_inheritable(fd, true)
+            os::raw_set_inheritable(fd, true)
         } else if fd != -1 {
             unistd::dup2(fd, io_fd).map(drop)
         } else {
@@ -193,11 +203,4 @@ fn pos_int_from_ascii(name: &CStr) -> Option<i32> {
         num = num * 10 + i32::from(c - b'0')
     }
     Some(num)
-}
-
-pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
-    let ctx = &vm.ctx;
-    py_module!(vm, "_posixsubprocess", {
-        "fork_exec" => named_function!(ctx, _posixsubprocess, fork_exec),
-    })
 }

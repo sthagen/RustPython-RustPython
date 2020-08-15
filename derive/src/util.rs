@@ -1,86 +1,98 @@
 use super::Diagnostic;
 use std::collections::HashMap;
-use syn::{Attribute, AttributeArgs, Ident, Lit, Meta, NestedMeta, Path};
+use syn::{Attribute, Ident, Lit, Meta, NestedMeta, Path};
 
-pub fn path_eq(path: &Path, s: &str) -> bool {
+pub(crate) fn path_eq(path: &Path, s: &str) -> bool {
     path.get_ident().map_or(false, |id| id == s)
 }
 
-pub fn def_to_name(
-    ident: &Ident,
+pub(crate) fn def_to_name(
     attr_name: &'static str,
-    attr: AttributeArgs,
+    ident: &Ident,
+    attrs: &[NestedMeta],
 ) -> Result<String, Diagnostic> {
-    let mut name = None;
-    for attr in attr {
-        if let NestedMeta::Meta(meta) = attr {
-            if let Meta::NameValue(name_value) = meta {
-                if path_eq(&name_value.path, "name") {
-                    if let Lit::Str(s) = name_value.lit {
-                        name = Some(s.value());
-                    } else {
-                        bail_span!(
-                            name_value.lit,
-                            "#[{}(name = ...)] must be a string",
-                            attr_name
-                        );
-                    }
-                }
-            }
-        }
-    }
-    Ok(name.unwrap_or_else(|| ident.to_string()))
+    optional_attribute_arg(attr_name, "name", attrs)
+        .transpose()
+        .unwrap_or_else(|| Ok(ident.to_string()))
 }
 
-pub fn optional_attribute_arg(
+pub(crate) fn attribute_arg(
     attr_name: &'static str,
     arg_name: &'static str,
-    attr: AttributeArgs,
+    attrs: &[NestedMeta],
+) -> Result<String, Diagnostic> {
+    if let Some(r) = optional_attribute_arg(attr_name, arg_name, attrs).transpose() {
+        r
+    } else {
+        bail_span!(
+            attrs[0],
+            "#[{}({} = ...)] must exist but not found",
+            attr_name,
+            arg_name
+        )
+    }
+}
+
+pub(crate) fn optional_attribute_arg(
+    attr_name: &'static str,
+    arg_name: &'static str,
+    attrs: &[NestedMeta],
 ) -> Result<Option<String>, Diagnostic> {
     let mut arg_value = None;
-    for attr in attr {
-        if let NestedMeta::Meta(meta) = attr {
-            if let Meta::NameValue(name_value) = meta {
-                if path_eq(&name_value.path, arg_name) {
-                    if let Lit::Str(lit) = name_value.lit {
-                        arg_value = Some(lit.value());
-                    } else {
+    for attr in attrs {
+        match attr {
+            NestedMeta::Meta(Meta::NameValue(name_value))
+                if path_eq(&name_value.path, arg_name) =>
+            {
+                if let Lit::Str(lit) = &name_value.lit {
+                    if arg_value.is_some() {
                         bail_span!(
                             name_value.lit,
-                            "#[{}({} = ...)] must be a string",
+                            "#[{}({} = ...)] must be unique but found multiple times",
                             attr_name,
                             arg_name
                         );
                     }
+                    arg_value = Some(lit.value());
+                } else {
+                    bail_span!(
+                        name_value.lit,
+                        "#[{}({} = ...)] must be a string",
+                        attr_name,
+                        arg_name
+                    );
                 }
             }
+            _ => continue,
         }
     }
     Ok(arg_value)
 }
 
-pub fn module_class_name(mod_name: Option<String>, class_name: &str) -> String {
-    if let Some(mod_name) = mod_name {
-        format!("{}.{}", mod_name, class_name)
-    } else {
-        class_name.into()
+pub(crate) fn meta_into_nesteds(meta: Meta) -> Result<Vec<NestedMeta>, Meta> {
+    match meta {
+        Meta::Path(_) => Ok(Vec::new()),
+        Meta::List(list) => Ok(list.nested.into_iter().collect()),
+        Meta::NameValue(_) => Err(meta),
     }
 }
 
-pub fn strip_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.starts_with(prefix) {
-        Some(&s[prefix.len()..])
-    } else {
-        None
-    }
+#[derive(PartialEq)]
+pub(crate) enum ItemType {
+    Fn,
+    Method,
+    Struct,
+    Enum,
+    Const,
 }
 
-pub struct ItemIdent<'a> {
+pub(crate) struct ItemIdent<'a> {
+    pub typ: ItemType,
     pub attrs: &'a mut Vec<Attribute>,
     pub ident: &'a Ident,
 }
 
-pub struct ItemMeta<'a> {
+pub(crate) struct ItemMeta<'a> {
     ident: &'a Ident,
     parent_type: &'static str,
     meta: HashMap<String, Option<Lit>>,
@@ -192,6 +204,10 @@ impl<'a> ItemMeta<'a> {
         Ok(self._str("name")?.unwrap_or_else(|| self.ident.to_string()))
     }
 
+    pub fn optional_name(&self) -> Option<String> {
+        self.simple_name().ok()
+    }
+
     pub fn method_name(&self) -> Result<String, Diagnostic> {
         let name = self._str("name")?;
         let magic = self._bool("magic")?;
@@ -217,7 +233,7 @@ impl<'a> ItemMeta<'a> {
         } else {
             let sig_name = self.ident.to_string();
             let name = if setter {
-                if let Some(name) = strip_prefix(&sig_name, "set_") {
+                if let Some(name) = sig_name.strip_prefix("set_") {
                     if name.is_empty() {
                         bail_span!(
                             &self.ident,

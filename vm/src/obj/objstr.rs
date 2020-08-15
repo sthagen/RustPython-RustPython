@@ -19,11 +19,12 @@ use super::objiter;
 use super::objnone::PyNone;
 use super::objsequence::{PySliceableSequence, SequenceIndex};
 use super::objtype::{self, PyClassRef};
+use crate::exceptions::IntoPyException;
 use crate::format::{FormatSpec, FormatString, FromTemplate};
 use crate::function::{OptionalArg, OptionalOption, PyFuncArgs};
 use crate::pyobject::{
-    IdProtocol, IntoPyObject, ItemProtocol, PyClassImpl, PyContext, PyIterable, PyObjectRef, PyRef,
-    PyResult, PyValue, TryFromObject, TryIntoRef, TypeProtocol,
+    BorrowValue, IdProtocol, IntoPyObject, ItemProtocol, PyClassImpl, PyContext, PyIterable,
+    PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TryIntoRef, TypeProtocol,
 };
 use crate::pystr::{
     self, adjust_indices, PyCommonString, PyCommonStringContainer, PyCommonStringWrapper,
@@ -49,16 +50,26 @@ pub struct PyString {
     len: AtomicCell<Option<usize>>,
 }
 
-impl PyString {
-    #[inline]
-    pub fn as_str(&self) -> &str {
+impl<'a> BorrowValue<'a> for PyString {
+    type Borrowed = &'a str;
+
+    fn borrow_value(&'a self) -> Self::Borrowed {
         &self.value
     }
 }
 
-impl From<&str> for PyString {
-    fn from(s: &str) -> PyString {
-        s.to_owned().into()
+impl AsRef<str> for PyString {
+    fn as_ref(&self) -> &str {
+        &self.value
+    }
+}
+
+impl<T> From<&T> for PyString
+where
+    T: AsRef<str> + ?Sized,
+{
+    fn from(s: &T) -> PyString {
+        s.as_ref().to_owned().into()
     }
 }
 
@@ -195,7 +206,7 @@ impl PyString {
         if string.class().is(&cls) {
             Ok(string)
         } else {
-            PyString::from(string.as_str()).into_ref_with_type(vm, cls)
+            PyString::from(string.borrow_value()).into_ref_with_type(vm, cls)
         }
     }
 
@@ -216,7 +227,7 @@ impl PyString {
     #[pymethod(name = "__eq__")]
     fn eq(&self, rhs: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
         if objtype::isinstance(&rhs, &vm.ctx.types.str_type) {
-            vm.new_bool(self.value == borrow_value(&rhs))
+            vm.ctx.new_bool(self.value == borrow_value(&rhs))
         } else {
             vm.ctx.not_implemented()
         }
@@ -225,7 +236,7 @@ impl PyString {
     #[pymethod(name = "__ne__")]
     fn ne(&self, rhs: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
         if objtype::isinstance(&rhs, &vm.ctx.types.str_type) {
-            vm.new_bool(self.value != borrow_value(&rhs))
+            vm.ctx.new_bool(self.value != borrow_value(&rhs))
         } else {
             vm.ctx.not_implemented()
         }
@@ -247,14 +258,14 @@ impl PyString {
                 };
 
                 if let Some(character) = self.value.chars().nth(index) {
-                    Ok(vm.new_str(character.to_string()))
+                    Ok(vm.ctx.new_str(character.to_string()))
                 } else {
                     Err(vm.new_index_error("string index out of range".to_owned()))
                 }
             }
             SequenceIndex::Slice(slice) => {
                 let string = self.get_slice_items(vm, &slice)?;
-                Ok(vm.new_str(string))
+                Ok(vm.ctx.new_str(string))
             }
         }
     }
@@ -282,7 +293,7 @@ impl PyString {
     #[pymethod(name = "__hash__")]
     pub(crate) fn hash(&self) -> hash::PyHash {
         self.hash.load().unwrap_or_else(|| {
-            let hash = hash::hash_value(&self.value);
+            let hash = hash::hash_str(&self.value);
             self.hash.store(Some(hash));
             hash
         })
@@ -501,7 +512,7 @@ impl PyString {
             args,
             "endswith",
             "str",
-            |s, x: &PyStringRef| s.ends_with(x.as_str()),
+            |s, x: &PyStringRef| s.ends_with(x.borrow_value()),
             vm,
         )
     }
@@ -512,7 +523,7 @@ impl PyString {
             args,
             "startswith",
             "str",
-            |s, x: &PyStringRef| s.starts_with(x.as_str()),
+            |s, x: &PyStringRef| s.starts_with(x.borrow_value()),
             vm,
         )
     }
@@ -590,7 +601,7 @@ impl PyString {
     fn format(&self, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<String> {
         match FormatString::from_str(&self.value) {
             Ok(format_string) => format_string.format(&args, vm),
-            Err(err) => Err(err.into_pyobject(vm)),
+            Err(err) => Err(err.into_pyexception(vm)),
         }
     }
 
@@ -602,13 +613,13 @@ impl PyString {
     fn format_map(&self, mapping: PyObjectRef, vm: &VirtualMachine) -> PyResult<String> {
         match FormatString::from_str(&self.value) {
             Ok(format_string) => format_string.format_map(&mapping, vm),
-            Err(err) => Err(err.into_pyobject(vm)),
+            Err(err) => Err(err.into_pyexception(vm)),
         }
     }
 
     #[pymethod(name = "__format__")]
     fn format_str(&self, spec: PyStringRef, vm: &VirtualMachine) -> PyResult<String> {
-        match FormatSpec::parse(spec.as_str())
+        match FormatSpec::parse(spec.borrow_value())
             .and_then(|format_spec| format_spec.format_string(&self.value))
         {
             Ok(string) => Ok(string),
@@ -735,7 +746,7 @@ impl PyString {
     #[pymethod]
     fn splitlines(&self, args: pystr::SplitLinesArgs, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx
-            .new_list(self.value.py_splitlines(args, |s| vm.new_str(s.to_owned())))
+            .new_list(self.value.py_splitlines(args, |s| vm.ctx.new_str(s)))
     }
 
     #[pymethod]
@@ -953,12 +964,12 @@ impl PyString {
 
         let mut translated = String::new();
         for c in self.value.chars() {
-            match table.get_item(&(c as u32).into_pyobject(vm)?, vm) {
+            match table.get_item((c as u32).into_pyobject(vm), vm) {
                 Ok(value) => {
                     if let Some(text) = value.payload::<PyString>() {
                         translated.push_str(&text.value);
                     } else if let Some(bigint) = value.payload::<PyInt>() {
-                        match bigint.as_bigint().to_u32().and_then(std::char::from_u32) {
+                        match bigint.borrow_value().to_u32().and_then(std::char::from_u32) {
                             Some(ch) => translated.push(ch as char),
                             None => {
                                 return Err(vm.new_value_error(
@@ -993,14 +1004,18 @@ impl PyString {
                 Ok(from_str) => {
                     if to_str.len() == from_str.len() {
                         for (c1, c2) in from_str.value.chars().zip(to_str.value.chars()) {
-                            new_dict.set_item(&vm.new_int(c1 as u32), vm.new_int(c2 as u32), vm)?;
+                            new_dict.set_item(
+                                vm.ctx.new_int(c1 as u32),
+                                vm.ctx.new_int(c2 as u32),
+                                vm,
+                            )?;
                         }
                         if let OptionalArg::Present(none_str) = none_str {
                             for c in none_str.value.chars() {
-                                new_dict.set_item(&vm.new_int(c as u32), vm.get_none(), vm)?;
+                                new_dict.set_item(vm.ctx.new_int(c as u32), vm.get_none(), vm)?;
                             }
                         }
-                        new_dict.into_pyobject(vm)
+                        Ok(new_dict.into_pyobject(vm))
                     } else {
                         Err(vm.new_value_error(
                             "the first two maketrans arguments must have equal length".to_owned(),
@@ -1019,14 +1034,14 @@ impl PyString {
                     for (key, val) in dict {
                         if let Some(num) = key.payload::<PyInt>() {
                             new_dict.set_item(
-                                &num.as_bigint().to_i32().into_pyobject(vm)?,
+                                num.borrow_value().to_i32().into_pyobject(vm),
                                 val,
                                 vm,
                             )?;
                         } else if let Some(string) = key.payload::<PyString>() {
                             if string.len() == 1 {
                                 let num_value = string.value.chars().next().unwrap() as u32;
-                                new_dict.set_item(&num_value.into_pyobject(vm)?, val, vm)?;
+                                new_dict.set_item(num_value.into_pyobject(vm), val, vm)?;
                             } else {
                                 return Err(vm.new_value_error(
                                     "string keys in translate table must be of length 1".to_owned(),
@@ -1034,7 +1049,7 @@ impl PyString {
                             }
                         }
                     }
-                    new_dict.into_pyobject(vm)
+                    Ok(new_dict.into_pyobject(vm))
                 }
                 _ => Err(vm.new_value_error(
                     "if you give only one argument to maketrans it must be a dict".to_owned(),
@@ -1087,7 +1102,7 @@ pub(crate) fn encode_string(
             vm.new_type_error(format!(
                 "'{}' encoder returned '{}' instead of 'bytes'; use codecs.encode() to \
                  encode arbitrary types",
-                encoding.as_ref().map_or("utf-8", |s| s.as_str()),
+                encoding.as_ref().map_or("utf-8", |s| s.borrow_value()),
                 obj.lease_class().name,
             ))
         })
@@ -1100,28 +1115,37 @@ impl PyValue for PyString {
 }
 
 impl IntoPyObject for String {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyResult {
-        Ok(vm.ctx.new_str(self))
+    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+        vm.ctx.new_str(self)
     }
 }
 
 impl IntoPyObject for &str {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyResult {
-        Ok(vm.ctx.new_str(self.to_owned()))
+    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+        vm.ctx.new_str(self)
     }
 }
 
 impl IntoPyObject for &String {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyResult {
-        Ok(vm.ctx.new_str(self.clone()))
+    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+        vm.ctx.new_str(self.clone())
     }
 }
 
 impl TryFromObject for std::ffi::CString {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
         let s = PyStringRef::try_from_object(vm, obj)?;
-        Self::new(s.as_str().to_owned())
+        Self::new(s.borrow_value().to_owned())
             .map_err(|_| vm.new_value_error("embedded null character".to_owned()))
+    }
+}
+
+impl TryFromObject for std::ffi::OsString {
+    fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
+        use std::str::FromStr;
+
+        let s = PyStringRef::try_from_object(vm, obj)?;
+        Ok(std::ffi::OsString::from_str(s.borrow_value()).unwrap())
     }
 }
 
@@ -1282,13 +1306,9 @@ mod tests {
         let vm: VirtualMachine = Default::default();
 
         let table = vm.context().new_dict();
-        table
-            .set_item("a", vm.new_str("🎅".to_owned()), &vm)
-            .unwrap();
+        table.set_item("a", vm.ctx.new_str("🎅"), &vm).unwrap();
         table.set_item("b", vm.get_none(), &vm).unwrap();
-        table
-            .set_item("c", vm.new_str("xda".to_owned()), &vm)
-            .unwrap();
+        table.set_item("c", vm.ctx.new_str("xda"), &vm).unwrap();
         let translated = PyString::maketrans(
             table.into_object(),
             OptionalArg::Missing,
@@ -1299,7 +1319,7 @@ mod tests {
         let text = PyString::from("abc");
         let translated = text.translate(translated, &vm).unwrap();
         assert_eq!(translated, "🎅xda".to_owned());
-        let translated = text.translate(vm.new_int(3), &vm);
+        let translated = text.translate(vm.ctx.new_int(3), &vm);
         assert_eq!(
             translated.unwrap_err().lease_class().name,
             "TypeError".to_owned()

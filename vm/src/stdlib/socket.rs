@@ -10,11 +10,8 @@ use gethostname::gethostname;
 use nix::unistd::sethostname;
 use socket2::{Domain, Protocol, Socket, Type as SocketType};
 
-use super::os::convert_io_error;
-#[cfg(unix)]
-use super::os::convert_nix_error;
 use crate::byteslike::PyBytesLike;
-use crate::exceptions::PyBaseExceptionRef;
+use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
 use crate::function::{OptionalArg, PyFuncArgs};
 use crate::obj::objbytearray::PyByteArrayRef;
 use crate::obj::objbytes::PyBytesRef;
@@ -22,7 +19,8 @@ use crate::obj::objstr::{PyString, PyStringRef};
 use crate::obj::objtuple::PyTupleRef;
 use crate::obj::objtype::PyClassRef;
 use crate::pyobject::{
-    Either, IntoPyObject, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    BorrowValue, Either, IntoPyObject, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue,
+    TryFromObject,
 };
 use crate::vm::VirtualMachine;
 
@@ -326,7 +324,7 @@ impl PySocket {
             if ret < 0 {
                 Err(convert_sock_error(vm, io::Error::last_os_error()))
             } else {
-                Ok(vm.new_int(flag))
+                Ok(vm.ctx.new_int(flag))
             }
         } else {
             if buflen <= 0 || buflen > 1024 {
@@ -437,23 +435,23 @@ struct Address {
 impl ToSocketAddrs for Address {
     type Iter = std::vec::IntoIter<SocketAddr>;
     fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
-        (self.host.as_str(), self.port).to_socket_addrs()
+        (self.host.borrow_value(), self.port).to_socket_addrs()
     }
 }
 
 impl TryFromObject for Address {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
         let tuple = PyTupleRef::try_from_object(vm, obj)?;
-        if tuple.as_slice().len() != 2 {
+        if tuple.borrow_value().len() != 2 {
             Err(vm.new_type_error("Address tuple should have only 2 values".to_owned()))
         } else {
-            let host = PyStringRef::try_from_object(vm, tuple.as_slice()[0].clone())?;
-            let host = if host.as_str().is_empty() {
+            let host = PyStringRef::try_from_object(vm, tuple.borrow_value()[0].clone())?;
+            let host = if host.borrow_value().is_empty() {
                 PyString::from("0.0.0.0").into_ref(vm)
             } else {
                 host
             };
-            let port = u16::try_from_object(vm, tuple.as_slice()[1].clone())?;
+            let port = u16::try_from_object(vm, tuple.borrow_value()[1].clone())?;
             Ok(Address { host, port })
         }
     }
@@ -475,18 +473,18 @@ fn get_addr_tuple<A: Into<socket2::SockAddr>>(addr: A) -> AddrTuple {
 fn socket_gethostname(vm: &VirtualMachine) -> PyResult {
     gethostname()
         .into_string()
-        .map(|hostname| vm.new_str(hostname))
+        .map(|hostname| vm.ctx.new_str(hostname))
         .map_err(|err| vm.new_os_error(err.into_string().unwrap()))
 }
 
 #[cfg(all(unix, not(target_os = "redox")))]
 fn socket_sethostname(hostname: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
-    sethostname(hostname.as_str()).map_err(|err| convert_nix_error(vm, err))
+    sethostname(hostname.borrow_value()).map_err(|err| err.into_pyexception(vm))
 }
 
 fn socket_inet_aton(ip_string: PyStringRef, vm: &VirtualMachine) -> PyResult {
     ip_string
-        .as_str()
+        .borrow_value()
         .parse::<Ipv4Addr>()
         .map(|ip_addr| vm.ctx.new_bytes(ip_addr.octets().to_vec()))
         .map_err(|_| vm.new_os_error("illegal IP address string passed to inet_aton".to_owned()))
@@ -497,7 +495,7 @@ fn socket_inet_ntoa(packed_ip: PyBytesRef, vm: &VirtualMachine) -> PyResult {
         return Err(vm.new_os_error("packed IP wrong length for inet_ntoa".to_owned()));
     }
     let ip_num = BigEndian::read_u32(&packed_ip);
-    Ok(vm.new_str(Ipv4Addr::from(ip_num).to_string()))
+    Ok(vm.ctx.new_str(Ipv4Addr::from(ip_num).to_string()))
 }
 
 #[derive(FromArgs)]
@@ -526,10 +524,10 @@ fn socket_getaddrinfo(opts: GAIOptions, vm: &VirtualMachine) -> PyResult {
         flags: opts.flags,
     };
 
-    let host = opts.host.as_ref().map(|s| s.as_str());
+    let host = opts.host.as_ref().map(|s| s.borrow_value());
     let port = opts.port.as_ref().map(|p| -> std::borrow::Cow<str> {
         match p {
-            Either::A(ref s) => s.as_str().into(),
+            Either::A(ref s) => s.borrow_value().into(),
             Either::B(i) => i.to_string().into(),
         }
     });
@@ -544,14 +542,14 @@ fn socket_getaddrinfo(opts: GAIOptions, vm: &VirtualMachine) -> PyResult {
         .map(|ai| {
             ai.map(|ai| {
                 vm.ctx.new_tuple(vec![
-                    vm.new_int(ai.address),
-                    vm.new_int(ai.socktype),
-                    vm.new_int(ai.protocol),
+                    vm.ctx.new_int(ai.address),
+                    vm.ctx.new_int(ai.socktype),
+                    vm.ctx.new_int(ai.protocol),
                     match ai.canonname {
-                        Some(s) => vm.new_str(s),
+                        Some(s) => vm.ctx.new_str(s),
                         None => vm.get_none(),
                     },
-                    get_addr_tuple(ai.sockaddr).into_pyobject(vm).unwrap(),
+                    get_addr_tuple(ai.sockaddr).into_pyobject(vm),
                 ])
             })
         })
@@ -566,7 +564,7 @@ fn socket_gethostbyaddr(
     vm: &VirtualMachine,
 ) -> PyResult<(String, PyObjectRef, PyObjectRef)> {
     // TODO: figure out how to do this properly
-    let ai = dns_lookup::getaddrinfo(Some(addr.as_str()), None, None)
+    let ai = dns_lookup::getaddrinfo(Some(addr.borrow_value()), None, None)
         .map_err(|e| convert_sock_error(vm, e.into()))?
         .next()
         .unwrap()
@@ -577,7 +575,7 @@ fn socket_gethostbyaddr(
         hostname,
         vm.ctx.new_list(vec![]),
         vm.ctx
-            .new_list(vec![vm.new_str(ai.sockaddr.ip().to_string())]),
+            .new_list(vec![vm.ctx.new_str(ai.sockaddr.ip().to_string())]),
     ))
 }
 
@@ -648,7 +646,7 @@ fn convert_sock_error(vm: &VirtualMachine, err: io::Error) -> PyBaseExceptionRef
         let socket_timeout = vm.class("_socket", "timeout");
         vm.new_exception_msg(socket_timeout, "Timed out".to_owned())
     } else {
-        convert_io_error(vm, err)
+        err.into_pyexception(vm)
     }
 }
 

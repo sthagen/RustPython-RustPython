@@ -10,7 +10,7 @@ use crate::exceptions::PyBaseExceptionRef;
 use crate::obj::objtuple::PyTupleRef;
 use crate::obj::objtype::{isinstance, PyClassRef};
 use crate::pyobject::{
-    IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
+    BorrowValue, IntoPyResult, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
 };
 use crate::vm::VirtualMachine;
 
@@ -128,8 +128,8 @@ impl PyFuncArgs {
                 if isinstance(&kwarg, &ty) {
                     Ok(Some(kwarg))
                 } else {
-                    let expected_ty_name = vm.to_pystr(&ty)?;
-                    let actual_ty_name = vm.to_pystr(&kwarg.class())?;
+                    let expected_ty_name = &ty.name;
+                    let actual_ty_name = &kwarg.class().name;
                     Err(vm.new_type_error(format!(
                         "argument of type {} is required for named parameter `{}` (got: {})",
                         expected_ty_name, key, actual_ty_name
@@ -524,13 +524,13 @@ macro_rules! into_py_native_func_tuple {
         where
             F: Fn($($T,)* &VirtualMachine) -> R + 'static + Send + Sync,
             $($T: FromArgs,)*
-            R: IntoPyObject,
+            R: IntoPyResult,
         {
             fn into_func(self) -> PyNativeFunc {
                 smallbox!(move |vm: &VirtualMachine, args: PyFuncArgs| {
                     let ($($n,)*) = args.bind::<($($T,)*)>(vm)?;
 
-                    (self)($($n,)* vm).into_pyobject(vm)
+                    (self)($($n,)* vm).into_pyresult(vm)
                 })
             }
         }
@@ -540,13 +540,13 @@ macro_rules! into_py_native_func_tuple {
             F: Fn(&S, $($T,)* &VirtualMachine) -> R + 'static  + Send + Sync,
             S: PyValue,
             $($T: FromArgs,)*
-            R: IntoPyObject,
+            R: IntoPyResult,
         {
             fn into_func(self) -> PyNativeFunc {
                 smallbox!(move |vm: &VirtualMachine, args: PyFuncArgs| {
                     let (zelf, $($n,)*) = args.bind::<(PyRef<S>, $($T,)*)>(vm)?;
 
-                    (self)(&zelf, $($n,)* vm).into_pyobject(vm)
+                    (self)(&zelf, $($n,)* vm).into_pyresult(vm)
                 })
             }
         }
@@ -555,7 +555,7 @@ macro_rules! into_py_native_func_tuple {
         where
             F: Fn($($T,)*) -> R + 'static  + Send + Sync,
             $($T: FromArgs,)*
-            R: IntoPyObject,
+            R: IntoPyResult,
         {
             fn into_func(self) -> PyNativeFunc {
                 IntoPyNativeFunc::into_func(move |$($n,)* _vm: &VirtualMachine| (self)($($n,)*))
@@ -567,7 +567,7 @@ macro_rules! into_py_native_func_tuple {
             F: Fn(&S, $($T,)*) -> R + 'static  + Send + Sync,
             S: PyValue,
             $($T: FromArgs,)*
-            R: IntoPyObject,
+            R: IntoPyResult,
         {
             fn into_func(self) -> PyNativeFunc {
                 IntoPyNativeFunc::into_func(move |zelf: &S, $($n,)* _vm: &VirtualMachine| (self)(zelf, $($n,)*))
@@ -620,7 +620,7 @@ where
                 Err(_) => {
                     let tuple = PyTupleRef::try_from_object(vm, obj.clone())
                         .map_err(|_| vm.new_type_error((self.message)(&obj)))?;
-                    for obj in tuple.as_slice().iter() {
+                    for obj in tuple.borrow_value().iter() {
                         if self.check(&obj, vm)? {
                             return Ok(true);
                         }

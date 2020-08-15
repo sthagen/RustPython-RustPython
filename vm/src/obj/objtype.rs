@@ -6,14 +6,15 @@ use super::objclassmethod::PyClassMethod;
 use super::objdict::PyDictRef;
 use super::objlist::PyList;
 use super::objmappingproxy::PyMappingProxy;
+use super::objobject;
 use super::objstaticmethod::PyStaticMethod;
 use super::objstr::PyStringRef;
 use super::objtuple::PyTuple;
 use super::objweakref::PyWeak;
 use crate::function::{KwArgs, OptionalArg, PyFuncArgs};
 use crate::pyobject::{
-    IdProtocol, PyAttributes, PyClassImpl, PyContext, PyIterable, PyLease, PyObject, PyObjectRef,
-    PyRef, PyResult, PyValue, TypeProtocol,
+    BorrowValue, IdProtocol, PyAttributes, PyClassImpl, PyContext, PyIterable, PyLease,
+    PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
 };
 use crate::slots::{PyClassSlots, PyTpFlags};
 use crate::vm::VirtualMachine;
@@ -24,7 +25,6 @@ use std::ops::Deref;
 /// type(object) -> the object's type
 /// type(name, bases, dict) -> a new type
 #[pyclass(name = "type")]
-#[derive(Debug)]
 pub struct PyClass {
     pub name: String,
     pub bases: Vec<PyClassRef>,
@@ -37,6 +37,12 @@ pub struct PyClass {
 impl fmt::Display for PyClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.name, f)
+    }
+}
+
+impl fmt::Debug for PyClass {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[PyClass {}]", &self.name)
     }
 }
 
@@ -68,10 +74,10 @@ impl PyClassRef {
 
     #[pymethod(magic)]
     fn dir(self, vm: &VirtualMachine) -> PyList {
-        let attributes = self.get_attributes();
-        let attributes: Vec<PyObjectRef> = attributes
-            .keys()
-            .map(|k| vm.ctx.new_str(k.to_owned()))
+        let attributes: Vec<PyObjectRef> = self
+            .get_attributes()
+            .drain()
+            .map(|(k, _)| vm.ctx.new_str(k))
             .collect();
         PyList::from(attributes)
     }
@@ -112,7 +118,7 @@ impl PyClassRef {
             .read()
             .get("__module__")
             .cloned()
-            .unwrap_or_else(|| vm.ctx.new_str("builtins".to_owned()))
+            .unwrap_or_else(|| vm.ctx.new_str("builtins"))
     }
 
     #[pyproperty(magic, setter)]
@@ -129,7 +135,7 @@ impl PyClassRef {
 
     #[pymethod(magic)]
     fn getattribute(self, name_ref: PyStringRef, vm: &VirtualMachine) -> PyResult {
-        let name = name_ref.as_str();
+        let name = name_ref.borrow_value();
         vm_trace!("type.__getattribute__({:?}, {:?})", self, name);
         let mcl = self.lease_class();
 
@@ -171,7 +177,10 @@ impl PyClassRef {
                 ],
             )
         } else {
-            Err(vm.new_attribute_error(format!("{} has no attribute '{}'", self, name)))
+            Err(vm.new_attribute_error(format!(
+                "type object '{}' has no attribute '{}'",
+                self, name
+            )))
         }
     }
 
@@ -182,7 +191,7 @@ impl PyClassRef {
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        if let Some(attr) = self.get_class_attr(attr_name.as_str()) {
+        if let Some(attr) = self.get_class_attr(attr_name.borrow_value()) {
             if let Some(ref descriptor) = attr.get_class_attr("__set__") {
                 vm.invoke(descriptor, vec![attr, self.into_object(), value])?;
                 return Ok(());
@@ -195,7 +204,7 @@ impl PyClassRef {
 
     #[pymethod(magic)]
     fn delattr(self, attr_name: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
-        if let Some(attr) = self.get_class_attr(attr_name.as_str()) {
+        if let Some(attr) = self.get_class_attr(attr_name.borrow_value()) {
             if let Some(ref descriptor) = attr.get_class_attr("__delete__") {
                 return vm
                     .invoke(descriptor, vec![attr, self.into_object()])
@@ -203,11 +212,11 @@ impl PyClassRef {
             }
         }
 
-        if self.get_attr(attr_name.as_str()).is_some() {
-            self.attributes.write().remove(attr_name.as_str());
+        if self.get_attr(attr_name.borrow_value()).is_some() {
+            self.attributes.write().remove(attr_name.borrow_value());
             Ok(())
         } else {
-            Err(vm.new_attribute_error(attr_name.as_str().to_owned()))
+            Err(vm.new_attribute_error(attr_name.borrow_value().to_owned()))
         }
     }
 
@@ -298,20 +307,51 @@ impl PyClassRef {
         let mut attributes = dict.to_attributes();
         if let Some(f) = attributes.get_mut("__new__") {
             if f.class().is(&vm.ctx.function_type()) {
-                *f = PyStaticMethod::new(f.clone()).into_ref(vm).into_object();
+                *f = PyStaticMethod::from(f.clone()).into_ref(vm).into_object();
             }
         }
 
         if let Some(f) = attributes.get_mut("__init_subclass__") {
             if f.class().is(&vm.ctx.function_type()) {
-                *f = PyClassMethod::new(f.clone()).into_ref(vm).into_object();
+                *f = PyClassMethod::from(f.clone()).into_ref(vm).into_object();
             }
         }
 
-        let typ = new(metatype, name.as_str(), base.clone(), bases, attributes)
-            .map_err(|e| vm.new_type_error(e))?;
+        if !attributes.contains_key("__dict__") {
+            attributes.insert(
+                "__dict__".to_owned(),
+                vm.ctx.new_getset(
+                    "__dict__",
+                    objobject::object_get_dict,
+                    objobject::object_set_dict,
+                ),
+            );
+        }
 
-        typ.slots.write().flags = base.slots.read().flags;
+        let slots = PyClassSlots {
+            // TODO: how do we know if it should have a dict?
+            flags: base.slots.read().flags | PyTpFlags::HAS_DICT,
+            ..Default::default()
+        };
+
+        // TODO: is this correct behavior?
+        let cls_dict = if metatype.is(&vm.ctx.types.type_type) {
+            None
+        } else {
+            Some(vm.ctx.new_dict())
+        };
+
+        let typ = new(
+            metatype,
+            name.borrow_value(),
+            base,
+            bases,
+            attributes,
+            slots,
+            cls_dict,
+        )
+        .map_err(|e| vm.new_type_error(e))?;
+
         vm.ctx.add_tp_new_wrapper(&typ);
 
         for (name, obj) in typ.attributes.read().clone().iter() {
@@ -319,7 +359,7 @@ impl PyClassRef {
                 let set_name = meth?;
                 vm.invoke(
                     &set_name,
-                    vec![typ.clone().into_object(), vm.new_str(name.clone())],
+                    vec![typ.clone().into_object(), vm.ctx.new_str(name.clone())],
                 )
                 .map_err(|e| {
                     let err = vm.new_runtime_error(format!(
@@ -573,9 +613,11 @@ fn linearise_mro(mut bases: Vec<Vec<PyClassRef>>) -> Result<Vec<PyClassRef>, Str
 pub fn new(
     typ: PyClassRef,
     name: &str,
-    _base: PyClassRef,
+    base: PyClassRef,
     bases: Vec<PyClassRef>,
-    dict: HashMap<String, PyObjectRef>,
+    attrs: HashMap<String, PyObjectRef>,
+    mut slots: PyClassSlots,
+    dict: Option<PyDictRef>,
 ) -> Result<PyClassRef, String> {
     // Check for duplicates in bases.
     let mut unique_bases = HashSet::new();
@@ -590,21 +632,21 @@ pub fn new(
         .map(|x| x.iter_mro().cloned().collect())
         .collect();
     let mro = linearise_mro(mros)?;
-    let new_type = PyObject {
-        payload: PyClass {
+    if base.slots.read().flags.has_feature(PyTpFlags::HAS_DICT) {
+        slots.flags |= PyTpFlags::HAS_DICT
+    }
+    let new_type = PyRef::new_ref(
+        PyClass {
             name: String::from(name),
             bases,
             mro,
             subclasses: PyRwLock::default(),
-            attributes: PyRwLock::new(dict),
-            slots: PyRwLock::default(),
+            attributes: PyRwLock::new(attrs),
+            slots: PyRwLock::new(slots),
         },
-        dict: None,
-        typ: PyRwLock::new(typ.into_typed_pyobj()),
-    }
-    .into_ref();
-
-    let new_type: PyClassRef = new_type.downcast().unwrap();
+        typ,
+        dict,
+    );
 
     for base in &new_type.bases {
         base.subclasses
@@ -709,6 +751,8 @@ mod tests {
             object.clone(),
             vec![object.clone()],
             HashMap::new(),
+            Default::default(),
+            None,
         )
         .unwrap();
         let b = new(
@@ -717,6 +761,8 @@ mod tests {
             object.clone(),
             vec![object.clone()],
             HashMap::new(),
+            Default::default(),
+            None,
         )
         .unwrap();
 

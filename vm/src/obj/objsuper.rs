@@ -10,8 +10,8 @@ use super::objstr::PyStringRef;
 use super::objtype::{self, PyClass, PyClassRef};
 use crate::function::OptionalArg;
 use crate::pyobject::{
-    IdProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
-    TypeProtocol,
+    BorrowValue, IdProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
+    TryFromObject, TypeProtocol,
 };
 use crate::scope::NameProtocol;
 use crate::slots::SlotDescriptor;
@@ -65,7 +65,7 @@ impl PySuper {
         let mut it = obj_type.iter_mro().peekable();
         for _ in it.peeking_take_while(|cls| !cls.is(&zelf.typ)) {}
         for cls in it.skip(1) {
-            if let Some(descr) = cls.get_attr(name.as_str()) {
+            if let Some(descr) = cls.get_attr(name.borrow_value()) {
                 return vm
                     .call_get_descriptor_specific(
                         descr.clone(),
@@ -114,7 +114,11 @@ impl PySuper {
         } else {
             let frame = vm.current_frame().expect("no current frame for super()");
             if let Some(first_arg) = frame.code.arg_names.get(0) {
-                match frame.scope.get_locals().get_item_option(first_arg, vm)? {
+                match frame
+                    .scope
+                    .get_locals()
+                    .get_item_option(first_arg.as_str(), vm)?
+                {
                     Some(obj) => obj,
                     _ => {
                         return Err(vm.new_type_error(format!(
@@ -196,6 +200,6 @@ pub fn init(context: &PyContext) {
                      super().cmeth(arg)\n";
 
     extend_class!(context, super_type, {
-        "__doc__" => context.new_str(super_doc.to_owned()),
+        "__doc__" => context.new_str(super_doc),
     });
 }

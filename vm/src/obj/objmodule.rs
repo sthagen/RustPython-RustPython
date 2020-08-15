@@ -1,9 +1,9 @@
 use super::objdict::PyDictRef;
 use super::objstr::{PyString, PyStringRef};
 use super::objtype::PyClassRef;
-use crate::function::OptionalOption;
+use crate::function::{OptionalOption, PyFuncArgs};
 use crate::pyobject::{
-    ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
+    BorrowValue, ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
 };
 use crate::vm::VirtualMachine;
 
@@ -13,8 +13,6 @@ pub struct PyModule {}
 pub type PyModuleRef = PyRef<PyModule>;
 
 impl PyValue for PyModule {
-    const HAVE_DICT: bool = true;
-
     fn class(vm: &VirtualMachine) -> PyClassRef {
         vm.ctx.module_type()
     }
@@ -43,24 +41,28 @@ pub fn init_module_dict(
         .expect("Failed to set __spec__ on module");
 }
 
-#[pyimpl(flags(BASETYPE))]
+#[pyimpl(flags(BASETYPE, HAS_DICT))]
 impl PyModuleRef {
     #[pyslot]
-    fn tp_new(
-        cls: PyClassRef,
+    fn tp_new(cls: PyClassRef, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<PyModuleRef> {
+        PyModule {}.into_ref_with_type(vm, cls)
+    }
+
+    #[pymethod(magic)]
+    fn init(
+        self,
         name: PyStringRef,
         doc: OptionalOption<PyStringRef>,
         vm: &VirtualMachine,
-    ) -> PyResult<PyModuleRef> {
-        let zelf = PyModule {}.into_ref_with_type(vm, cls)?;
+    ) -> PyResult<()> {
         init_module_dict(
             vm,
-            &zelf.as_object().dict().unwrap(),
+            &self.as_object().dict().unwrap(),
             name.into_object(),
             doc.flatten()
                 .map_or_else(|| vm.get_none(), PyRef::into_object),
         );
-        Ok(zelf)
+        Ok(())
     }
 
     fn name(self, vm: &VirtualMachine) -> Option<String> {
@@ -70,7 +72,10 @@ impl PyModuleRef {
             None,
         )
         .unwrap_or(None)
-        .and_then(|obj| obj.payload::<PyString>().map(|s| s.as_str().to_owned()))
+        .and_then(|obj| {
+            obj.payload::<PyString>()
+                .map(|s| s.borrow_value().to_owned())
+        })
     }
 
     #[pymethod(magic)]

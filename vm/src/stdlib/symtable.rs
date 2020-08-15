@@ -5,7 +5,7 @@ use rustpython_parser::parser;
 
 use crate::obj::objstr::PyStringRef;
 use crate::obj::objtype::PyClassRef;
-use crate::pyobject::{PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue};
+use crate::pyobject::{BorrowValue, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue};
 use crate::vm::VirtualMachine;
 
 pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
@@ -30,11 +30,11 @@ fn symtable_symtable(
     vm: &VirtualMachine,
 ) -> PyResult<PySymbolTableRef> {
     let mode = mode
-        .as_str()
+        .borrow_value()
         .parse::<compile::Mode>()
         .map_err(|err| vm.new_value_error(err.to_string()))?;
 
-    let symtable = source_to_symtable(source.as_str(), mode, filename.as_str())
+    let symtable = source_to_symtable(source.borrow_value(), mode, filename.borrow_value())
         .map_err(|err| vm.new_syntax_error(&err))?;
 
     let py_symbol_table = to_py_symbol_table(symtable);
@@ -103,9 +103,19 @@ impl PySymbolTable {
         self.symtable.line_number
     }
 
+    #[pymethod(name = "is_nested")]
+    fn is_nested(&self) -> bool {
+        self.symtable.is_nested
+    }
+
+    #[pymethod(name = "is_optimized")]
+    fn is_optimized(&self) -> bool {
+        self.symtable.typ == symboltable::SymbolTableType::Function
+    }
+
     #[pymethod(name = "lookup")]
     fn lookup(&self, name: PyStringRef, vm: &VirtualMachine) -> PyResult<PySymbolRef> {
-        let name = name.as_str();
+        let name = name.borrow_value();
         if let Some(symbol) = self.symtable.symbols.get(name) {
             Ok(PySymbol {
                 symbol: symbol.clone(),
@@ -119,7 +129,7 @@ impl PySymbolTable {
             }
             .into_ref(vm))
         } else {
-            Err(vm.new_key_error(vm.new_str(format!("lookup {} failed", name))))
+            Err(vm.new_key_error(vm.ctx.new_str(format!("lookup {} failed", name))))
         }
     }
 
@@ -129,7 +139,7 @@ impl PySymbolTable {
             .symtable
             .symbols
             .keys()
-            .map(|s| vm.ctx.new_str(s.to_owned()))
+            .map(|s| vm.ctx.new_str(s))
             .collect();
         Ok(vm.ctx.new_list(symbols))
     }

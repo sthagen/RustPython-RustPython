@@ -1,7 +1,9 @@
 use num_bigint::BigInt;
+use num_complex::Complex64;
 use num_traits::ToPrimitive;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::num::Wrapping;
 
 pub type PyHash = i64;
 pub type PyUHash = u64;
@@ -22,6 +24,17 @@ pub const HASH_BITS: usize = std::mem::size_of::<PyHash>() * 8;
 pub const SEED_BITS: usize = std::mem::size_of::<PyHash>() * 2 * 8;
 
 // pub const CUTOFF: usize = 7;
+
+#[inline]
+pub fn mod_int(value: i64) -> PyHash {
+    value % MODULUS as i64
+}
+
+pub fn hash_value<T: Hash + ?Sized>(data: &T) -> PyHash {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    mod_int(hasher.finish() as PyHash)
+}
 
 pub fn hash_float(value: f64) -> PyHash {
     // cpython _Py_HashDouble
@@ -68,10 +81,11 @@ pub fn hash_float(value: f64) -> PyHash {
     x as PyHash * value.signum() as PyHash
 }
 
-pub fn hash_value<T: Hash>(data: &T) -> PyHash {
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    hasher.finish() as PyHash
+pub fn hash_complex(value: &Complex64) -> PyHash {
+    let re_hash = hash_float(value.re);
+    let im_hash = hash_float(value.im);
+    let ret = Wrapping(re_hash) + Wrapping(im_hash) * Wrapping(IMAG);
+    ret.0
 }
 
 pub fn hash_iter<'a, T: 'a, I, F, E>(iter: I, hashf: F) -> Result<PyHash, E>
@@ -84,7 +98,7 @@ where
         let item_hash = hashf(element)?;
         item_hash.hash(&mut hasher);
     }
-    Ok(hasher.finish() as PyHash)
+    Ok(mod_int(hasher.finish() as PyHash))
 }
 
 pub fn hash_iter_unordered<'a, T: 'a, I, F, E>(iter: I, hashf: F) -> Result<PyHash, E>
@@ -98,12 +112,20 @@ where
         // xor is commutative and hash should be independent of order
         hash ^= item_hash;
     }
-    Ok(hash)
+    Ok(mod_int(hash))
 }
 
 pub fn hash_bigint(value: &BigInt) -> PyHash {
-    match value.to_i64() {
-        Some(i64_value) => (i64_value % MODULUS as i64),
-        None => (value % MODULUS).to_i64().unwrap(),
-    }
+    value.to_i64().map_or_else(
+        || {
+            (value % MODULUS).to_i64().unwrap_or_else(||
+            // guaranteed to be safe by mod
+            unsafe { std::hint::unreachable_unchecked() })
+        },
+        mod_int,
+    )
+}
+
+pub fn hash_str(value: &str) -> PyHash {
+    hash_value(value.as_bytes())
 }

@@ -7,7 +7,7 @@ use crate::obj::{
     objbool, objdict::PyDictRef, objfloat, objint, objlist::PyList, objstr, objtuple::PyTuple,
     objtype,
 };
-use crate::pyobject::{IdProtocol, ItemProtocol, PyObjectRef, TypeProtocol};
+use crate::pyobject::{BorrowValue, IdProtocol, ItemProtocol, PyObjectRef, TypeProtocol};
 use crate::VirtualMachine;
 
 #[inline]
@@ -85,9 +85,9 @@ impl<'s> serde::Serialize for PyObjectSerializer<'s> {
                 serializer.serialize_i64(v.to_i64().ok_or_else(int_too_large)?)
             }
         } else if let Some(list) = self.pyobject.payload_if_subclass::<PyList>(self.vm) {
-            serialize_seq_elements(serializer, &list.borrow_elements())
+            serialize_seq_elements(serializer, &list.borrow_value())
         } else if let Some(tuple) = self.pyobject.payload_if_subclass::<PyTuple>(self.vm) {
-            serialize_seq_elements(serializer, tuple.as_slice())
+            serialize_seq_elements(serializer, tuple.borrow_value())
         } else if objtype::isinstance(self.pyobject, &self.vm.ctx.types.dict_type) {
             let dict: PyDictRef = self.pyobject.clone().downcast().unwrap();
             let pairs: Vec<_> = dict.into_iter().collect();
@@ -209,7 +209,7 @@ impl<'de> Visitor<'de> for PyObjectDeserializer<'de> {
         // Although JSON keys must be strings, implementation accepts any keys
         // and can be reused by other deserializers without such limit
         while let Some((key_obj, value)) = access.next_entry_seed(self.clone(), self.clone())? {
-            dict.set_item(&key_obj, value, self.vm).unwrap();
+            dict.set_item(key_obj, value, self.vm).unwrap();
         }
         Ok(dict.into_object())
     }

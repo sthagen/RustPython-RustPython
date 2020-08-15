@@ -18,16 +18,12 @@ JUST_SHOW_HASH_RESULTS = False # if RUN_ALL_HASH_TESTS, just display
 class TupleTest(seq_tests.CommonTest):
     type2test = tuple
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_getitem_error(self):
         t = ()
         msg = "tuple indices must be integers or slices"
         with self.assertRaisesRegex(TypeError, msg):
             t['a']
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_constructors(self):
         super().test_constructors()
         # calling built-in types without argument must return empty

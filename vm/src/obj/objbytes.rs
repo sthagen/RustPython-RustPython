@@ -14,7 +14,7 @@ use crate::bytesinner::{
 };
 use crate::function::{OptionalArg, OptionalOption};
 use crate::pyobject::{
-    Either, IntoPyObject,
+    BorrowValue, Either, IntoPyObject,
     PyArithmaticValue::{self, *},
     PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue,
     TryFromObject, TypeProtocol,
@@ -40,27 +40,25 @@ pub struct PyBytes {
 
 pub type PyBytesRef = PyRef<PyBytes>;
 
-impl PyBytes {
-    pub fn new(elements: Vec<u8>) -> Self {
-        PyBytes {
-            inner: PyBytesInner { elements },
-        }
-    }
+impl<'a> BorrowValue<'a> for PyBytes {
+    type Borrowed = &'a [u8];
 
-    pub fn get_value(&self) -> &[u8] {
+    fn borrow_value(&'a self) -> Self::Borrowed {
         &self.inner.elements
     }
 }
 
 impl From<Vec<u8>> for PyBytes {
     fn from(elements: Vec<u8>) -> Self {
-        Self::new(elements)
+        Self {
+            inner: PyBytesInner { elements },
+        }
     }
 }
 
 impl IntoPyObject for Vec<u8> {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyResult {
-        Ok(vm.ctx.new_bytes(self))
+    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+        vm.ctx.new_bytes(self)
     }
 }
 
@@ -214,22 +212,22 @@ impl PyBytes {
     }
 
     #[pymethod(name = "lower")]
-    fn lower(&self) -> PyBytes {
+    fn lower(&self) -> Self {
         self.inner.lower().into()
     }
 
     #[pymethod(name = "upper")]
-    fn upper(&self) -> PyBytes {
+    fn upper(&self) -> Self {
         self.inner.upper().into()
     }
 
     #[pymethod(name = "capitalize")]
-    fn capitalize(&self) -> PyBytes {
+    fn capitalize(&self) -> Self {
         self.inner.capitalize().into()
     }
 
     #[pymethod(name = "swapcase")]
-    fn swapcase(&self) -> PyBytes {
+    fn swapcase(&self) -> Self {
         self.inner.swapcase().into()
     }
 
@@ -240,7 +238,7 @@ impl PyBytes {
 
     #[pymethod]
     fn fromhex(string: PyStringRef, vm: &VirtualMachine) -> PyResult<PyBytes> {
-        Ok(PyBytesInner::fromhex(string.as_str(), vm)?.into())
+        Ok(PyBytesInner::fromhex(string.borrow_value(), vm)?.into())
     }
 
     #[pymethod(name = "center")]
@@ -328,17 +326,17 @@ impl PyBytes {
     }
 
     #[pymethod(name = "strip")]
-    fn strip(&self, chars: OptionalOption<PyBytesInner>) -> PyBytes {
+    fn strip(&self, chars: OptionalOption<PyBytesInner>) -> Self {
         self.inner.strip(chars).into()
     }
 
     #[pymethod(name = "lstrip")]
-    fn lstrip(&self, chars: OptionalOption<PyBytesInner>) -> PyBytes {
+    fn lstrip(&self, chars: OptionalOption<PyBytesInner>) -> Self {
         self.inner.lstrip(chars).into()
     }
 
     #[pymethod(name = "rstrip")]
-    fn rstrip(&self, chars: OptionalOption<PyBytesInner>) -> PyBytes {
+    fn rstrip(&self, chars: OptionalOption<PyBytesInner>) -> Self {
         self.inner.rstrip(chars).into()
     }
 
@@ -350,7 +348,7 @@ impl PyBytes {
     /// If the bytes starts with the prefix string, return string[len(prefix):]
     /// Otherwise, return a copy of the original bytes.
     #[pymethod(name = "removeprefix")]
-    fn removeprefix(&self, prefix: PyBytesInner) -> PyBytes {
+    fn removeprefix(&self, prefix: PyBytesInner) -> Self {
         self.inner.removeprefix(prefix).into()
     }
 
@@ -362,7 +360,7 @@ impl PyBytes {
     /// If the bytes ends with the suffix string, return string[:len(suffix)]
     /// Otherwise, return a copy of the original bytes.
     #[pymethod(name = "removesuffix")]
-    fn removesuffix(&self, suffix: PyBytesInner) -> PyBytes {
+    fn removesuffix(&self, suffix: PyBytesInner) -> Self {
         self.inner.removesuffix(suffix).into()
     }
 
@@ -409,7 +407,7 @@ impl PyBytes {
     }
 
     #[pymethod(name = "expandtabs")]
-    fn expandtabs(&self, options: pystr::ExpandTabsArgs) -> PyBytes {
+    fn expandtabs(&self, options: pystr::ExpandTabsArgs) -> Self {
         self.inner.expandtabs(options).into()
     }
 
@@ -422,7 +420,7 @@ impl PyBytes {
     }
 
     #[pymethod(name = "zfill")]
-    fn zfill(&self, width: isize) -> PyBytes {
+    fn zfill(&self, width: isize) -> Self {
         self.inner.zfill(width).into()
     }
 
@@ -438,7 +436,7 @@ impl PyBytes {
     }
 
     #[pymethod(name = "title")]
-    fn title(&self) -> PyBytes {
+    fn title(&self) -> Self {
         self.inner.title().into()
     }
 
@@ -483,7 +481,7 @@ impl PyBytes {
                 vm.new_type_error(format!(
                     "'{}' decoder returned '{}' instead of 'str'; use codecs.encode() to \
                      encode arbitrary types",
-                    encoding.as_ref().map_or("utf-8", |s| s.as_str()),
+                    encoding.as_ref().map_or("utf-8", |s| s.borrow_value()),
                     obj.lease_class().name,
                 ))
             })
@@ -508,7 +506,7 @@ impl PyBytesIterator {
     #[pymethod(name = "__next__")]
     fn next(&self, vm: &VirtualMachine) -> PyResult<u8> {
         let pos = self.position.fetch_add(1);
-        if let Some(&ret) = self.bytes.get_value().get(pos) {
+        if let Some(&ret) = self.bytes.borrow_value().get(pos) {
             Ok(ret)
         } else {
             Err(objiter::new_stop_iteration(vm))

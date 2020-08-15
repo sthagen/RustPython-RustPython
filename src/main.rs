@@ -10,7 +10,7 @@ use rustpython_vm::{
     exceptions::print_exception,
     match_class,
     obj::{objint::PyInt, objtype},
-    pyobject::{ItemProtocol, PyResult},
+    pyobject::{BorrowValue, ItemProtocol, PyResult},
     scope::Scope,
     util, InitParameter, PySettings, VirtualMachine,
 };
@@ -52,30 +52,30 @@ fn main() {
     if let Err(err) = res {
         if objtype::isinstance(&err, &vm.ctx.exceptions.system_exit) {
             let args = err.args();
-            match args.as_slice().len() {
+            match args.borrow_value().len() {
                 0 => return,
-                1 => match_class!(match args.as_slice()[0].clone() {
+                1 => match_class!(match args.borrow_value()[0].clone() {
                     i @ PyInt => {
                         use num_traits::cast::ToPrimitive;
-                        process::exit(i.as_bigint().to_i32().unwrap_or(0));
+                        process::exit(i.borrow_value().to_i32().unwrap_or(0));
                     }
                     arg => {
                         if vm.is_none(&arg) {
                             return;
                         }
                         if let Ok(s) = vm.to_str(&arg) {
-                            println!("{}", s);
+                            eprintln!("{}", s);
                         }
                     }
                 }),
                 _ => {
                     if let Ok(r) = vm.to_repr(args.as_object()) {
-                        println!("{}", r);
+                        eprintln!("{}", r);
                     }
                 }
             }
         } else {
-            print_exception(&vm, &err);
+            print_exception(&vm, err);
         }
         process::exit(1);
     }
@@ -158,6 +158,23 @@ fn parse_arguments<'a>(app: App<'a, '_>) -> ArgMatches<'a> {
             Arg::with_name("ignore-environment")
                 .short("E")
                 .help("Ignore environment variables PYTHON* such as PYTHONPATH"),
+        )
+        .arg(
+            Arg::with_name("isolate")
+                .short("I")
+                .help("isolate Python from the user's environment (implies -E and -s)"),
+        )
+        .arg(
+            Arg::with_name("implementation-option")
+                .short("X")
+                .takes_value(true)
+                .help("set implementation-specific option"),
+        )
+        .arg(
+            Arg::with_name("warning-control")
+                .short("W")
+                .takes_value(true)
+                .help("warning control; arg is action:message:category:module:lineno"),
         );
     #[cfg(feature = "flame-it")]
     let app = app
@@ -179,21 +196,22 @@ fn parse_arguments<'a>(app: App<'a, '_>) -> ArgMatches<'a> {
 /// Create settings by examining command line arguments and environment
 /// variables.
 fn create_settings(matches: &ArgMatches) -> PySettings {
-    let ignore_environment = matches.is_present("ignore-environment");
+    let ignore_environment =
+        matches.is_present("ignore-environment") || matches.is_present("isolate");
     let mut settings: PySettings = Default::default();
     settings.ignore_environment = ignore_environment;
 
     // add the current directory to sys.path
     settings.path_list.push("".to_owned());
 
+    // BUILDTIME_RUSTPYTHONPATH should be set when distributing
     if let Some(paths) = option_env!("BUILDTIME_RUSTPYTHONPATH") {
         settings.path_list.extend(
             std::env::split_paths(paths).map(|path| path.into_os_string().into_string().unwrap()),
         )
-    } else if option_env!("RUSTPYTHONPATH").is_none() {
-        settings
-            .path_list
-            .push(concat!(env!("CARGO_MANIFEST_DIR"), "/Lib").to_owned());
+    } else {
+        #[cfg(all(feature = "pylib", not(feature = "freeze-stdlib")))]
+        settings.path_list.push(pylib::LIB_PATH.to_owned());
     }
 
     if !ignore_environment {
@@ -232,6 +250,7 @@ fn create_settings(matches: &ArgMatches) -> PySettings {
     settings.no_site = matches.is_present("no-site");
 
     if matches.is_present("no-user-site")
+        || matches.is_present("isolate")
         || (!ignore_environment && env::var_os("PYTHONNOUSERSITE").is_some())
     {
         settings.no_user_site = true;
@@ -382,7 +401,7 @@ fn _run_string(vm: &VirtualMachine, scope: Scope, source: &str, source_path: Str
     // trace!("Code object: {:?}", code_obj.borrow());
     scope
         .globals
-        .set_item("__file__", vm.new_str(source_path), vm)?;
+        .set_item("__file__", vm.ctx.new_str(source_path), vm)?;
     vm.run_code_obj(code_obj, scope)
 }
 
@@ -396,7 +415,7 @@ fn run_module(vm: &VirtualMachine, module: &str) -> PyResult<()> {
     debug!("Running module {}", module);
     let runpy = vm.import("runpy", &[], 0)?;
     let run_module_as_main = vm.get_attribute(runpy, "_run_module_as_main")?;
-    vm.invoke(&run_module_as_main, vec![vm.new_str(module.to_owned())])?;
+    vm.invoke(&run_module_as_main, vec![vm.ctx.new_str(module)])?;
     Ok(())
 }
 
@@ -427,7 +446,11 @@ fn run_script(vm: &VirtualMachine, scope: Scope, script_file: &str) -> PyResult<
 
     let dir = file_path.parent().unwrap().to_str().unwrap().to_owned();
     let sys_path = vm.get_attribute(vm.sys_module.clone(), "path").unwrap();
-    vm.call_method(&sys_path, "insert", vec![vm.new_int(0), vm.new_str(dir)])?;
+    vm.call_method(
+        &sys_path,
+        "insert",
+        vec![vm.ctx.new_int(0), vm.ctx.new_str(dir)],
+    )?;
 
     match util::read_file(&file_path) {
         Ok(source) => {

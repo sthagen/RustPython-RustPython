@@ -1,13 +1,13 @@
 /// Implementation of the _thread module
-use crate::exceptions;
+use crate::exceptions::{self, IntoPyException};
 use crate::function::{Args, KwArgs, OptionalArg, PyFuncArgs};
 use crate::obj::objdict::PyDictRef;
 use crate::obj::objstr::PyStringRef;
 use crate::obj::objtuple::PyTupleRef;
 use crate::obj::objtype::PyClassRef;
 use crate::pyobject::{
-    Either, IdProtocol, ItemProtocol, PyCallable, PyClassImpl, PyObjectRef, PyRef, PyResult,
-    PyValue, TypeProtocol,
+    BorrowValue, Either, IdProtocol, ItemProtocol, PyCallable, PyClassImpl, PyObjectRef, PyRef,
+    PyResult, PyValue, TypeProtocol,
 };
 use crate::vm::VirtualMachine;
 
@@ -229,7 +229,7 @@ fn thread_start_new_thread(
     }
     let res = thread_builder.spawn(move || {
         let vm = &thread_vm;
-        let args = Args::from(args.as_slice().to_owned());
+        let args = Args::from(args.borrow_value().to_owned());
         let kwargs = KwArgs::from(kwargs.map_or_else(Default::default, |k| k.to_attributes()));
         if let Err(exc) = func.invoke(PyFuncArgs::from((args, kwargs)), vm) {
             // TODO: sys.unraisablehook
@@ -238,7 +238,7 @@ fn thread_start_new_thread(
             let repr = vm.to_repr(&func.into_object()).ok();
             let repr = repr
                 .as_ref()
-                .map_or("<object repr() failed>", |s| s.as_str());
+                .map_or("<object repr() failed>", |s| s.borrow_value());
             writeln!(stderr, "Exception ignored in thread started by: {}", repr)
                 .and_then(|()| exceptions::write_exception(&mut stderr, vm, &exc))
                 .ok();
@@ -256,7 +256,7 @@ fn thread_start_new_thread(
         vm.state.thread_count.fetch_add(1);
         thread_to_id(&handle.thread())
     })
-    .map_err(|err| super::os::convert_io_error(vm, err))
+    .map_err(|err| err.into_pyexception(vm))
 }
 
 thread_local!(static SENTINELS: RefCell<Vec<PyLockRef>> = RefCell::default());
@@ -306,7 +306,7 @@ impl PyLocal {
     #[pymethod(magic)]
     fn getattribute(zelf: PyRef<Self>, attr: PyStringRef, vm: &VirtualMachine) -> PyResult {
         let ldict = zelf.ldict(vm);
-        if attr.as_str() == "__dict__" {
+        if attr.borrow_value() == "__dict__" {
             Ok(ldict.into_object())
         } else {
             let zelf = zelf.into_object();
@@ -324,26 +324,26 @@ impl PyLocal {
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        if attr.as_str() == "__dict__" {
+        if attr.borrow_value() == "__dict__" {
             Err(vm.new_attribute_error(format!(
                 "{} attribute '__dict__' is read-only",
                 zelf.as_object()
             )))
         } else {
-            zelf.ldict(vm).set_item(attr.as_object(), value, vm)?;
+            zelf.ldict(vm).set_item(attr.into_object(), value, vm)?;
             Ok(())
         }
     }
 
     #[pymethod(magic)]
     fn delattr(zelf: PyRef<Self>, attr: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
-        if attr.as_str() == "__dict__" {
+        if attr.borrow_value() == "__dict__" {
             Err(vm.new_attribute_error(format!(
                 "{} attribute '__dict__' is read-only",
                 zelf.as_object()
             )))
         } else {
-            zelf.ldict(vm).del_item(attr.as_object(), vm)?;
+            zelf.ldict(vm).del_item(attr.into_object(), vm)?;
             Ok(())
         }
     }
