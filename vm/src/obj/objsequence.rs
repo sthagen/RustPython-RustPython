@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use num_bigint::{BigInt, ToBigInt};
+use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 
 use super::objint::{PyInt, PyIntRef};
@@ -11,6 +11,238 @@ use super::objtuple::PyTuple;
 use crate::function::OptionalArg;
 use crate::pyobject::{BorrowValue, PyObject, PyObjectRef, PyResult, TryFromObject, TypeProtocol};
 use crate::vm::VirtualMachine;
+
+pub trait PySliceableSequenceMut {
+    type Item: Clone;
+    // as CPython, length of range and items could be different, function must act like Vec::splice()
+    fn do_set_range(&mut self, range: Range<usize>, items: &[Self::Item]);
+    fn do_replace_indexes<I>(&mut self, indexes: I, items: &[Self::Item])
+    where
+        I: Iterator<Item = usize>;
+    fn do_delete_range(&mut self, range: Range<usize>);
+    fn do_delete_indexes<I>(&mut self, range: Range<usize>, indexes: I)
+    where
+        I: Iterator<Item = usize>;
+    fn as_slice(&self) -> &[Self::Item];
+
+    fn set_slice_items(
+        &mut self,
+        vm: &VirtualMachine,
+        slice: &PySlice,
+        items: &[Self::Item],
+    ) -> PyResult<()> {
+        let start = slice.start_index(vm)?;
+        let stop = slice.stop_index(vm)?;
+        let step = slice.step_index(vm)?.unwrap_or_else(BigInt::one);
+
+        if step.is_zero() {
+            return Err(vm.new_value_error("slice step cannot be zero".to_owned()));
+        }
+        if step == BigInt::one() {
+            let range = self.as_slice().get_slice_range(&start, &stop);
+            let range = if range.end < range.start {
+                range.start..range.start
+            } else {
+                range
+            };
+            self.do_set_range(range, items);
+            return Ok(());
+        }
+
+        let (start, stop, step, is_negative_step) = if step.is_negative() {
+            (
+                stop.map(|x| {
+                    if x == -BigInt::one() {
+                        self.as_slice().len() + BigInt::one()
+                    } else {
+                        x + 1
+                    }
+                }),
+                start.map(|x| {
+                    if x == -BigInt::one() {
+                        BigInt::from(self.as_slice().len())
+                    } else {
+                        x + 1
+                    }
+                }),
+                -step,
+                true,
+            )
+        } else {
+            (start, stop, step, false)
+        };
+
+        let range = self.as_slice().get_slice_range(&start, &stop);
+        let range = if range.end < range.start {
+            range.start..range.start
+        } else {
+            range
+        };
+
+        // step is not negative here
+        if let Some(step) = step.to_usize() {
+            let slicelen = if range.end > range.start {
+                (range.end - range.start - 1) / step + 1
+            } else {
+                0
+            };
+
+            if slicelen == items.len() {
+                let indexes = if is_negative_step {
+                    itertools::Either::Left(range.rev().step_by(step))
+                } else {
+                    itertools::Either::Right(range.step_by(step))
+                };
+                self.do_replace_indexes(indexes, items);
+                Ok(())
+            } else {
+                Err(vm.new_value_error(format!(
+                    "attempt to assign sequence of size {} to extended slice of size {}",
+                    items.len(),
+                    slicelen
+                )))
+            }
+        } else {
+            // edge case, step is too big for usize
+            // same behaviour as CPython
+            let slicelen = if range.start < range.end { 1 } else { 0 };
+            if match items.len() {
+                0 => slicelen == 0,
+                1 => {
+                    self.do_set_range(
+                        if is_negative_step {
+                            (range.end - 1)..range.end
+                        } else {
+                            range.start..(range.start + 1)
+                        },
+                        items,
+                    );
+                    true
+                }
+                _ => false,
+            } {
+                Ok(())
+            } else {
+                Err(vm.new_value_error(format!(
+                    "attempt to assign sequence of size {} to extended slice of size {}",
+                    items.len(),
+                    slicelen
+                )))
+            }
+        }
+    }
+
+    fn delete_slice(&mut self, vm: &VirtualMachine, slice: &PySlice) -> PyResult<()> {
+        let start = slice.start_index(vm)?;
+        let stop = slice.stop_index(vm)?;
+        let step = slice.step_index(vm)?.unwrap_or_else(BigInt::one);
+
+        if step.is_zero() {
+            return Err(vm.new_value_error("slice step cannot be zero".to_owned()));
+        }
+
+        if step == BigInt::one() {
+            let range = self.as_slice().get_slice_range(&start, &stop);
+            if range.start < range.end {
+                self.do_delete_range(range);
+            }
+            return Ok(());
+        }
+
+        let (start, stop, step, is_negative_step) = if step.is_negative() {
+            (
+                stop.map(|x| {
+                    if x == -BigInt::one() {
+                        self.as_slice().len() + BigInt::one()
+                    } else {
+                        x + 1
+                    }
+                }),
+                start.map(|x| {
+                    if x == -BigInt::one() {
+                        BigInt::from(self.as_slice().len())
+                    } else {
+                        x + 1
+                    }
+                }),
+                -step,
+                true,
+            )
+        } else {
+            (start, stop, step, false)
+        };
+
+        let range = self.as_slice().get_slice_range(&start, &stop);
+        if range.start >= range.end {
+            return Ok(());
+        }
+
+        // step is not negative here
+        if let Some(step) = step.to_usize() {
+            let indexes = if is_negative_step {
+                itertools::Either::Left(range.clone().rev().step_by(step).rev())
+            } else {
+                itertools::Either::Right(range.clone().step_by(step))
+            };
+
+            self.do_delete_indexes(range, indexes);
+        } else {
+            // edge case, step is too big for usize
+            // same behaviour as CPython
+            self.do_delete_range(if is_negative_step {
+                (range.end - 1)..range.end
+            } else {
+                range.start..(range.start + 1)
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<T: Clone> PySliceableSequenceMut for Vec<T> {
+    type Item = T;
+
+    fn as_slice(&self) -> &[Self::Item] {
+        self.as_slice()
+    }
+
+    fn do_set_range(&mut self, range: Range<usize>, items: &[Self::Item]) {
+        self.splice(range, items.to_vec());
+    }
+
+    fn do_replace_indexes<I>(&mut self, indexes: I, items: &[Self::Item])
+    where
+        I: Iterator<Item = usize>,
+    {
+        for (i, item) in indexes.zip(items) {
+            self[i] = item.clone();
+        }
+    }
+
+    fn do_delete_range(&mut self, range: Range<usize>) {
+        self.drain(range);
+    }
+
+    fn do_delete_indexes<I>(&mut self, range: Range<usize>, indexes: I)
+    where
+        I: Iterator<Item = usize>,
+    {
+        let mut indexes = indexes.peekable();
+        let mut deleted = 0;
+
+        // passing whole range, swap or overlap
+        for i in range.clone() {
+            if indexes.peek() == Some(&i) {
+                indexes.next();
+                deleted += 1;
+            } else {
+                self.swap(i - deleted, i);
+            }
+        }
+        // then drain (the values to delete should now be contiguous at the end of the range)
+        self.drain((range.end - deleted)..range.end);
+    }
+}
 
 pub trait PySliceableSequence {
     type Sliced;
@@ -63,16 +295,16 @@ pub trait PySliceableSequence {
         } else {
             // calculate the range for the reverse slice, first the bounds needs to be made
             // exclusive around stop, the lower number
-            let start = start.as_ref().map(|x| {
-                if *x == (-1).to_bigint().unwrap() {
-                    self.len() + BigInt::one() //.to_bigint().unwrap()
+            let start = start.map(|x| {
+                if x == -BigInt::one() {
+                    self.len() + BigInt::one()
                 } else {
                     x + 1
                 }
             });
-            let stop = stop.as_ref().map(|x| {
-                if *x == (-1).to_bigint().unwrap() {
-                    self.len().to_bigint().unwrap()
+            let stop = stop.map(|x| {
+                if x == -BigInt::one() {
+                    BigInt::from(self.len())
                 } else {
                     x + 1
                 }
@@ -219,43 +451,36 @@ pub fn get_item(
     subscript: PyObjectRef,
 ) -> PyResult {
     if let Some(i) = subscript.payload::<PyInt>() {
-        return match i.borrow_value().to_isize() {
-            Some(value) => {
-                if let Some(pos_index) = get_pos(value, elements.len()) {
-                    let obj = elements[pos_index].clone();
-                    Ok(obj)
-                } else {
-                    Err(vm.new_index_error("Index out of bounds!".to_owned()))
-                }
-            }
-            None => {
-                Err(vm.new_index_error("cannot fit 'int' into an index-sized integer".to_owned()))
-            }
-        };
+        let value = i.borrow_value().to_isize().ok_or_else(|| {
+            vm.new_index_error("cannot fit 'int' into an index-sized integer".to_owned())
+        })?;
+        let pos_index = get_pos(value, elements.len())
+            .ok_or_else(|| vm.new_index_error("Index out of bounds!".to_owned()))?;
+        return Ok(elements[pos_index].clone());
     }
 
-    if let Some(slice) = subscript.payload::<PySlice>() {
-        if sequence.payload::<PyList>().is_some() {
-            Ok(PyObject::new(
-                PyList::from(elements.get_slice_items(vm, slice)?),
-                sequence.class(),
-                None,
-            ))
-        } else if sequence.payload::<PyTuple>().is_some() {
-            Ok(PyObject::new(
-                PyTuple::from(elements.get_slice_items(vm, slice)?),
-                sequence.class(),
-                None,
-            ))
-        } else {
-            panic!("sequence get_item called for non-sequence")
-        }
-    } else {
-        Err(vm.new_type_error(format!(
+    let slice = subscript.payload::<PySlice>().ok_or_else(|| {
+        vm.new_type_error(format!(
             "{} indices must be integers or slices",
             sequence.lease_class().name
-        )))
-    }
+        ))
+    })?;
+    let items = if sequence.payload::<PyList>().is_some() {
+        PyObject::new(
+            PyList::from(elements.get_slice_items(vm, slice)?),
+            sequence.class(),
+            None,
+        )
+    } else if sequence.payload::<PyTuple>().is_some() {
+        PyObject::new(
+            PyTuple::from(elements.get_slice_items(vm, slice)?),
+            sequence.class(),
+            None,
+        )
+    } else {
+        panic!("sequence get_item called for non-sequence")
+    };
+    Ok(items)
 }
 
 //Check if given arg could be used with PySliceableSequence.get_slice_range()
@@ -291,13 +516,9 @@ pub fn opt_len(obj: &PyObjectRef, vm: &VirtualMachine) -> Option<PyResult<usize>
         if len.is_negative() {
             return Err(vm.new_value_error("__len__() should return >= 0".to_owned()));
         }
-        let len = if let Some(len) = len.to_isize() {
-            len
-        } else {
-            return Err(
-                vm.new_overflow_error("cannot fit 'int' into an index-sized integer".to_owned())
-            );
-        };
+        let len = len.to_isize().ok_or_else(|| {
+            vm.new_overflow_error("cannot fit 'int' into an index-sized integer".to_owned())
+        })?;
         Ok(len as usize)
     })
 }

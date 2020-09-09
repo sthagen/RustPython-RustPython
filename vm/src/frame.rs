@@ -87,7 +87,7 @@ struct FrameState {
     blocks: Vec<Block>,
 }
 
-#[pyclass]
+#[pyclass(module = false, name = "frame")]
 pub struct Frame {
     pub code: PyCodeRef,
     pub scope: Scope,
@@ -100,7 +100,7 @@ pub struct Frame {
 
 impl PyValue for Frame {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.frame_type()
+        vm.ctx.types.frame_type.clone()
     }
 }
 
@@ -453,7 +453,7 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::YieldValue => {
                 let value = self.pop_value();
                 let value = if self.code.flags.contains(bytecode::CodeFlags::IS_COROUTINE) {
-                    PyAsyncGenWrappedValue(value).into_ref(vm).into_object()
+                    PyAsyncGenWrappedValue(value).into_object(vm)
                 } else {
                     value
                 };
@@ -925,13 +925,8 @@ impl ExecutingFrame<'_> {
             bytecode::NameScope::Free => self.scope.load_name(&vm, name),
         };
 
-        let value = match optional_value {
-            Some(value) => value,
-            None => {
-                return Err(vm.new_name_error(format!("name '{}' is not defined", name)));
-            }
-        };
-
+        let value = optional_value
+            .ok_or_else(|| vm.new_name_error(format!("name '{}' is not defined", name)))?;
         self.push_value(value);
         Ok(None)
     }
@@ -1070,26 +1065,23 @@ impl ExecutingFrame<'_> {
                 PyFuncArgs::new(args, kwarg_names)
             }
             bytecode::CallType::Ex(has_kwargs) => {
-                let kwargs = if *has_kwargs {
-                    let kw_dict: PyDictRef = match self.pop_value().downcast() {
-                        Err(_) => {
+                let kwargs =
+                    if *has_kwargs {
+                        let kw_dict: PyDictRef = self.pop_value().downcast().map_err(|_| {
                             // TODO: check collections.abc.Mapping
-                            return Err(vm.new_type_error("Kwargs must be a dict.".to_owned()));
-                        }
-                        Ok(x) => x,
-                    };
-                    let mut kwargs = IndexMap::new();
-                    for (key, value) in kw_dict.into_iter() {
-                        if let Some(key) = key.payload_if_subclass::<objstr::PyString>(vm) {
+                            vm.new_type_error("Kwargs must be a dict.".to_owned())
+                        })?;
+                        let mut kwargs = IndexMap::new();
+                        for (key, value) in kw_dict.into_iter() {
+                            let key = key.payload_if_subclass::<objstr::PyString>(vm).ok_or_else(
+                                || vm.new_type_error("keywords must be strings".to_owned()),
+                            )?;
                             kwargs.insert(key.borrow_value().to_owned(), value);
-                        } else {
-                            return Err(vm.new_type_error("keywords must be strings".to_owned()));
                         }
-                    }
-                    kwargs
-                } else {
-                    IndexMap::new()
-                };
+                        kwargs
+                    } else {
+                        IndexMap::new()
+                    };
                 let args = self.pop_value();
                 let args = vm.extract_elements(&args)?;
                 PyFuncArgs { args, kwargs }
@@ -1107,26 +1099,21 @@ impl ExecutingFrame<'_> {
         let cause = match argc {
             2 => {
                 let val = self.pop_value();
-                if vm.is_none(&val) {
+                Some(if vm.is_none(&val) {
                     // if the cause arg is none, we clear the cause
-                    Some(None)
+                    None
                 } else {
                     // if the cause arg is an exception, we overwrite it
-                    Some(Some(
-                        ExceptionCtor::try_from_object(vm, val)?.instantiate(vm)?,
-                    ))
-                }
+                    Some(ExceptionCtor::try_from_object(vm, val)?.instantiate(vm)?)
+                })
             }
             // if there's no cause arg, we keep the cause as is
             _ => None,
         };
         let exception = match argc {
-            0 => match vm.current_exception() {
-                Some(exc) => exc,
-                None => {
-                    return Err(vm.new_runtime_error("No active exception to reraise".to_owned()))
-                }
-            },
+            0 => vm
+                .current_exception()
+                .ok_or_else(|| vm.new_runtime_error("No active exception to reraise".to_owned()))?,
             1 | 2 => ExceptionCtor::try_from_object(vm, self.pop_value())?.instantiate(vm)?,
             3 => panic!("Not implemented!"),
             _ => panic!("Invalid parameter for RAISE_VARARGS, must be between 0 to 3"),
@@ -1394,7 +1381,7 @@ impl ExecutingFrame<'_> {
         needle: PyObjectRef,
         haystack: PyObjectRef,
     ) -> PyResult<bool> {
-        let found = vm._membership(haystack.clone(), needle)?;
+        let found = vm._membership(haystack, needle)?;
         Ok(objbool::boolval(vm, found)?)
     }
 
@@ -1404,7 +1391,7 @@ impl ExecutingFrame<'_> {
         needle: PyObjectRef,
         haystack: PyObjectRef,
     ) -> PyResult<bool> {
-        let found = vm._membership(haystack.clone(), needle)?;
+        let found = vm._membership(haystack, needle)?;
         Ok(!objbool::boolval(vm, found)?)
     }
 
@@ -1529,7 +1516,7 @@ impl fmt::Debug for Frame {
             .stack
             .iter()
             .map(|elem| {
-                if elem.payload.as_any().is::<Frame>() {
+                if elem.payload_is::<Frame>() {
                     "\n  > {frame}".to_owned()
                 } else {
                     format!("\n  > {:?}", elem)

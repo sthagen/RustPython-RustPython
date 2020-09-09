@@ -1,20 +1,30 @@
-use crate::function::{FunctionBox, OptionalArg, PyFuncArgs, PyNativeFunc};
+use crate::common::cell::PyRwLock;
+use crate::function::{OptionalArg, PyFuncArgs, PyNativeFunc};
 use crate::pyobject::{IdProtocol, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject};
 use crate::VirtualMachine;
 
 bitflags! {
     pub struct PyTpFlags: u64 {
+        const HEAPTYPE = 1 << 9;
         const BASETYPE = 1 << 10;
         const HAS_DICT = 1 << 40;
+
+        #[cfg(debug_assertions)]
+        const _CREATED_WITH_FLAGS = 1 << 63;
     }
 }
 
 impl PyTpFlags {
     // CPython default: Py_TPFLAGS_HAVE_STACKLESS_EXTENSION | Py_TPFLAGS_HAVE_VERSION_TAG
-    pub const DEFAULT: Self = Self::from_bits_truncate(0);
+    pub const DEFAULT: Self = Self::HEAPTYPE;
 
     pub fn has_feature(self, flag: Self) -> bool {
         self.contains(flag)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn is_created_with_flags(self) -> bool {
+        self.contains(Self::_CREATED_WITH_FLAGS)
     }
 }
 
@@ -27,9 +37,19 @@ impl Default for PyTpFlags {
 #[derive(Default)]
 pub struct PyClassSlots {
     pub flags: PyTpFlags,
+    pub name: PyRwLock<Option<String>>, // tp_name, not class name
     pub new: Option<PyNativeFunc>,
     pub call: Option<PyNativeFunc>,
     pub descr_get: Option<PyDescrGetFunc>,
+}
+
+impl PyClassSlots {
+    pub fn from_flags(flags: PyTpFlags) -> Self {
+        Self {
+            flags,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::fmt::Debug for PyClassSlots {
@@ -45,7 +65,7 @@ pub trait SlotCall: PyValue {
     fn call(&self, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult;
 }
 
-pub type PyDescrGetFunc = FunctionBox<
+pub type PyDescrGetFunc = Box<
     dyn Fn(&VirtualMachine, PyObjectRef, Option<PyObjectRef>, OptionalArg<PyObjectRef>) -> PyResult
         + Send
         + Sync,

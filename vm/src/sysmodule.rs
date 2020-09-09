@@ -5,7 +5,9 @@ use crate::frame::FrameRef;
 use crate::function::{Args, OptionalArg, PyFuncArgs};
 use crate::obj::objstr::PyStringRef;
 use crate::obj::objtype::PyClassRef;
-use crate::pyobject::{IntoPyObject, ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyResult};
+use crate::pyobject::{
+    IntoPyObject, ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyResult, PyStructSequence,
+};
 use crate::vm::{PySettings, VirtualMachine};
 use crate::{builtins, exceptions, py_io, version};
 use rustpython_common::hash::{PyHash, PyUHash};
@@ -69,8 +71,8 @@ fn getframe(offset: OptionalArg<usize>, vm: &VirtualMachine) -> PyResult<FrameRe
 /// sys.flags
 ///
 /// Flags provided through command line arguments or environment vars.
-#[pystruct_sequence(name = "flags", module = "sys")]
-#[derive(Default, Debug)]
+#[pyclass(name = "flags", module = "sys")]
+#[derive(Default, Debug, PyStructSequence)]
 struct SysFlags {
     /// -d
     debug: u8,
@@ -104,6 +106,7 @@ struct SysFlags {
     utf8_mode: u8,
 }
 
+#[pyimpl(with(PyStructSequence))]
 impl SysFlags {
     fn from_settings(settings: &PySettings) -> Self {
         // Start with sensible defaults:
@@ -118,6 +121,11 @@ impl SysFlags {
         flags.quiet = settings.quiet as u8;
         flags.dont_write_bytecode = settings.dont_write_bytecode as u8;
         flags
+    }
+
+    #[pyslot]
+    fn tp_new(_cls: PyClassRef, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+        Err(vm.new_type_error("cannot create 'sys.flags' instances".to_owned()))
     }
 }
 
@@ -243,8 +251,8 @@ fn sys_displayhook(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
     Ok(())
 }
 
-#[pystruct_sequence(module = "sys", name = "getwindowsversion")]
-#[derive(Default, Debug)]
+#[pyclass(module = "sys", name = "getwindowsversion")]
+#[derive(Default, Debug, PyStructSequence)]
 #[cfg(windows)]
 struct WindowsVersion {
     major: u32,
@@ -258,6 +266,9 @@ struct WindowsVersion {
     product_type: u8,
     platform_version: (u32, u32, u32),
 }
+#[cfg(windows)]
+#[pyimpl(with(PyStructSequence))]
+impl WindowsVersion {}
 
 #[cfg(windows)]
 fn sys_getwindowsversion(vm: &VirtualMachine) -> PyResult<crate::obj::objtuple::PyTupleRef> {
@@ -289,11 +300,8 @@ fn sys_getwindowsversion(vm: &VirtualMachine) -> PyResult<crate::obj::objtuple::
                 .last()
                 .unwrap_or((0, &0));
             let sp = OsString::from_wide(&version.szCSDVersion[..last]);
-            if let Ok(string) = sp.into_string() {
-                string
-            } else {
-                return Err(vm.new_os_error("service pack is not ASCII".to_owned()));
-            }
+            sp.into_string()
+                .map_err(|_| vm.new_os_error("service pack is not ASCII".to_owned()))?
         };
         WindowsVersion {
             major: version.dwMajorVersion,
@@ -361,7 +369,8 @@ pub fn sysconfigdata_name() -> String {
     format!("_sysconfigdata_{}_{}_{}", ABIFLAGS, PLATFORM, MULTIARCH)
 }
 
-#[pystruct_sequence(module = "sys", name = "hash_info")]
+#[pyclass(module = "sys", name = "hash_info")]
+#[derive(PyStructSequence)]
 struct PyHashInfo {
     width: usize,
     modulus: PyUHash,
@@ -373,6 +382,7 @@ struct PyHashInfo {
     seed_bits: usize,
     cutoff: usize,
 }
+#[pyimpl(with(PyStructSequence))]
 impl PyHashInfo {
     const INFO: Self = {
         use rustpython_common::hash::*;
@@ -390,7 +400,8 @@ impl PyHashInfo {
     };
 }
 
-#[pystruct_sequence(module = "sys", name = "float_info")]
+#[pyclass(module = "sys", name = "float_info")]
+#[derive(PyStructSequence)]
 struct PyFloatInfo {
     max: f64,
     max_exp: i32,
@@ -404,6 +415,7 @@ struct PyFloatInfo {
     radix: u32,
     rounds: i32,
 }
+#[pyimpl(with(PyStructSequence))]
 impl PyFloatInfo {
     const INFO: Self = PyFloatInfo {
         max: f64::MAX,
@@ -420,11 +432,13 @@ impl PyFloatInfo {
     };
 }
 
-#[pystruct_sequence(module = "sys", name = "int_info")]
+#[pyclass(module = "sys", name = "int_info")]
+#[derive(PyStructSequence)]
 struct PyIntInfo {
     bits_per_digit: usize,
     sizeof_digit: usize,
 }
+#[pyimpl(with(PyStructSequence))]
 impl PyIntInfo {
     const INFO: Self = PyIntInfo {
         bits_per_digit: 30, //?
@@ -436,21 +450,11 @@ pub fn make_module(vm: &VirtualMachine, module: PyObjectRef, builtins: PyObjectR
     let ctx = &vm.ctx;
 
     let flags_type = SysFlags::make_class(ctx);
-    extend_class!(ctx, flags_type, {
-      (slot new) => |_cls: PyClassRef, _args: PyFuncArgs, vm: &VirtualMachine| -> PyResult {
-        Err(vm.new_type_error("cannot create 'sys.flags' instances".to_owned()))
-      },
-    });
     let flags = SysFlags::from_settings(&vm.state.settings)
         .into_struct_sequence(vm, flags_type)
         .unwrap();
 
     let version_info_type = version::VersionInfo::make_class(ctx);
-    extend_class!(ctx, version_info_type, {
-      (slot new) => |_cls: PyClassRef, _args: PyFuncArgs, vm: &VirtualMachine| -> PyResult {
-        Err(vm.new_type_error("cannot create 'sys.version_info' instances".to_owned()))
-      },
-    });
     let version_info = version::VersionInfo::VERSION
         .into_struct_sequence(vm, version_info_type)
         .unwrap();
@@ -655,6 +659,6 @@ settrace() -- set the global debug tracing function
         })
     }
 
-    modules.set_item("sys", module.clone(), vm).unwrap();
-    modules.set_item("builtins", builtins.clone(), vm).unwrap();
+    modules.set_item("sys", module, vm).unwrap();
+    modules.set_item("builtins", builtins, vm).unwrap();
 }

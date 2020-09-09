@@ -165,8 +165,6 @@ class BaseBytesTest:
         self.assertEqual(self.type2test(b'0'), b'0')
         self.assertRaises(OverflowError, self.type2test, sys.maxsize + 1)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_constructor_type_errors(self):
         self.assertRaises(TypeError, self.type2test, 0.0)
         class C:
@@ -302,8 +300,6 @@ class BaseBytesTest:
                 for step in indices[1:]:
                     self.assertEqual(b[start:stop:step], self.type2test(L[start:stop:step]))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_encoding(self):
         sample = "Hello world\n\u1234\u5678\u9abc"
         for enc in ("utf-8", "utf-16"):
@@ -313,8 +309,6 @@ class BaseBytesTest:
         b = self.type2test(sample, "latin-1", "ignore")
         self.assertEqual(b, self.type2test(sample[:-3], "utf-8"))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_decode(self):
         sample = "Hello world\n\u1234\u5678\u9abc"
         for enc in ("utf-8", "utf-16"):
@@ -1356,8 +1350,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         del b[:1]
         self.assertLessEqual(sys.getsizeof(b), size)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_extended_set_del_slice(self):
         indices = (0, None, 1, 3, 19, 300, 1<<333, sys.maxsize,
             -1, -2, -31, -300)

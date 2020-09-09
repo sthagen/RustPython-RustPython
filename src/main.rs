@@ -36,6 +36,19 @@ fn main() {
         settings.initialization_parameter = InitParameter::InitializeInternal;
     }
 
+    // don't translate newlines (\r\n <=> \n)
+    #[cfg(windows)]
+    {
+        extern "C" {
+            fn _setmode(fd: i32, flags: i32) -> i32;
+        }
+        unsafe {
+            _setmode(0, libc::O_BINARY);
+            _setmode(1, libc::O_BINARY);
+            _setmode(2, libc::O_BINARY);
+        }
+    }
+
     let vm = VirtualMachine::new(settings);
 
     let res = run_rustpython(&vm, &matches);
@@ -198,7 +211,7 @@ fn parse_arguments<'a>(app: App<'a, '_>) -> ArgMatches<'a> {
 fn create_settings(matches: &ArgMatches) -> PySettings {
     let ignore_environment =
         matches.is_present("ignore-environment") || matches.is_present("isolate");
-    let mut settings: PySettings = Default::default();
+    let mut settings = PySettings::default();
     settings.ignore_environment = ignore_environment;
 
     // add the current directory to sys.path
@@ -279,6 +292,16 @@ fn create_settings(matches: &ArgMatches) -> PySettings {
     } else {
         vec!["".to_owned()]
     };
+
+    let hash_seed = match env::var("PYTHONHASHSEED") {
+        Ok(s) if s == "random" => Some(None),
+        Ok(s) => s.parse::<u32>().ok().map(Some),
+        Err(_) => Some(None),
+    };
+    settings.hash_seed = hash_seed.unwrap_or_else(|| {
+        error!("Fatal Python init error: PYTHONHASHSEED must be \"random\" or an integer in range [0; 4294967295]");
+        process::exit(1)
+    });
 
     settings.argv = argv;
 

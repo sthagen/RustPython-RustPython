@@ -7,11 +7,10 @@ use crate::obj::objtuple::{PyTuple, PyTupleRef};
 use crate::obj::objtype::{self, PyClass, PyClassRef};
 use crate::py_io::{self, Write};
 use crate::pyobject::{
-    BorrowValue, PyClassImpl, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol,
+    BorrowValue, PyClassDef, PyClassImpl, PyContext, PyIterable, PyObjectRef, PyRef, PyResult,
+    PyValue, TryFromObject, TypeProtocol,
 };
-use crate::slots::PyTpFlags;
-use crate::types::create_type;
+use crate::types::create_type_with_slots;
 use crate::VirtualMachine;
 use crate::{py_serde, sysmodule};
 
@@ -22,7 +21,7 @@ use std::io::{self, BufRead, BufReader};
 
 use crossbeam_utils::atomic::AtomicCell;
 
-#[pyclass]
+#[pyclass(module = false, name = "BaseException")]
 pub struct PyBaseException {
     traceback: PyRwLock<Option<PyTracebackRef>>,
     cause: PyRwLock<Option<PyBaseExceptionRef>>,
@@ -448,6 +447,9 @@ pub struct ExceptionZoo {
     pub unicode_encode_error: PyClassRef,
     pub unicode_translate_error: PyClassRef,
 
+    #[cfg(feature = "jit")]
+    pub jit_error: PyClassRef,
+
     pub warning: PyClassRef,
     pub deprecation_warning: PyClassRef,
     pub pending_deprecation_warning: PyClassRef,
@@ -464,12 +466,10 @@ pub struct ExceptionZoo {
 impl ExceptionZoo {
     pub fn new(type_type: &PyClassRef, object_type: &PyClassRef) -> Self {
         let create_exception_type = |name: &str, base: &PyClassRef| {
-            let typ = create_type(name, type_type, base);
-            typ.slots.write().flags |= PyTpFlags::BASETYPE | PyTpFlags::HAS_DICT;
-            typ
+            create_type_with_slots(name, type_type, base.clone(), PyBaseException::make_slots())
         };
         // Sorted By Hierarchy then alphabetized.
-        let base_exception_type = create_exception_type("BaseException", &object_type);
+        let base_exception_type = create_exception_type(PyBaseExceptionRef::NAME, &object_type);
         let system_exit = create_exception_type("SystemExit", &base_exception_type);
         let keyboard_interrupt = create_exception_type("KeyboardInterrupt", &base_exception_type);
         let generator_exit = create_exception_type("GeneratorExit", &base_exception_type);
@@ -531,6 +531,9 @@ impl ExceptionZoo {
         let unicode_encode_error = create_exception_type("UnicodeEncodeError", &unicode_error);
         let unicode_translate_error =
             create_exception_type("UnicodeTranslateError", &unicode_error);
+
+        #[cfg(feature = "jit")]
+        let jit_error = create_exception_type("JitError", &exception_type);
 
         let warning = create_exception_type("Warning", &exception_type);
         let deprecation_warning = create_exception_type("DeprecationWarning", &warning);
@@ -600,6 +603,9 @@ impl ExceptionZoo {
             unicode_decode_error,
             unicode_encode_error,
             unicode_translate_error,
+
+            #[cfg(feature = "jit")]
+            jit_error,
 
             warning,
             deprecation_warning,

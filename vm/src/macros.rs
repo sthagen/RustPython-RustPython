@@ -34,32 +34,38 @@ macro_rules! extend_module {
 #[macro_export]
 macro_rules! py_class {
     ( $ctx:expr, $class_name:expr, $class_base:expr, { $($name:tt => $value:expr),* $(,)* }) => {
+        py_class!($ctx, $class_name, $class_base, $crate::slots::PyTpFlags::BASETYPE, { $($name => $value),* })
+    };
+    ( $ctx:expr, $class_name:expr, $class_base:expr, $flags:expr, { $($name:tt => $value:expr),* $(,)* }) => {
         {
-            let py_class = $ctx.new_class($class_name, $class_base);
-            // FIXME: setting flag here probably wrong
-            py_class.slots.write().flags |= $crate::slots::PyTpFlags::BASETYPE;
-            $crate::extend_class!($ctx, &py_class, { $($name => $value),* });
+            #[allow(unused_mut)]
+            let mut slots = $crate::slots::PyClassSlots::from_flags($crate::slots::PyTpFlags::DEFAULT | $flags);
+            $($crate::py_class!(@extract_slots($ctx, &mut slots, $name, $value));)*
+            let py_class = $ctx.new_class($class_name, $class_base.clone(), slots);
+            $($crate::py_class!(@extract_attrs($ctx, &py_class, $name, $value));)*
+            $ctx.add_tp_new_wrapper(&py_class);
             py_class
         }
-    }
+    };
+    (@extract_slots($ctx:expr, $slots:expr, (slot $slot_name:ident), $value:expr)) => {
+        $slots.$slot_name = Some(
+            $crate::function::IntoPyNativeFunc::into_func($value)
+        );
+    };
+    (@extract_slots($ctx:expr, $class:expr, $name:expr, $value:expr)) => {};
+    (@extract_attrs($ctx:expr, $slots:expr, (slot $slot_name:ident), $value:expr)) => {};
+    (@extract_attrs($ctx:expr, $class:expr, $name:expr, $value:expr)) => {
+        $class.set_str_attr($name, $value);
+    };
 }
 
 #[macro_export]
 macro_rules! extend_class {
-    ( $ctx:expr, $class:expr, { $($name:tt => $value:expr),* $(,)* }) => {
+    ( $ctx:expr, $class:expr, { $($name:expr => $value:expr),* $(,)* }) => {
         $(
-            $crate::extend_class!(@set_attr($ctx, $class, $name, $value));
+            $class.set_str_attr($name, $value);
         )*
         $ctx.add_tp_new_wrapper(&$class);
-    };
-
-    (@set_attr($ctx:expr, $class:expr, (slot $slot_name:ident), $value:expr)) => {
-        $class.slots.write().$slot_name = Some(
-            $crate::function::IntoPyNativeFunc::into_func($value)
-        );
-    };
-    (@set_attr($ctx:expr, $class:expr, $name:expr, $value:expr)) => {
-        $class.set_str_attr($name, $value);
     };
 }
 
@@ -238,4 +244,22 @@ macro_rules! named_function {
             )
         }
     }};
+}
+
+// can't use PyThreadingConstraint for stuff like this since it's not an auto trait, and
+// therefore we can't add it ad-hoc to a trait object
+cfg_if::cfg_if! {
+    if #[cfg(feature = "threading")] {
+        macro_rules! py_dyn_fn {
+            (dyn Fn($($arg:ty),*$(,)*) -> $ret:ty) => {
+                dyn Fn($($arg),*) -> $ret + Send + Sync + 'static
+            };
+        }
+    } else {
+        macro_rules! py_dyn_fn {
+            (dyn Fn($($arg:ty),*$(,)*) -> $ret:ty) => {
+                dyn Fn($($arg),*) -> $ret + 'static
+            };
+        }
+    }
 }

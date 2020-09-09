@@ -9,7 +9,6 @@ use num_traits::{One, Pow, Signed, ToPrimitive, Zero};
 use super::objbool::IntoPyBool;
 use super::objbytearray::PyByteArray;
 use super::objbytes::PyBytes;
-use super::objdict::PyDictRef;
 use super::objfloat;
 use super::objmemory::PyMemoryView;
 use super::objstr::{PyString, PyStringRef};
@@ -19,7 +18,7 @@ use crate::format::FormatSpec;
 use crate::function::{OptionalArg, PyFuncArgs};
 use crate::pyobject::{
     BorrowValue, IdProtocol, IntoPyObject, IntoPyResult, PyArithmaticValue, PyClassImpl,
-    PyComparisonValue, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
     TypeProtocol,
 };
 use crate::stdlib::array::PyArray;
@@ -40,7 +39,7 @@ use rustpython_common::hash;
 /// Base 0 means to interpret the base from the string as an integer literal.
 /// >>> int('0b100', base=0)
 /// 4
-#[pyclass]
+#[pyclass(module = false, name = "int")]
 #[derive(Debug)]
 pub struct PyInt {
     value: BigInt,
@@ -73,24 +72,11 @@ where
 
 impl PyValue for PyInt {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.int_type()
+        vm.ctx.types.int_type.clone()
     }
 
-    fn into_simple_object(self, vm: &VirtualMachine) -> PyObjectRef {
+    fn into_object(self, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.new_int(self.value)
-    }
-
-    fn into_object(
-        self,
-        vm: &VirtualMachine,
-        cls: PyClassRef,
-        dict: Option<PyDictRef>,
-    ) -> PyObjectRef {
-        if cls.is(&Self::class(vm)) {
-            vm.ctx.new_int(self.value)
-        } else {
-            PyObject::new(self, cls, dict)
-        }
     }
 }
 
@@ -191,14 +177,20 @@ fn inner_divmod(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
     }
 }
 
-fn inner_lshift(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
-    let n_bits = get_shift_amount(int2, vm)?;
-    Ok(vm.ctx.new_int(int1 << n_bits))
-}
-
-fn inner_rshift(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
-    let n_bits = get_shift_amount(int2, vm)?;
-    Ok(vm.ctx.new_int(int1 >> n_bits))
+fn inner_shift<F>(int1: &BigInt, int2: &BigInt, shift_op: F, vm: &VirtualMachine) -> PyResult
+where
+    F: Fn(&BigInt, usize) -> BigInt,
+{
+    if int2.is_negative() {
+        Err(vm.new_value_error("negative shift count".to_owned()))
+    } else if int1.is_zero() {
+        Ok(vm.ctx.new_int(0))
+    } else {
+        let int2 = int2.to_usize().ok_or_else(|| {
+            vm.new_overflow_error("the number is too large to convert to int".to_owned())
+        })?;
+        Ok(vm.ctx.new_int(shift_op(int1, int2)))
+    }
 }
 
 #[inline]
@@ -239,8 +231,14 @@ impl PyInt {
     where
         T: Into<BigInt> + ToPrimitive,
     {
-        if cls.is(&vm.ctx.int_type()) {
+        if cls.is(&vm.ctx.types.int_type) {
             Ok(vm.ctx.new_int(value).downcast().unwrap())
+        } else if cls.is(&vm.ctx.types.bool_type) {
+            Ok(vm
+                .ctx
+                .new_bool(!value.into().eq(&BigInt::zero()))
+                .downcast()
+                .unwrap())
         } else {
             PyInt::from(value).into_ref_with_type(vm, cls)
         }
@@ -393,22 +391,22 @@ impl PyInt {
 
     #[pymethod(name = "__lshift__")]
     fn lshift(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        self.general_op(other, |a, b| inner_lshift(a, b, vm), vm)
+        self.general_op(other, |a, b| inner_shift(a, b, |a, b| a << b, vm), vm)
     }
 
     #[pymethod(name = "__rlshift__")]
     fn rlshift(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        self.general_op(other, |a, b| inner_lshift(b, a, vm), vm)
+        self.general_op(other, |a, b| inner_shift(b, a, |a, b| a << b, vm), vm)
     }
 
     #[pymethod(name = "__rshift__")]
     fn rshift(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        self.general_op(other, |a, b| inner_rshift(a, b, vm), vm)
+        self.general_op(other, |a, b| inner_shift(a, b, |a, b| a >> b, vm), vm)
     }
 
     #[pymethod(name = "__rrshift__")]
     fn rrshift(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        self.general_op(other, |a, b| inner_rshift(b, a, vm), vm)
+        self.general_op(other, |a, b| inner_shift(b, a, |a, b| a >> b, vm), vm)
     }
 
     #[pymethod(name = "__xor__")]
@@ -496,14 +494,13 @@ impl PyInt {
             OptionalArg::Missing => (),
             OptionalArg::Present(ref value) => {
                 if !vm.get_none().is(value) {
-                    if let Some(_ndigits) = value.payload_if_subclass::<PyInt>(vm) {
-                        // Only accept int type ndigits
-                    } else {
-                        return Err(vm.new_type_error(format!(
+                    // Only accept int type ndigits
+                    let _ndigits = value.payload_if_subclass::<PyInt>(vm).ok_or_else(|| {
+                        vm.new_type_error(format!(
                             "'{}' object cannot be interpreted as an integer",
                             value.lease_class().name
-                        )));
-                    }
+                        ))
+                    })?;
                 } else {
                     return Err(vm.new_type_error(format!(
                         "'{}' object cannot be interpreted as an integer",
@@ -637,23 +634,15 @@ impl PyInt {
             return Err(vm.new_overflow_error("can't convert negative int to unsigned".to_owned()));
         }
 
-        let byte_len = if let Some(byte_len) = args.length.borrow_value().to_usize() {
-            byte_len
-        } else {
-            return Err(
-                vm.new_overflow_error("Python int too large to convert to C ssize_t".to_owned())
-            );
-        };
+        let byte_len = args.length.borrow_value().to_usize().ok_or_else(|| {
+            vm.new_overflow_error("Python int too large to convert to C ssize_t".to_owned())
+        })?;
 
-        let mut origin_bytes = match args.byteorder.borrow_value() {
-            "big" => match signed {
-                true => value.to_signed_bytes_be(),
-                false => value.to_bytes_be().1,
-            },
-            "little" => match signed {
-                true => value.to_signed_bytes_le(),
-                false => value.to_bytes_le().1,
-            },
+        let mut origin_bytes = match (args.byteorder.borrow_value(), signed) {
+            ("big", true) => value.to_signed_bytes_be(),
+            ("big", false) => value.to_bytes_be().1,
+            ("little", true) => value.to_signed_bytes_le(),
+            ("little", false) => value.to_bytes_le().1,
             _ => {
                 return Err(
                     vm.new_value_error("byteorder must be either 'little' or 'big'".to_owned())
@@ -671,18 +660,19 @@ impl PyInt {
             _ => vec![0u8; byte_len - origin_len],
         };
 
-        let mut bytes = vec![];
-        match args.byteorder.borrow_value() {
+        let bytes = match args.byteorder.borrow_value() {
             "big" => {
-                bytes = append_bytes;
+                let mut bytes = append_bytes;
                 bytes.append(&mut origin_bytes);
+                bytes
             }
             "little" => {
-                bytes = origin_bytes;
+                let mut bytes = origin_bytes;
                 bytes.append(&mut append_bytes);
+                bytes
             }
-            _ => (),
-        }
+            _ => Vec::new(),
+        };
         Ok(bytes.into())
     }
     #[pyproperty]
@@ -946,20 +936,6 @@ pub fn get_value(obj: &PyObjectRef) -> &BigInt {
 pub fn try_float(int: &BigInt, vm: &VirtualMachine) -> PyResult<f64> {
     int.to_f64()
         .ok_or_else(|| vm.new_overflow_error("int too large to convert to float".to_owned()))
-}
-
-fn get_shift_amount(amount: &BigInt, vm: &VirtualMachine) -> PyResult<usize> {
-    if let Some(n_bits) = amount.to_usize() {
-        Ok(n_bits)
-    } else {
-        match amount {
-            v if *v < BigInt::zero() => Err(vm.new_value_error("negative shift count".to_owned())),
-            v if *v > BigInt::from(usize::max_value()) => {
-                Err(vm.new_overflow_error("the number is too large to convert to int".to_owned()))
-            }
-            _ => panic!("Failed converting {} to rust usize", amount),
-        }
-    }
 }
 
 pub(crate) fn init(context: &PyContext) {

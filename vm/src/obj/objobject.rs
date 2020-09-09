@@ -1,5 +1,5 @@
 use super::objbool;
-use super::objdict::PyDictRef;
+use super::objdict::{PyDict, PyDictRef};
 use super::objlist::PyList;
 use super::objstr::PyStringRef;
 use super::objtype::PyClassRef;
@@ -13,13 +13,13 @@ use crate::pyobject::{
 use crate::vm::VirtualMachine;
 
 /// The most base type
-#[pyclass]
+#[pyclass(module = false, name = "object")]
 #[derive(Debug)]
 pub struct PyBaseObject;
 
 impl PyValue for PyBaseObject {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.object()
+        vm.ctx.types.object_type.clone()
     }
 }
 
@@ -29,7 +29,7 @@ impl PyBaseObject {
     fn tp_new(vm: &VirtualMachine, mut args: PyFuncArgs) -> PyResult {
         // more or less __new__ operator
         let cls = PyClassRef::try_from_object(vm, args.shift())?;
-        let dict = if cls.is(&vm.ctx.object()) {
+        let dict = if cls.is(&vm.ctx.types.object_type) {
             None
         } else {
             Some(vm.ctx.new_dict())
@@ -103,7 +103,7 @@ impl PyBaseObject {
     fn delattr(obj: PyObjectRef, attr_name: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
         if let Some(attr) = obj.get_class_attr(attr_name.borrow_value()) {
             if let Some(descriptor) = attr.get_class_attr("__delete__") {
-                return vm.invoke(&descriptor, vec![attr, obj.clone()]).map(|_| ());
+                return vm.invoke(&descriptor, vec![attr, obj]).map(|_| ());
             }
         }
 
@@ -147,7 +147,7 @@ impl PyBaseObject {
     pub fn dir(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyList> {
         let attributes: PyAttributes = obj.class().get_attributes();
 
-        let dict = PyDictRef::from_attributes(attributes, vm)?;
+        let dict = PyDict::from_attributes(attributes, vm)?.into_ref(vm);
 
         // Get instance attributes:
         if let Some(object_dict) = obj.dict() {
@@ -251,9 +251,7 @@ pub(crate) fn setattr(
 
     if let Some(attr) = obj.get_class_attr(attr_name.borrow_value()) {
         if let Some(descriptor) = attr.get_class_attr("__set__") {
-            return vm
-                .invoke(&descriptor, vec![attr, obj.clone(), value])
-                .map(|_| ());
+            return vm.invoke(&descriptor, vec![attr, obj, value]).map(|_| ());
         }
     }
 

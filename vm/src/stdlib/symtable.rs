@@ -60,6 +60,7 @@ mod decl {
     type PySymbolTableRef = PyRef<PySymbolTable>;
     type PySymbolRef = PyRef<PySymbol>;
 
+    #[pyattr]
     #[pyclass(name = "SymbolTable")]
     struct PySymbolTable {
         symtable: symboltable::SymbolTable,
@@ -170,12 +171,13 @@ mod decl {
                 .symtable
                 .sub_tables
                 .iter()
-                .map(|t| to_py_symbol_table(t.clone()).into_ref(vm).into_object())
+                .map(|t| to_py_symbol_table(t.clone()).into_object(vm))
                 .collect();
             Ok(vm.ctx.new_list(children))
         }
     }
 
+    #[pyattr]
     #[pyclass(name = "Symbol")]
     struct PySymbol {
         symbol: symboltable::Symbol,
@@ -265,7 +267,7 @@ mod decl {
             let namespaces = self
                 .namespaces
                 .iter()
-                .map(|table| to_py_symbol_table(table.clone()).into_ref(vm).into_object())
+                .map(|table| to_py_symbol_table(table.clone()).into_object(vm))
                 .collect();
             Ok(vm.ctx.new_list(namespaces))
         }

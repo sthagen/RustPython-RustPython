@@ -19,6 +19,7 @@ use rustpython_compiler::{
 
 use crate::builtins::{self, to_ascii};
 use crate::bytecode;
+use crate::common::{hash::HashSecret, rc::PyRc};
 use crate::exceptions::{self, PyBaseException, PyBaseExceptionRef};
 use crate::frame::{ExecutionResult, Frame, FrameRef};
 use crate::frozen;
@@ -42,7 +43,6 @@ use crate::pyobject::{
 use crate::scope::Scope;
 use crate::stdlib;
 use crate::sysmodule;
-use rustpython_common::rc::PyRc;
 
 // use objects::objects;
 
@@ -74,6 +74,7 @@ pub struct PyGlobalState {
     pub frozen: HashMap<String, bytecode::FrozenModule>,
     pub stacksize: AtomicCell<usize>,
     pub thread_count: AtomicCell<usize>,
+    pub hash_secret: HashSecret,
 }
 
 pub const NSIG: usize = 64;
@@ -123,6 +124,9 @@ pub struct PySettings {
     /// Initialization parameter to decide to initialize or not,
     /// and to decide the importer required external filesystem access or not
     pub initialization_parameter: InitParameter,
+
+    /// PYTHONHASHSEED=x
+    pub hash_seed: Option<u32>,
 }
 
 /// Trace events for sys.settrace and sys.setprofile.
@@ -157,6 +161,7 @@ impl Default for PySettings {
             path_list: vec![],
             argv: vec![],
             initialization_parameter: InitParameter::InitializeExternal,
+            hash_seed: None,
         }
     }
 }
@@ -187,9 +192,14 @@ impl VirtualMachine {
         let stdlib_inits = stdlib::get_module_inits();
         let frozen = frozen::get_module_inits();
 
+        let hash_secret = match settings.hash_seed {
+            Some(seed) => HashSecret::new(seed),
+            None => rand::random(),
+        };
+
         let mut vm = VirtualMachine {
-            builtins: builtins.clone(),
-            sys_module: sysmod.clone(),
+            builtins,
+            sys_module: sysmod,
             ctx: PyRc::new(ctx),
             frames: RefCell::new(vec![]),
             wasm_id: None,
@@ -207,6 +217,7 @@ impl VirtualMachine {
                 frozen,
                 stacksize: AtomicCell::new(0),
                 thread_count: AtomicCell::new(0),
+                hash_secret,
             }),
             initialized: false,
         };
@@ -247,7 +258,7 @@ impl VirtualMachine {
                         // builtins.open to io.OpenWrapper, but this is easier, since it doesn't
                         // require the Python stdlib to be present
                         let io = self.import("_io", &[], 0)?;
-                        let io_open = self.get_attribute(io.clone(), "open")?;
+                        let io_open = self.get_attribute(io, "open")?;
                         let set_stdio = |name, fd, mode: &str| {
                             let stdio = self.invoke(
                                 &io_open,
@@ -321,7 +332,8 @@ impl VirtualMachine {
         self.check_recursive_call("")?;
         self.frames.borrow_mut().push(frame.clone());
         let result = f(frame);
-        self.frames.borrow_mut().pop();
+        // defer dec frame
+        let _popped = self.frames.borrow_mut().pop();
         result
     }
 
@@ -616,20 +628,8 @@ impl VirtualMachine {
         }
     }
 
-    pub fn get_type(&self) -> PyClassRef {
-        self.ctx.type_type()
-    }
-
-    pub fn get_object(&self) -> PyClassRef {
-        self.ctx.object()
-    }
-
     pub fn get_locals(&self) -> PyDictRef {
         self.current_scope().get_locals()
-    }
-
-    pub fn context(&self) -> &PyContext {
-        &self.ctx
     }
 
     // Container of the virtual machine state:
@@ -767,7 +767,7 @@ impl VirtualMachine {
         cls: Option<PyObjectRef>,
     ) -> Option<PyResult> {
         let descr_class = descr.class();
-        let slots = descr_class.slots.read();
+        let slots = &descr_class.slots;
         if let Some(descr_get) = slots.descr_get.as_ref() {
             Some(descr_get(self, descr, obj, OptionalArg::from_option(cls)))
         } else if let Some(ref descriptor) = descr_class.get_attr("__get__") {
@@ -785,7 +785,8 @@ impl VirtualMachine {
     }
 
     pub fn call_get_descriptor(&self, descr: PyObjectRef, obj: PyObjectRef) -> Option<PyResult> {
-        self.call_get_descriptor_specific(descr, Some(obj.clone()), Some(obj.class().into_object()))
+        let cls = obj.class().into_object();
+        self.call_get_descriptor_specific(descr, Some(obj), Some(cls))
     }
 
     pub fn call_if_get_descriptor(&self, attr: PyObjectRef, obj: PyObjectRef) -> PyResult {
@@ -818,7 +819,7 @@ impl VirtualMachine {
 
     fn _invoke(&self, callable: &PyObjectRef, args: PyFuncArgs) -> PyResult {
         vm_trace!("Invoke: {:?} {:?}", callable, args);
-        if let Some(slot_call) = callable.lease_class().slots.read().call.as_ref() {
+        if let Some(slot_call) = callable.lease_class().slots.call.as_ref() {
             self.trace_event(TraceEvent::Call)?;
             let args = args.insert(callable.clone());
             let result = slot_call(self, args);
@@ -883,7 +884,7 @@ impl VirtualMachine {
     pub fn extract_elements<T: TryFromObject>(&self, value: &PyObjectRef) -> PyResult<Vec<T>> {
         // Extract elements from item, if possible:
         let cls = value.class();
-        if cls.is(&self.ctx.tuple_type()) {
+        if cls.is(&self.ctx.types.tuple_type) {
             value
                 .payload::<PyTuple>()
                 .unwrap()
@@ -891,7 +892,7 @@ impl VirtualMachine {
                 .iter()
                 .map(|obj| T::try_from_object(self, obj.clone()))
                 .collect()
-        } else if cls.is(&self.ctx.list_type()) {
+        } else if cls.is(&self.ctx.types.list_type) {
             value
                 .payload::<PyList>()
                 .unwrap()
@@ -946,7 +947,7 @@ impl VirtualMachine {
         F: FnOnce() -> String,
     {
         match obj.get_class_attr(method_name) {
-            Some(method) => self.call_if_get_descriptor(method, obj.clone()),
+            Some(method) => self.call_if_get_descriptor(method, obj),
             None => Err(self.new_type_error(err_msg())),
         }
     }
@@ -954,7 +955,7 @@ impl VirtualMachine {
     /// May return exception, if `__get__` descriptor raises one
     pub fn get_method(&self, obj: PyObjectRef, method_name: &str) -> Option<PyResult> {
         let method = obj.get_class_attr(method_name)?;
-        Some(self.call_if_get_descriptor(method, obj.clone()))
+        Some(self.call_if_get_descriptor(method, obj))
     }
 
     /// Calls a method on `obj` passing `arg`, if the method exists.
@@ -1051,8 +1052,7 @@ impl VirtualMachine {
 
     pub fn is_callable(&self, obj: &PyObjectRef) -> bool {
         let class = obj.lease_class();
-        let lock = class.slots.read();
-        lock.call.is_some() || class.has_attr("__call__")
+        class.slots.call.is_some() || class.has_attr("__call__")
     }
 
     #[inline]

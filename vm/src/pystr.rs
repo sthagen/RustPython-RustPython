@@ -224,8 +224,8 @@ where
             let value = self.get_bytes(range);
             single_or_tuple_any(
                 affix,
-                |s: &T| Ok(func(value, s)),
-                |o| {
+                &|s: &T| Ok(func(value, s)),
+                &|o| {
                     format!(
                         "{} first arg must be {} or a tuple of {}, not {}",
                         func_name,
@@ -267,11 +267,11 @@ where
     {
         if range.is_normal() {
             let start = range.start;
-            if let Some(index) = find(self.get_chars(range), &needle) {
-                return Some(start + index);
-            }
+            let index = find(self.get_chars(range), &needle)?;
+            Some(start + index)
+        } else {
+            None
         }
-        None
     }
 
     #[inline]

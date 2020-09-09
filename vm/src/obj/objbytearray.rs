@@ -7,17 +7,17 @@ use std::mem::size_of;
 use super::objint::PyIntRef;
 use super::objiter;
 use super::objsequence::SequenceIndex;
-use super::objstr::{PyString, PyStringRef};
+use super::objstr::PyStringRef;
 use super::objtype::PyClassRef;
 use crate::bytesinner::{
-    ByteInnerFindOptions, ByteInnerNewOptions, ByteInnerPaddingOptions, ByteInnerSplitOptions,
-    ByteInnerTranslateOptions, ByteOr, PyBytesInner,
+    bytes_decode, ByteInnerFindOptions, ByteInnerNewOptions, ByteInnerPaddingOptions,
+    ByteInnerSplitOptions, ByteInnerTranslateOptions, ByteOr, DecodeArgs, PyBytesInner,
 };
 use crate::common::cell::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
 use crate::function::{OptionalArg, OptionalOption};
 use crate::pyobject::{
     BorrowValue, Either, PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef,
-    PyResult, PyValue, TryFromObject, TypeProtocol,
+    PyResult, PyValue, TryFromObject,
 };
 use crate::pystr::{self, PyCommonString};
 use crate::vm::VirtualMachine;
@@ -33,7 +33,7 @@ use crate::vm::VirtualMachine;
 ///  - a bytes or a buffer object\n  \
 ///  - any object implementing the buffer API.\n  \
 ///  - an integer";
-#[pyclass(name = "bytearray")]
+#[pyclass(module = false, name = "bytearray")]
 #[derive(Debug)]
 pub struct PyByteArray {
     inner: PyRwLock<PyBytesInner>,
@@ -77,7 +77,7 @@ impl From<Vec<u8>> for PyByteArray {
 
 impl PyValue for PyByteArray {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.bytearray_type()
+        vm.ctx.types.bytearray_type.clone()
     }
 }
 
@@ -89,7 +89,7 @@ pub(crate) fn init(context: &PyContext) {
         "maketrans" => context.new_method(PyBytesInner::maketrans),
     });
 
-    PyByteArrayIterator::extend_class(context, &context.types.bytearrayiterator_type);
+    PyByteArrayIterator::extend_class(context, &context.types.bytearray_iterator_type);
 }
 
 #[pyimpl(flags(BASETYPE))]
@@ -185,7 +185,12 @@ impl PyByteArray {
     }
 
     #[pymethod(name = "__setitem__")]
-    fn setitem(&self, needle: SequenceIndex, value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+    fn setitem(
+        &self,
+        needle: SequenceIndex,
+        value: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
         self.borrow_value_mut().setitem(needle, value, vm)
     }
 
@@ -567,7 +572,7 @@ impl PyByteArray {
     #[pymethod(name = "__mod__")]
     fn modulo(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyByteArray> {
         let formatted = self.borrow_value().cformat(values, vm)?;
-        Ok(formatted.as_str().as_bytes().to_owned().into())
+        Ok(formatted.into_bytes().into())
     }
 
     #[pymethod(name = "__rmod__")]
@@ -582,23 +587,8 @@ impl PyByteArray {
     }
 
     #[pymethod]
-    fn decode(
-        zelf: PyRef<Self>,
-        encoding: OptionalArg<PyStringRef>,
-        errors: OptionalArg<PyStringRef>,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyStringRef> {
-        let encoding = encoding.into_option();
-        vm.decode(zelf.into_object(), encoding.clone(), errors.into_option())?
-            .downcast::<PyString>()
-            .map_err(|obj| {
-                vm.new_type_error(format!(
-                    "'{}' decoder returned '{}' instead of 'str'; use codecs.encode() to \
-                     encode arbitrary types",
-                    encoding.as_ref().map_or("utf-8", |s| s.borrow_value()),
-                    obj.lease_class().name,
-                ))
-            })
+    fn decode(zelf: PyRef<Self>, args: DecodeArgs, vm: &VirtualMachine) -> PyResult<PyStringRef> {
+        bytes_decode(zelf.into_object(), args, vm)
     }
 }
 
@@ -606,7 +596,7 @@ impl PyByteArray {
 //     obj.borrow_mut().kind = PyObjectPayload::Bytes { value };
 // }
 
-#[pyclass]
+#[pyclass(module = false, name = "bytearray_iterator")]
 #[derive(Debug)]
 pub struct PyByteArrayIterator {
     position: AtomicCell<usize>,
@@ -615,7 +605,7 @@ pub struct PyByteArrayIterator {
 
 impl PyValue for PyByteArrayIterator {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.bytearrayiterator_type()
+        vm.ctx.types.bytearray_iterator_type.clone()
     }
 }
 

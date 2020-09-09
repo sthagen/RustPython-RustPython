@@ -16,7 +16,7 @@ use crate::obj::objtype::PyClassRef;
 use crate::pyobject::{BorrowValue, PyClassImpl, PyObjectRef, PyResult, PyValue, TryFromObject};
 use crate::vm::VirtualMachine;
 
-#[pyclass(name = "Pattern")]
+#[pyclass(module = "re", name = "Pattern")]
 #[derive(Debug)]
 struct PyPattern {
     regex: Regex,
@@ -69,7 +69,7 @@ impl PyValue for PyPattern {
 }
 
 /// Inner data for a match object.
-#[pyclass(name = "Match")]
+#[pyclass(module = "re", name = "Match")]
 struct PyMatch {
     haystack: PyStringRef,
     captures: Vec<Option<Range<usize>>>,
@@ -237,8 +237,7 @@ fn do_split(
     // essentially Regex::split, but it outputs captures as well
     let mut output = Vec::new();
     let mut last = 0;
-    let mut n = 0;
-    for captures in pattern.regex.captures_iter(text) {
+    for (n, captures) in pattern.regex.captures_iter(text).enumerate() {
         let full = captures.get(0).unwrap();
         let matched = &text[last..full.start()];
         last = full.end();
@@ -246,7 +245,6 @@ fn do_split(
         for m in captures.iter().skip(1) {
             output.push(m.map(|m| m.as_bytes()));
         }
-        n += 1;
         if maxsplit != 0 && n >= maxsplit {
             break;
         }
@@ -293,7 +291,7 @@ fn create_match(vm: &VirtualMachine, haystack: PyStringRef, captures: Captures) 
         .iter()
         .map(|opt| opt.map(|m| m.start()..m.end()))
         .collect();
-    PyMatch { haystack, captures }.into_ref(vm).into_object()
+    PyMatch { haystack, captures }.into_object(vm)
 }
 
 fn extract_flags(flags: OptionalArg<usize>) -> PyRegexFlags {

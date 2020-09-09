@@ -23,8 +23,8 @@ use crate::obj::objstr::{PyString, PyStringRef};
 use crate::obj::objtuple::PyTupleRef;
 use crate::obj::objtype::PyClassRef;
 use crate::pyobject::{
-    BorrowValue, Either, ItemProtocol, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol,
+    BorrowValue, Either, ItemProtocol, PyClassImpl, PyObjectRef, PyRef, PyResult, PyStructSequence,
+    PyValue, TryFromObject, TypeProtocol,
 };
 use crate::vm::VirtualMachine;
 
@@ -293,8 +293,8 @@ mod _os {
         rust_file(fileno);
     }
 
-    #[pyfunction]
     #[cfg(any(unix, windows, target_os = "wasi"))]
+    #[pyfunction]
     pub(crate) fn open(
         name: PyPathLike,
         flags: OpenFlags,
@@ -350,8 +350,8 @@ mod _os {
         Ok(raw_file_number(handle))
     }
 
-    #[pyfunction]
     #[cfg(not(any(unix, windows, target_os = "wasi")))]
+    #[pyfunction]
     pub(crate) fn open(vm: &VirtualMachine, args: PyFuncArgs) -> PyResult {
         Err(vm.new_os_error("os.open not implemented on this platform".to_owned()))
     }
@@ -474,7 +474,8 @@ mod _os {
         mode.process_path(path, vm)
     }
 
-    #[pyclass]
+    #[pyattr]
+    #[pyclass(name)]
     #[derive(Debug)]
     struct DirEntry {
         entry: fs::DirEntry,
@@ -557,6 +558,7 @@ mod _os {
         }
     }
 
+    #[pyattr]
     #[pyclass(name = "ScandirIter")]
     #[derive(Debug)]
     struct ScandirIterator {
@@ -634,8 +636,9 @@ mod _os {
         .into_object())
     }
 
-    #[pystruct_sequence(module = "os", name = "stat_result")]
-    #[derive(Debug)]
+    #[pyattr]
+    #[pyclass(module = "os", name = "stat_result")]
+    #[derive(Debug, PyStructSequence)]
     pub(super) struct StatResult {
         pub st_mode: u32,
         pub st_ino: u64,
@@ -649,6 +652,7 @@ mod _os {
         pub st_ctime: f64,
     }
 
+    #[pyimpl(with(PyStructSequence))]
     impl StatResult {
         pub(super) fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
             self.into_struct_sequence(vm, vm.class(super::MODULE_NAME, "stat_result"))
@@ -677,6 +681,11 @@ mod _os {
             .to_str()
             .unwrap()
             .to_owned())
+    }
+
+    #[pyfunction]
+    fn getcwdb(vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        Ok(getcwd(vm)?.into_bytes().to_vec())
     }
 
     #[pyfunction]
@@ -709,6 +718,14 @@ mod _os {
     #[pyfunction]
     fn exit(code: i32) {
         std::process::exit(code)
+    }
+
+    #[pyfunction]
+    fn abort() {
+        extern "C" {
+            fn abort();
+        }
+        unsafe { abort() }
     }
 
     #[pyfunction]
@@ -830,12 +847,16 @@ mod _os {
             .into_owned()
     }
 
-    #[pystruct_sequence(module = "os", name = "terminal_size")]
+    #[pyattr]
+    #[pyclass(module = "os", name = "terminal_size")]
+    #[derive(PyStructSequence)]
     #[allow(dead_code)]
     pub(super) struct PyTerminalSize {
         pub columns: usize,
         pub lines: usize,
     }
+    #[pyimpl(with(PyStructSequence))]
+    impl PyTerminalSize {}
 
     pub(super) fn support_funcs(vm: &VirtualMachine) -> Vec<SupportFunc> {
         let mut supports = super::platform::support_funcs(vm);
@@ -1516,16 +1537,13 @@ mod posix {
     #[pyfunction]
     fn execv(
         path: PyStringRef,
-        argv_list: Either<PyListRef, PyTupleRef>,
+        argv: Either<PyListRef, PyTupleRef>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let path = ffi::CString::new(path.borrow_value())
             .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
 
-        let argv: Vec<ffi::CString> = match argv_list {
-            Either::A(list) => vm.extract_elements(list.as_object())?,
-            Either::B(tuple) => vm.extract_elements(tuple.as_object())?,
-        };
+        let argv: Vec<ffi::CString> = vm.extract_elements(argv.as_object())?;
         let argv: Vec<&ffi::CStr> = argv.iter().map(|entry| entry.as_c_str()).collect();
 
         let first = argv
@@ -1545,26 +1563,23 @@ mod posix {
     #[pyfunction]
     fn execve(
         path: PyPathLike,
-        args: Either<PyListRef, PyTupleRef>,
+        argv: Either<PyListRef, PyTupleRef>,
         env: PyDictRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let path = ffi::CString::new(path.into_bytes())
             .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
 
-        let args: Vec<ffi::CString> = match args {
-            Either::A(list) => vm.extract_elements(list.as_object())?,
-            Either::B(tuple) => vm.extract_elements(tuple.as_object())?,
-        };
-        let args: Vec<&ffi::CStr> = args.iter().map(|entry| entry.as_c_str()).collect();
+        let argv: Vec<ffi::CString> = vm.extract_elements(argv.as_object())?;
+        let argv: Vec<&ffi::CStr> = argv.iter().map(|entry| entry.as_c_str()).collect();
 
-        let first = args
+        let first = argv
             .first()
-            .ok_or_else(|| vm.new_value_error("execv() arg 2 must not be empty".to_owned()))?;
+            .ok_or_else(|| vm.new_value_error("execve() arg 2 must not be empty".to_owned()))?;
 
         if first.to_bytes().is_empty() {
             return Err(
-                vm.new_value_error("execv() arg 2 first element cannot be empty".to_owned())
+                vm.new_value_error("execve() arg 2 first element cannot be empty".to_owned())
             );
         }
 
@@ -1575,6 +1590,11 @@ mod posix {
                     PyPathLike::try_from_object(&vm, k)?,
                     PyPathLike::try_from_object(&vm, v)?,
                 );
+
+                if key.path.display().to_string().contains('=') {
+                    return Err(vm.new_value_error("illegal environment variable name".to_owned()));
+                }
+
                 ffi::CString::new(format!("{}={}", key.path.display(), value.path.display()))
                     .map_err(|_| vm.new_value_error("embedded null character".to_owned()))
             })
@@ -1582,7 +1602,7 @@ mod posix {
 
         let env: Vec<&ffi::CStr> = env.iter().map(|entry| entry.as_c_str()).collect();
 
-        unistd::execve(&path, &args, &env).map_err(|err| err.into_pyexception(vm))?;
+        unistd::execve(&path, &argv, &env).map_err(|err| err.into_pyexception(vm))?;
         Ok(())
     }
 
@@ -1740,8 +1760,9 @@ mod posix {
         Ok(ret_mask)
     }
 
-    #[pystruct_sequence(module = "os", name = "uname_result")]
-    #[derive(Debug)]
+    #[pyattr]
+    #[pyclass(module = "os", name = "uname_result")]
+    #[derive(Debug, PyStructSequence)]
     struct UnameResult {
         sysname: String,
         nodename: String,
@@ -1750,6 +1771,7 @@ mod posix {
         machine: String,
     }
 
+    #[pyimpl(with(PyStructSequence))]
     impl UnameResult {
         fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
             self.into_struct_sequence(vm, vm.class(super::MODULE_NAME, "uname_result"))
@@ -2504,7 +2526,7 @@ mod nt {
     #[pyfunction]
     fn execv(
         path: PyStringRef,
-        argv_list: Either<PyListRef, PyTupleRef>,
+        argv: Either<PyListRef, PyTupleRef>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         use std::iter::once;
@@ -2517,10 +2539,7 @@ mod nt {
             .chain(once(0u16))
             .collect();
 
-        let argv: Vec<ffi::OsString> = match argv_list {
-            Either::A(list) => vm.extract_elements(list.as_object())?,
-            Either::B(tuple) => vm.extract_elements(tuple.as_object())?,
-        };
+        let argv: Vec<ffi::OsString> = vm.extract_elements(argv.as_object())?;
 
         let first = argv
             .first()

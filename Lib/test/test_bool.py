@@ -279,8 +279,6 @@ class BoolTest(unittest.TestCase):
         self.assertIs(marshal.loads(marshal.dumps(True)), True)
         self.assertIs(marshal.loads(marshal.dumps(False)), False)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickle(self):
         import pickle
         for proto in range(pickle.HIGHEST_PROTOCOL + 1):
@@ -328,8 +326,6 @@ class BoolTest(unittest.TestCase):
                 return -1
         self.assertRaises(ValueError, bool, Eggs())
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_from_bytes(self):
         self.assertIs(bool.from_bytes(b'\x00'*8, 'big'), False)
         self.assertIs(bool.from_bytes(b'abcd', 'little'), True)

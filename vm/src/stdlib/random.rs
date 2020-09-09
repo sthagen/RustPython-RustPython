@@ -53,6 +53,7 @@ mod _random {
         }
     }
 
+    #[pyattr]
     #[pyclass(name = "Random")]
     #[derive(Debug)]
     struct PyRandom {
@@ -90,7 +91,8 @@ mod _random {
                     if cfg!(target_endian = "big") {
                         key.reverse();
                     }
-                    PyRng::MT(Box::new(mt19937::MT19937::new_with_slice_seed(&key)))
+                    let key = if key.is_empty() { &[0] } else { key.as_slice() };
+                    PyRng::MT(Box::new(mt19937::MT19937::new_with_slice_seed(key)))
                 }
             };
 

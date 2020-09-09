@@ -4,7 +4,7 @@ use crate::pyobject::{PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyVa
 use crate::slots::SlotDescriptor;
 use crate::vm::VirtualMachine;
 
-#[pyclass(name = "staticmethod")]
+#[pyclass(module = false, name = "staticmethod")]
 #[derive(Clone, Debug)]
 pub struct PyStaticMethod {
     pub callable: PyObjectRef,
@@ -13,7 +13,7 @@ pub type PyStaticMethodRef = PyRef<PyStaticMethod>;
 
 impl PyValue for PyStaticMethod {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.staticmethod_type()
+        vm.ctx.types.staticmethod_type.clone()
     }
 }
 
@@ -43,10 +43,7 @@ impl PyStaticMethod {
         callable: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<PyStaticMethodRef> {
-        PyStaticMethod {
-            callable: callable.clone(),
-        }
-        .into_ref_with_type(vm, cls)
+        PyStaticMethod { callable }.into_ref_with_type(vm, cls)
     }
 }
 

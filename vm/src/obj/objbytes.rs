@@ -6,18 +6,18 @@ use std::ops::Deref;
 use super::objint::PyIntRef;
 use super::objiter;
 use super::objsequence::SequenceIndex;
-use super::objstr::{PyString, PyStringRef};
+use super::objstr::PyStringRef;
 use super::objtype::PyClassRef;
 use crate::bytesinner::{
-    ByteInnerFindOptions, ByteInnerNewOptions, ByteInnerPaddingOptions, ByteInnerSplitOptions,
-    ByteInnerTranslateOptions, PyBytesInner,
+    bytes_decode, ByteInnerFindOptions, ByteInnerNewOptions, ByteInnerPaddingOptions,
+    ByteInnerSplitOptions, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner,
 };
 use crate::function::{OptionalArg, OptionalOption};
 use crate::pyobject::{
     BorrowValue, Either, IntoPyObject,
     PyArithmaticValue::{self, *},
     PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol,
+    TryFromObject,
 };
 use crate::pystr::{self, PyCommonString};
 use crate::vm::VirtualMachine;
@@ -32,7 +32,7 @@ use rustpython_common::hash::PyHash;
 /// - a text string encoded using the specified encoding\n  \
 /// - any object implementing the buffer API.\n  \
 /// - an integer";
-#[pyclass(name = "bytes")]
+#[pyclass(module = false, name = "bytes")]
 #[derive(Clone, Debug)]
 pub struct PyBytes {
     inner: PyBytesInner,
@@ -72,7 +72,7 @@ impl Deref for PyBytes {
 
 impl PyValue for PyBytes {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.bytes_type()
+        vm.ctx.types.bytes_type.clone()
     }
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn init(context: &PyContext) {
     extend_class!(context, bytes_type, {
         "maketrans" => context.new_method(PyBytesInner::maketrans),
     });
-    PyBytesIterator::extend_class(context, &context.types.bytesiterator_type);
+    PyBytesIterator::extend_class(context, &context.types.bytes_iterator_type);
 }
 
 #[pyimpl(flags(BASETYPE))]
@@ -131,8 +131,8 @@ impl PyBytes {
     }
 
     #[pymethod(name = "__hash__")]
-    fn hash(&self) -> PyHash {
-        self.inner.hash()
+    fn hash(&self, vm: &VirtualMachine) -> PyHash {
+        self.inner.hash(vm)
     }
 
     #[pymethod(name = "__iter__")]
@@ -452,7 +452,7 @@ impl PyBytes {
     #[pymethod(name = "__mod__")]
     fn modulo(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         let formatted = self.inner.cformat(values, vm)?;
-        Ok(vm.ctx.new_bytes(formatted.as_bytes().to_owned()))
+        Ok(vm.ctx.new_bytes(formatted.into_bytes()))
     }
 
     #[pymethod(name = "__rmod__")]
@@ -467,28 +467,13 @@ impl PyBytes {
     /// For a list of possible encodings,
     /// see https://docs.python.org/3/library/codecs.html#standard-encodings
     /// currently, only 'utf-8' and 'ascii' emplemented
-    #[pymethod(name = "decode")]
-    fn decode(
-        zelf: PyRef<Self>,
-        encoding: OptionalArg<PyStringRef>,
-        errors: OptionalArg<PyStringRef>,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyStringRef> {
-        let encoding = encoding.into_option();
-        vm.decode(zelf.into_object(), encoding.clone(), errors.into_option())?
-            .downcast::<PyString>()
-            .map_err(|obj| {
-                vm.new_type_error(format!(
-                    "'{}' decoder returned '{}' instead of 'str'; use codecs.encode() to \
-                     encode arbitrary types",
-                    encoding.as_ref().map_or("utf-8", |s| s.borrow_value()),
-                    obj.lease_class().name,
-                ))
-            })
+    #[pymethod]
+    fn decode(zelf: PyRef<Self>, args: DecodeArgs, vm: &VirtualMachine) -> PyResult<PyStringRef> {
+        bytes_decode(zelf.into_object(), args, vm)
     }
 }
 
-#[pyclass]
+#[pyclass(module = false, name = "bytes_iterator")]
 #[derive(Debug)]
 pub struct PyBytesIterator {
     position: AtomicCell<usize>,
@@ -497,7 +482,7 @@ pub struct PyBytesIterator {
 
 impl PyValue for PyBytesIterator {
     fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.bytesiterator_type()
+        vm.ctx.types.bytes_iterator_type.clone()
     }
 }
 

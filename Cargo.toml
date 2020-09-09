@@ -9,7 +9,7 @@ license = "MIT"
 include = ["LICENSE", "Cargo.toml", "src/**/*.rs"]
 
 [workspace]
-members = [".", "derive", "vm", "wasm/lib", "parser", "compiler", "bytecode", "vm/pylib-crate", "common"]
+members = [".", "derive", "vm", "wasm/lib", "parser", "compiler", "bytecode", "vm/pylib-crate", "common", "jit"]
 
 [[bench]]
 name = "bench"
@@ -19,6 +19,7 @@ path = "./benchmarks/bench.rs"
 default = ["threading", "pylib"]
 flame-it = ["rustpython-vm/flame-it", "flame", "flamescope"]
 freeze-stdlib = ["rustpython-vm/freeze-stdlib"]
+jit = ["rustpython-vm/jit"]
 threading = ["rustpython-vm/threading"]
 
 ssl = ["rustpython-vm/ssl"]
@@ -34,6 +35,7 @@ pylib = { package = "rustpython-pylib", path = "vm/pylib-crate", version = "0.1.
 dirs = { package = "dirs-next", version = "1.0" }
 num-traits = "0.2.8"
 cfg-if = "0.1"
+libc = "0.2"
 
 flame = { version = "0.2", optional = true }
 flamescope = { version = "0.1", optional = true }
@@ -41,9 +43,8 @@ flamescope = { version = "0.1", optional = true }
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
 rustyline = "6.0"
 
-
-[dev-dependencies.cpython]
-version = "0.2"
+[dev-dependencies]
+cpython = "0.5.0"
 
 [[bin]]
 name = "rustpython"
