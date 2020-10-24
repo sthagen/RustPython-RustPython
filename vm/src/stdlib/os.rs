@@ -10,21 +10,20 @@ use crossbeam_utils::atomic::AtomicCell;
 use num_traits::ToPrimitive;
 
 use super::errno::errors;
+use crate::builtins::bytes::{PyBytes, PyBytesRef};
+use crate::builtins::dict::PyDictRef;
+use crate::builtins::int::{PyInt, PyIntRef};
+use crate::builtins::pystr::{PyStr, PyStrRef};
+use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::set::PySet;
+use crate::builtins::tuple::PyTupleRef;
 use crate::byteslike::PyBytesLike;
-use crate::common::cell::PyRwLock;
+use crate::common::lock::PyRwLock;
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
-use crate::function::{IntoPyNativeFunc, OptionalArg, PyFuncArgs};
-use crate::obj::objbytes::{PyBytes, PyBytesRef};
-use crate::obj::objdict::PyDictRef;
-use crate::obj::objint::{PyInt, PyIntRef};
-use crate::obj::objiter;
-use crate::obj::objset::PySet;
-use crate::obj::objstr::{PyString, PyStringRef};
-use crate::obj::objtuple::PyTupleRef;
-use crate::obj::objtype::PyClassRef;
+use crate::function::{FuncArgs, IntoPyNativeFunc, OptionalArg};
 use crate::pyobject::{
-    BorrowValue, Either, ItemProtocol, PyClassImpl, PyObjectRef, PyRef, PyResult, PyStructSequence,
-    PyValue, TryFromObject, TypeProtocol,
+    BorrowValue, Either, IntoPyObject, ItemProtocol, PyObjectRef, PyRef, PyResult,
+    PyStructSequence, PyValue, StaticType, TryFromObject, TypeProtocol,
 };
 use crate::vm::VirtualMachine;
 
@@ -94,7 +93,7 @@ impl TryFromObject for PyPathLike {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
         let match1 = |obj: &PyObjectRef| {
             let pathlike = match_class!(match obj {
-                ref l @ PyString => PyPathLike {
+                ref l @ PyStr => PyPathLike {
                     path: l.borrow_value().into(),
                     mode: OutputMode::String,
                 },
@@ -115,7 +114,7 @@ impl TryFromObject for PyPathLike {
                 obj.class().name
             )
         })?;
-        let result = vm.invoke(&method, PyFuncArgs::default())?;
+        let result = vm.invoke(&method, ())?;
         match1(&result)?.ok_or_else(|| {
             vm.new_type_error(format!(
                 "expected {}.__fspath__() to return str or bytes, not '{}'",
@@ -155,10 +154,7 @@ impl IntoPyException for io::Error {
             },
         };
         let os_error = vm.new_exception_msg(exc_type, self.to_string());
-        let errno = match self.raw_os_error() {
-            Some(errno) => vm.ctx.new_int(errno),
-            None => vm.get_none(),
-        };
+        let errno = self.raw_os_error().into_pyobject(vm);
         vm.set_attr(os_error.as_object(), "errno", errno).unwrap();
         os_error
     }
@@ -201,19 +197,19 @@ pub fn errno_err(vm: &VirtualMachine) -> PyBaseExceptionRef {
 #[allow(dead_code)]
 #[derive(FromArgs, Default)]
 pub struct TargetIsDirectory {
-    #[pyarg(keyword_only, default = "false")]
+    #[pyarg(named, default = "false")]
     target_is_directory: bool,
 }
 
 #[derive(FromArgs, Default)]
 pub struct DirFd {
-    #[pyarg(keyword_only, default = "None")]
+    #[pyarg(named, default)]
     dir_fd: Option<PyIntRef>,
 }
 
 #[derive(FromArgs)]
 struct FollowSymlinks {
-    #[pyarg(keyword_only, default = "true")]
+    #[pyarg(named, default = "true")]
     follow_symlinks: bool,
 }
 
@@ -257,19 +253,10 @@ mod _os {
     use super::*;
 
     #[pyattr]
-    const O_RDONLY: libc::c_int = libc::O_RDONLY;
-    #[pyattr]
-    const O_WRONLY: libc::c_int = libc::O_WRONLY;
-    #[pyattr]
-    const O_RDWR: libc::c_int = libc::O_RDWR;
-    #[pyattr]
-    const O_APPEND: libc::c_int = libc::O_APPEND;
-    #[pyattr]
-    const O_EXCL: libc::c_int = libc::O_EXCL;
-    #[pyattr]
-    const O_CREAT: libc::c_int = libc::O_CREAT;
-    #[pyattr]
-    const O_TRUNC: libc::c_int = libc::O_TRUNC;
+    use libc::{
+        O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END,
+        SEEK_SET,
+    };
     #[pyattr]
     pub(super) const F_OK: u8 = 0;
     #[pyattr]
@@ -278,12 +265,6 @@ mod _os {
     pub(super) const W_OK: u8 = 2;
     #[pyattr]
     pub(super) const X_OK: u8 = 1;
-    #[pyattr]
-    const SEEK_SET: libc::c_int = libc::SEEK_SET;
-    #[pyattr]
-    const SEEK_CUR: libc::c_int = libc::SEEK_CUR;
-    #[pyattr]
-    const SEEK_END: libc::c_int = libc::SEEK_END;
 
     #[pyfunction]
     fn close(fileno: i64) {
@@ -352,12 +333,12 @@ mod _os {
 
     #[cfg(not(any(unix, windows, target_os = "wasi")))]
     #[pyfunction]
-    pub(crate) fn open(vm: &VirtualMachine, args: PyFuncArgs) -> PyResult {
+    pub(crate) fn open(vm: &VirtualMachine, args: FuncArgs) -> PyResult {
         Err(vm.new_os_error("os.open not implemented on this platform".to_owned()))
     }
 
     #[pyfunction]
-    fn error(message: OptionalArg<PyStringRef>, vm: &VirtualMachine) -> PyResult {
+    fn error(message: OptionalArg<PyStrRef>, vm: &VirtualMachine) -> PyResult {
         let msg = message.map_or("".to_owned(), |msg| msg.borrow_value().to_owned());
 
         Err(vm.new_os_error(msg))
@@ -416,7 +397,7 @@ mod _os {
     }
 
     #[pyfunction]
-    fn mkdirs(path: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
+    fn mkdirs(path: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
         fs::create_dir_all(path.borrow_value()).map_err(|err| err.into_pyexception(vm))
     }
 
@@ -440,8 +421,8 @@ mod _os {
 
     #[pyfunction]
     fn putenv(
-        key: Either<PyStringRef, PyBytesRef>,
-        value: Either<PyStringRef, PyBytesRef>,
+        key: Either<PyStrRef, PyBytesRef>,
+        value: Either<PyStrRef, PyBytesRef>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let key: &ffi::OsStr = match key {
@@ -457,7 +438,7 @@ mod _os {
     }
 
     #[pyfunction]
-    fn unsetenv(key: Either<PyStringRef, PyBytesRef>, vm: &VirtualMachine) -> PyResult<()> {
+    fn unsetenv(key: Either<PyStrRef, PyBytesRef>, vm: &VirtualMachine) -> PyResult<()> {
         let key: &ffi::OsStr = match key {
             Either::A(ref s) => s.borrow_value().as_ref(),
             Either::B(ref b) => bytes_as_osstr(b.borrow_value(), vm)?,
@@ -483,8 +464,8 @@ mod _os {
     }
 
     impl PyValue for DirEntry {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class(super::MODULE_NAME, "DirEntry")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -568,8 +549,8 @@ mod _os {
     }
 
     impl PyValue for ScandirIterator {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class(super::MODULE_NAME, "ScandirIter")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -578,7 +559,7 @@ mod _os {
         #[pymethod(name = "__next__")]
         fn next(&self, vm: &VirtualMachine) -> PyResult {
             if self.exhausted.load() {
-                return Err(objiter::new_stop_iteration(vm));
+                return Err(vm.new_stop_iteration());
             }
 
             match self.entries.write().next() {
@@ -593,7 +574,7 @@ mod _os {
                 },
                 None => {
                     self.exhausted.store(true);
-                    Err(objiter::new_stop_iteration(vm))
+                    Err(vm.new_stop_iteration())
                 }
             }
         }
@@ -614,7 +595,7 @@ mod _os {
         }
 
         #[pymethod(name = "__exit__")]
-        fn exit(zelf: PyRef<Self>, _args: PyFuncArgs) {
+        fn exit(zelf: PyRef<Self>, _args: FuncArgs) {
             zelf.close()
         }
     }
@@ -655,9 +636,7 @@ mod _os {
     #[pyimpl(with(PyStructSequence))]
     impl StatResult {
         pub(super) fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
-            self.into_struct_sequence(vm, vm.class(super::MODULE_NAME, "stat_result"))
-                .unwrap()
-                .into_object()
+            self.into_struct_sequence(vm).unwrap().into_object()
         }
     }
 
@@ -787,11 +766,11 @@ mod _os {
 
     #[derive(FromArgs)]
     struct UtimeArgs {
-        #[pyarg(positional_or_keyword)]
+        #[pyarg(any)]
         path: PyPathLike,
-        #[pyarg(positional_or_keyword, default = "None")]
+        #[pyarg(any, default)]
         times: Option<PyTupleRef>,
-        #[pyarg(keyword_only, default = "None")]
+        #[pyarg(named, default)]
         ns: Option<PyTupleRef>,
         #[pyarg(flatten)]
         _dir_fd: DirFd,
@@ -918,7 +897,7 @@ struct SupportFunc {
 }
 
 impl<'a> SupportFunc {
-    fn new<F, T, R, VM>(
+    fn new<F, FKind>(
         vm: &VirtualMachine,
         name: &'static str,
         func: F,
@@ -927,7 +906,7 @@ impl<'a> SupportFunc {
         follow_symlinks: Option<bool>,
     ) -> Self
     where
-        F: IntoPyNativeFunc<T, R, VM>,
+        F: IntoPyNativeFunc<FKind>,
     {
         let func_obj = vm.ctx.new_function(func);
         Self {
@@ -999,8 +978,8 @@ fn to_seconds_from_unix_epoch(sys_time: SystemTime) -> f64 {
 mod posix {
     use super::*;
 
-    use crate::obj::objdict::PyMapping;
-    use crate::obj::objlist::PyListRef;
+    use crate::builtins::dict::PyMapping;
+    use crate::builtins::list::PyListRef;
     use crate::pyobject::PyIterable;
     use bitflags::bitflags;
     use nix::errno::Errno;
@@ -1010,7 +989,11 @@ mod posix {
     use std::os::unix::io::RawFd;
 
     #[pyattr]
-    const WNOHANG: libc::c_int = libc::WNOHANG;
+    use libc::{O_CLOEXEC, O_NONBLOCK, WNOHANG};
+    #[cfg(not(target_os = "redox"))]
+    #[pyattr]
+    use libc::{O_DSYNC, O_NDELAY, O_NOCTTY};
+
     #[pyattr]
     const EX_OK: i8 = exitcode::OK as i8;
     #[pyattr]
@@ -1043,20 +1026,6 @@ mod posix {
     const EX_NOPERM: i8 = exitcode::NOPERM as i8;
     #[pyattr]
     const EX_CONFIG: i8 = exitcode::CONFIG as i8;
-    #[pyattr]
-    const O_NONBLOCK: libc::c_int = libc::O_NONBLOCK;
-    #[pyattr]
-    const O_CLOEXEC: libc::c_int = libc::O_CLOEXEC;
-
-    #[cfg(not(target_os = "redox"))]
-    #[pyattr]
-    const O_DSYNC: libc::c_int = libc::O_DSYNC;
-    #[cfg(not(target_os = "redox"))]
-    #[pyattr]
-    const O_NDELAY: libc::c_int = libc::O_NDELAY;
-    #[cfg(not(target_os = "redox"))]
-    #[pyattr]
-    const O_NOCTTY: libc::c_int = libc::O_NOCTTY;
 
     // cfg taken from nix
     #[cfg(any(
@@ -1125,7 +1094,7 @@ mod posix {
         unsafe { File::from_raw_fd(raw_fileno as i32) }
     }
 
-    pub(super) fn convert_nix_errno(vm: &VirtualMachine, errno: Errno) -> PyClassRef {
+    pub(super) fn convert_nix_errno(vm: &VirtualMachine, errno: Errno) -> PyTypeRef {
         match errno {
             Errno::EPERM => vm.ctx.exceptions.permission_error.clone(),
             _ => vm.ctx.exceptions.os_error.clone(),
@@ -1506,7 +1475,7 @@ mod posix {
     }
 
     #[pyfunction]
-    fn system(command: PyStringRef) -> PyResult<i32> {
+    fn system(command: PyStrRef) -> PyResult<i32> {
         use std::ffi::CString;
 
         let rstr = command.borrow_value();
@@ -1536,7 +1505,7 @@ mod posix {
 
     #[pyfunction]
     fn execv(
-        path: PyStringRef,
+        path: PyStrRef,
         argv: Either<PyListRef, PyTupleRef>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
@@ -1774,9 +1743,7 @@ mod posix {
     #[pyimpl(with(PyStructSequence))]
     impl UnameResult {
         fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
-            self.into_struct_sequence(vm, vm.class(super::MODULE_NAME, "uname_result"))
-                .unwrap()
-                .into_object()
+            self.into_struct_sequence(vm).unwrap().into_object()
         }
     }
 
@@ -1884,7 +1851,7 @@ mod posix {
         target_os = "openbsd"
     ))]
     #[pyfunction]
-    fn initgroups(user_name: PyStringRef, gid: u32, vm: &VirtualMachine) -> PyResult<()> {
+    fn initgroups(user_name: PyStrRef, gid: u32, vm: &VirtualMachine) -> PyResult<()> {
         let user = ffi::CString::new(user_name.borrow_value()).unwrap();
         let gid = Gid::from_raw(gid);
         unistd::initgroups(&user, gid).map_err(|err| err.into_pyexception(vm))
@@ -1941,15 +1908,15 @@ mod posix {
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     #[derive(FromArgs)]
     pub(super) struct PosixSpawnArgs {
-        #[pyarg(positional_only)]
+        #[pyarg(positional)]
         path: PyPathLike,
-        #[pyarg(positional_only)]
+        #[pyarg(positional)]
         args: PyIterable<PyPathLike>,
-        #[pyarg(positional_only)]
+        #[pyarg(positional)]
         env: PyMapping,
-        #[pyarg(keyword_only, default = "None")]
+        #[pyarg(named, default)]
         file_actions: Option<PyIterable<PyTupleRef>>,
-        #[pyarg(keyword_only, default = "None")]
+        #[pyarg(named, default)]
         setsigdef: Option<PyIterable<i32>>,
     }
 
@@ -1985,7 +1952,7 @@ mod posix {
                     let id = PosixSpawnFileActionIdentifier::try_from(id).map_err(|_| {
                         vm.new_type_error("Unknown file_actions identifier".to_owned())
                     })?;
-                    let args = PyFuncArgs::from(args.to_vec());
+                    let args = FuncArgs::from(args.to_vec());
                     let ret = match id {
                         PosixSpawnFileActionIdentifier::Open => {
                             let (fd, path, oflag, mode): (_, PyPathLike, _, _) = args.bind(vm)?;
@@ -2108,27 +2075,27 @@ mod posix {
 
     #[pyfunction(name = "WIFSIGNALED")]
     fn wifsignaled(status: i32) -> bool {
-        unsafe { libc::WIFSIGNALED(status) }
+        libc::WIFSIGNALED(status)
     }
     #[pyfunction(name = "WIFSTOPPED")]
     fn wifstopped(status: i32) -> bool {
-        unsafe { libc::WIFSTOPPED(status) }
+        libc::WIFSTOPPED(status)
     }
     #[pyfunction(name = "WIFEXITED")]
     fn wifexited(status: i32) -> bool {
-        unsafe { libc::WIFEXITED(status) }
+        libc::WIFEXITED(status)
     }
     #[pyfunction(name = "WTERMSIG")]
     fn wtermsig(status: i32) -> i32 {
-        unsafe { libc::WTERMSIG(status) }
+        libc::WTERMSIG(status)
     }
     #[pyfunction(name = "WSTOPSIG")]
     fn wstopsig(status: i32) -> i32 {
-        unsafe { libc::WSTOPSIG(status) }
+        libc::WSTOPSIG(status)
     }
     #[pyfunction(name = "WEXITSTATUS")]
     fn wexitstatus(status: i32) -> i32 {
-        unsafe { libc::WEXITSTATUS(status) }
+        libc::WEXITSTATUS(status)
     }
 
     #[pyfunction]
@@ -2172,8 +2139,7 @@ mod posix {
                 (w.ws_col.into(), w.ws_row.into())
             }
         };
-        super::_os::PyTerminalSize { columns, lines }
-            .into_struct_sequence(vm, vm.try_class(super::MODULE_NAME, "terminal_size")?)
+        super::_os::PyTerminalSize { columns, lines }.into_struct_sequence(vm)
     }
 
     // from libstd:
@@ -2199,6 +2165,15 @@ mod posix {
         }
     }
 
+    #[pyfunction]
+    fn dup(fd: i32, vm: &VirtualMachine) -> PyResult<i32> {
+        let fd = nix::unistd::dup(fd).map_err(|e| e.into_pyexception(vm))?;
+        raw_set_inheritable(fd, false).map(|()| fd).map_err(|e| {
+            let _ = nix::unistd::close(fd);
+            e.into_pyexception(vm)
+        })
+    }
+
     pub(super) fn support_funcs(vm: &VirtualMachine) -> Vec<SupportFunc> {
         vec![
             SupportFunc::new(vm, "chmod", chmod, Some(false), Some(false), Some(false)),
@@ -2221,14 +2196,14 @@ pub(crate) use posix::raw_set_inheritable;
 #[pymodule]
 mod nt {
     use super::*;
-    use crate::obj::objlist::PyListRef;
+    use crate::builtins::list::PyListRef;
     pub(super) use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::RawHandle;
     #[cfg(target_env = "msvc")]
     use winapi::vc::vcruntime::intptr_t;
 
     #[pyattr]
-    const O_BINARY: libc::c_int = libc::O_BINARY;
+    use libc::O_BINARY;
 
     pub(super) type OpenFlags = u32;
 
@@ -2486,8 +2461,7 @@ mod nt {
                 )
             }
         };
-        super::_os::PyTerminalSize { columns, lines }
-            .into_struct_sequence(vm, vm.try_class(super::MODULE_NAME, "terminal_size")?)
+        super::_os::PyTerminalSize { columns, lines }.into_struct_sequence(vm)
     }
 
     #[cfg(target_env = "msvc")]
@@ -2525,7 +2499,7 @@ mod nt {
     #[cfg(target_env = "msvc")]
     #[pyfunction]
     fn execv(
-        path: PyStringRef,
+        path: PyStrRef,
         argv: Either<PyListRef, PyTupleRef>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
@@ -2608,7 +2582,7 @@ mod minor {
     }
 
     #[pyfunction]
-    pub(super) fn access(_path: PyStringRef, _mode: u8, vm: &VirtualMachine) -> PyResult<bool> {
+    pub(super) fn access(_path: PyStrRef, _mode: u8, vm: &VirtualMachine) -> PyResult<bool> {
         os_unimpl("os.access", vm)
     }
 

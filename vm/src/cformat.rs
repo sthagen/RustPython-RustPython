@@ -1,7 +1,7 @@
+use crate::builtins::{float, int, pystr, tuple};
 /// Implementation of Printf-Style string formatting
 /// [https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting]
 use crate::format::get_num_digits;
-use crate::obj::{objfloat, objint, objstr, objtuple, objtype};
 use crate::pyobject::{
     BorrowValue, ItemProtocol, PyObjectRef, PyResult, TryFromObject, TypeProtocol,
 };
@@ -20,6 +20,7 @@ enum CFormatErrorType {
     UnescapedModuloSignInLiteral,
     UnsupportedFormatChar(char),
     IncompleteFormat,
+    IntTooBig,
     // Unimplemented,
 }
 
@@ -43,6 +44,7 @@ impl fmt::Display for CFormatError {
                 "unsupported format character '{}' ({:#x}) at index {}",
                 c, c as u32, self.index
             ),
+            IntTooBig => write!(f, "width/precision too big"),
             _ => write!(f, "unexpected error parsing format string"),
         }
     }
@@ -294,32 +296,45 @@ impl CFormatSpec {
                     CFormatPreconversor::Str => vm.to_str(&obj)?,
                     CFormatPreconversor::Repr | CFormatPreconversor::Ascii => vm.to_repr(&obj)?,
                     CFormatPreconversor::Bytes => {
-                        TryFromObject::try_from_object(vm, vm.call_method(&obj, "decode", vec![])?)?
+                        TryFromObject::try_from_object(vm, vm.call_method(&obj, "decode", ())?)?
                     }
                 };
                 self.format_string(result.borrow_value().to_owned())
             }
             CFormatType::Number(number_type) => {
-                if !objtype::isinstance(&obj, &vm.ctx.types.int_type) {
+                let err = || {
                     let required_type_string = match number_type {
                         CNumberType::Decimal => "a number",
                         _ => "an integer",
                     };
-                    return Err(vm.new_type_error(format!(
+                    vm.new_type_error(format!(
                         "%{} format: {} is required, not {}",
                         self.format_char,
                         required_type_string,
-                        obj.lease_class()
-                    )));
-                }
-                self.format_number(objint::get_value(&obj))
+                        obj.class()
+                    ))
+                };
+                match_class!(match &obj {
+                    ref i @ int::PyInt => {
+                        self.format_number(i.borrow_value())
+                    }
+                    // TODO: if guards for match_class
+                    ref f @ float::PyFloat => {
+                        if let CNumberType::Decimal = number_type {
+                            self.format_number(&float::try_bigint(f.to_f64(), vm)?)
+                        } else {
+                            return Err(err());
+                        }
+                    }
+                    _ => return Err(err()),
+                })
             }
             CFormatType::Float(_) => {
-                let value = objfloat::try_float(&obj, vm)?.ok_or_else(|| {
+                let value = float::try_float(&obj, vm)?.ok_or_else(|| {
                     vm.new_type_error(format!(
                         "%{} format: an floating point or integer is required, not {}",
                         self.format_char,
-                        obj.lease_class().name
+                        obj.class().name
                     ))
                 })?;
                 self.format_float(value)
@@ -327,16 +342,16 @@ impl CFormatSpec {
             }
             CFormatType::Character => {
                 let ch = {
-                    if objtype::isinstance(&obj, &vm.ctx.types.int_type) {
+                    if obj.isinstance(&vm.ctx.types.int_type) {
                         // BigInt truncation is fine in this case because only the unicode range is relevant
-                        objint::get_value(&obj)
+                        int::get_value(&obj)
                             .to_u32()
                             .and_then(std::char::from_u32)
                             .ok_or_else(|| {
                                 vm.new_overflow_error("%c arg not in range(0x110000)".to_owned())
                             })
-                    } else if objtype::isinstance(&obj, &vm.ctx.types.str_type) {
-                        let s = objstr::borrow_value(&obj);
+                    } else if obj.isinstance(&vm.ctx.types.str_type) {
+                        let s = pystr::borrow_value(&obj);
                         let num_chars = s.chars().count();
                         if num_chars != 1 {
                             Err(vm.new_type_error("%c requires int or char".to_owned()))
@@ -363,10 +378,7 @@ enum CFormatPart {
 
 impl CFormatPart {
     fn is_specifier(&self) -> bool {
-        match self {
-            CFormatPart::Spec(_) => true,
-            _ => false,
-        }
+        matches!(self, CFormatPart::Spec(_))
     }
 
     fn has_key(&self) -> bool {
@@ -420,25 +432,22 @@ impl CFormatString {
             mut tuple_index: usize,
         ) -> PyResult<usize> {
             match q {
-                Some(CFormatQuantity::FromValuesTuple) => {
-                    match elements.next() {
-                        Some(width_obj) => {
-                            tuple_index += 1;
-                            if !objtype::isinstance(&width_obj, &vm.ctx.types.int_type) {
-                                Err(vm.new_type_error("* wants int".to_owned()))
-                            } else {
-                                // TODO: handle errors when truncating BigInt to usize
-                                *q = Some(CFormatQuantity::Amount(
-                                    objint::get_value(&width_obj).to_usize().unwrap(),
-                                ));
-                                Ok(tuple_index)
-                            }
+                Some(CFormatQuantity::FromValuesTuple) => match elements.next() {
+                    Some(width_obj) => {
+                        tuple_index += 1;
+                        if !width_obj.isinstance(&vm.ctx.types.int_type) {
+                            Err(vm.new_type_error("* wants int".to_owned()))
+                        } else {
+                            let i = int::get_value(&width_obj);
+                            let i = int::try_to_primitive::<isize>(i, vm)? as usize;
+                            *q = Some(CFormatQuantity::Amount(i));
+                            Ok(tuple_index)
                         }
-                        None => Err(
-                            vm.new_type_error("not enough arguments for format string".to_owned())
-                        ),
                     }
-                }
+                    None => {
+                        Err(vm.new_type_error("not enough arguments for format string".to_owned()))
+                    }
+                },
                 _ => Ok(tuple_index),
             }
         }
@@ -460,16 +469,16 @@ impl CFormatString {
                 .all(|(_, part)| CFormatPart::has_key(part));
 
         let values = if mapping_required {
-            if !objtype::isinstance(&values_obj, &vm.ctx.types.dict_type) {
+            if !values_obj.isinstance(&vm.ctx.types.dict_type) {
                 return Err(vm.new_type_error("format requires a mapping".to_owned()));
             }
             values_obj.clone()
         } else {
             // check for only literal parts, in which case only dict or empty tuple is allowed
             if num_specifiers == 0
-                && !(objtype::isinstance(&values_obj, &vm.ctx.types.tuple_type)
-                    && objtuple::get_value(&values_obj).is_empty())
-                && !objtype::isinstance(&values_obj, &vm.ctx.types.dict_type)
+                && !(values_obj.isinstance(&vm.ctx.types.tuple_type)
+                    && tuple::get_value(&values_obj).is_empty())
+                && !values_obj.isinstance(&vm.ctx.types.dict_type)
             {
                 return Err(vm.new_type_error(
                     "not all arguments converted during string formatting".to_owned(),
@@ -477,7 +486,7 @@ impl CFormatString {
             }
 
             // convert `values_obj` to a new tuple if it's not a tuple
-            if !objtype::isinstance(&values_obj, &vm.ctx.types.tuple_type) {
+            if !values_obj.isinstance(&vm.ctx.types.tuple_type) {
                 vm.ctx.new_tuple(vec![values_obj.clone()])
             } else {
                 values_obj.clone()
@@ -495,7 +504,7 @@ impl CFormatString {
                             values.get_item(key, vm)?
                         }
                         None => {
-                            let mut elements = objtuple::get_value(&values)
+                            let mut elements = tuple::get_value(&values)
                                 .to_vec()
                                 .into_iter()
                                 .skip(tuple_index);
@@ -532,8 +541,8 @@ impl CFormatString {
         }
 
         // check that all arguments were converted
-        if (!mapping_required && objtuple::get_value(&values).get(tuple_index).is_some())
-            && !objtype::isinstance(&values_obj, &vm.ctx.types.dict_type)
+        if (!mapping_required && tuple::get_value(&values).get(tuple_index).is_some())
+            && !values_obj.isinstance(&vm.ctx.types.dict_type)
         {
             return Err(vm.new_type_error(
                 "not all arguments converted during string formatting".to_owned(),
@@ -543,30 +552,30 @@ impl CFormatString {
     }
 }
 
-fn parse_quantity(text: &str) -> (Option<CFormatQuantity>, &str) {
+fn parse_quantity(text: &str) -> Result<(Option<CFormatQuantity>, &str), CFormatErrorType> {
     let num_digits: usize = get_num_digits(text);
-    if num_digits == 0 {
+    let ret = if num_digits == 0 {
         let mut chars = text.chars();
-        return match chars.next() {
+        match chars.next() {
             Some('*') => (Some(CFormatQuantity::FromValuesTuple), chars.as_str()),
             _ => (None, text),
-        };
-    }
-    // This should never fail
-    (
-        Some(CFormatQuantity::Amount(
-            text[..num_digits].parse::<usize>().unwrap(),
-        )),
-        &text[num_digits..],
-    )
+        }
+    } else {
+        let q = text[..num_digits]
+            .parse::<isize>()
+            .map_err(|_| CFormatErrorType::IntTooBig)? as usize;
+        (Some(CFormatQuantity::Amount(q)), &text[num_digits..])
+    };
+    Ok(ret)
 }
 
-fn parse_precision(text: &str) -> (Option<CFormatQuantity>, &str) {
+fn parse_precision(text: &str) -> Result<(Option<CFormatQuantity>, &str), CFormatErrorType> {
     let mut chars = text.chars();
-    match chars.next() {
-        Some('.') => parse_quantity(&chars.as_str()),
+    let ret = match chars.next() {
+        Some('.') => parse_quantity(&chars.as_str())?,
         _ => (None, text),
-    }
+    };
+    Ok(ret)
 }
 
 fn parse_literal_single(text: &str) -> Result<(char, &str), CFormatErrorType> {
@@ -794,8 +803,10 @@ impl FromStr for CFormatSpec {
         let (mapping_key, after_mapping_key) = parse_spec_mapping_key(after_modulo_sign)
             .map_err(|err| (err, calc_consumed(text, after_modulo_sign)))?;
         let (flags, after_flags) = parse_flags(after_mapping_key);
-        let (width, after_width) = parse_quantity(after_flags);
-        let (precision, after_precision) = parse_precision(after_width);
+        let (width, after_width) =
+            parse_quantity(after_flags).map_err(|err| (err, calc_consumed(text, after_flags)))?;
+        let (precision, after_precision) =
+            parse_precision(after_width).map_err(|err| (err, calc_consumed(text, after_width)))?;
         // A length modifier (h, l, or L) may be present,
         // but is ignored as it is not necessary for Python – so e.g. %ld is identical to %d.
         let after_length = consume_length(after_precision);

@@ -7,6 +7,9 @@
 
 // for methods like vm.to_str(), not the typical use of 'to' as a method prefix
 #![allow(clippy::wrong_self_convention, clippy::implicit_hasher)]
+// to allow `mod foo {}` in foo.rs; clippy thinks this is a mistake/misunderstanding of
+// how `mod` works, but we want this sometimes for pymodule declarations
+#![allow(clippy::module_inception)]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/RustPython/RustPython/master/logo.png")]
 #![doc(html_root_url = "https://docs.rs/rustpython-vm/")]
 #![cfg_attr(
@@ -40,10 +43,12 @@ pub use rustpython_derive::*;
 #[macro_use]
 pub mod macros;
 
-mod builtins;
+mod anystr;
+pub mod builtins;
 mod bytesinner;
 pub mod byteslike;
 pub mod cformat;
+mod coroutine;
 mod dictdatatype;
 #[cfg(feature = "rustpython-compiler")]
 pub mod eval;
@@ -53,14 +58,15 @@ pub mod frame;
 mod frozen;
 pub mod function;
 pub mod import;
-pub mod obj;
+mod iterator;
 mod py_io;
 pub mod py_serde;
 pub mod pyobject;
-mod pystr;
+mod pyobjectrc;
 pub mod readline;
 pub mod scope;
 mod sequence;
+mod sliceable;
 pub mod slots;
 pub mod stdlib;
 mod sysmodule;
@@ -70,6 +76,11 @@ mod version;
 mod vm;
 
 // pub use self::pyobject::Executor;
-pub use self::vm::{InitParameter, PySettings, VirtualMachine};
+pub use self::vm::{InitParameter, Interpreter, PySettings, VirtualMachine};
 pub use rustpython_bytecode::*;
 pub use rustpython_common as common;
+
+#[doc(hidden)]
+pub mod __exports {
+    pub use paste;
+}

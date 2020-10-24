@@ -91,7 +91,7 @@ impl Label {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 /// An indication where the name must be accessed.
 pub enum NameScope {
     /// The name will be in the local scope.
@@ -435,6 +435,8 @@ impl CodeObject {
             .iter()
             .map(String::as_str)
             .chain(self.kwonlyarg_names.iter().map(String::as_str))
+            .chain(self.varargs_name.as_deref())
+            .chain(self.varkeywords_name.as_deref())
             .chain(
                 self.instructions
                     .iter()
@@ -488,7 +490,17 @@ impl CodeObject {
 
 impl fmt::Display for CodeObject {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.display_inner(f, false, 1)
+        self.display_inner(f, false, 1)?;
+        for constant in self.get_constants() {
+            match constant {
+                Constant::Code { code } => {
+                    write!(f, "\nDisassembly of {}\n", constant)?;
+                    code.fmt(f)?;
+                }
+                _ => continue,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -648,6 +660,7 @@ impl fmt::Debug for CodeObject {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct FrozenModule {
     pub code: CodeObject,
     pub package: bool,

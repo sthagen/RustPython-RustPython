@@ -4,9 +4,9 @@ pub(crate) use decl::make_module;
 mod decl {
     use std::fmt;
 
-    use crate::obj::objstr::PyStringRef;
-    use crate::obj::objtype::PyClassRef;
-    use crate::pyobject::{BorrowValue, PyClassImpl, PyRef, PyResult, PyValue};
+    use crate::builtins::pystr::PyStrRef;
+    use crate::builtins::pytype::PyTypeRef;
+    use crate::pyobject::{BorrowValue, PyRef, PyResult, PyValue, StaticType};
     use crate::vm::VirtualMachine;
     use rustpython_compiler::{compile, error::CompileError, symboltable};
     use rustpython_parser::parser;
@@ -15,9 +15,9 @@ mod decl {
     /// See docs: https://docs.python.org/3/library/symtable.html?highlight=symtable#symtable.symtable
     #[pyfunction]
     fn symtable(
-        source: PyStringRef,
-        filename: PyStringRef,
-        mode: PyStringRef,
+        source: PyStrRef,
+        filename: PyStrRef,
+        mode: PyStrRef,
         vm: &VirtualMachine,
     ) -> PyResult<PySymbolTableRef> {
         let mode = mode
@@ -73,8 +73,8 @@ mod decl {
     }
 
     impl PyValue for PySymbolTable {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("symtable", "SymbolTable")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -106,7 +106,7 @@ mod decl {
         }
 
         #[pymethod(name = "lookup")]
-        fn lookup(&self, name: PyStringRef, vm: &VirtualMachine) -> PyResult<PySymbolRef> {
+        fn lookup(&self, name: PyStrRef, vm: &VirtualMachine) -> PyResult<PySymbolRef> {
             let name = name.borrow_value();
             if let Some(symbol) = self.symtable.symbols.get(name) {
                 Ok(PySymbol {
@@ -191,8 +191,8 @@ mod decl {
     }
 
     impl PyValue for PySymbol {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("symtable", "Symbol")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -226,10 +226,7 @@ mod decl {
 
         #[pymethod(name = "is_nonlocal")]
         fn is_nonlocal(&self) -> bool {
-            match self.symbol.scope {
-                symboltable::SymbolScope::Nonlocal => true,
-                _ => false,
-            }
+            matches!(self.symbol.scope, symboltable::SymbolScope::Nonlocal)
         }
 
         #[pymethod(name = "is_referenced")]

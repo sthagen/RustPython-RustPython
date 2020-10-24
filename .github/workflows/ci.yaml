@@ -7,6 +7,16 @@ name: CI
 
 env:
   CARGO_ARGS: --features "ssl jit"
+  NON_WASM_PACKAGES: >
+    -p rustpython-bytecode
+    -p rustpython-common
+    -p rustpython-compiler
+    -p rustpython-parser
+    -p rustpython-vm
+    -p rustpython-jit
+    -p rustpython-derive
+    -p rustpython
+  RUSTPYTHON_NO_IPV6: 1
 
 jobs:
   rust_tests:
@@ -18,6 +28,7 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@master
+      - uses: actions-rs/toolchain@v1
       - name: Set up the Windows environment
         run: |
           choco install llvm
@@ -38,7 +49,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --verbose ${{ env.CARGO_ARGS }}
+          args: --verbose ${{ env.CARGO_ARGS }} ${{ env.NON_WASM_PACKAGES }}
       - name: check compilation without threading
         uses: actions-rs/cargo@v1
         with:
@@ -54,6 +65,7 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@master
+      - uses: actions-rs/toolchain@v1
       - name: Set up the Windows environment
         run: |
           choco install llvm
@@ -84,10 +96,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pipenv
       - run: pipenv install
-        working-directory: ./tests
+        working-directory: ./extra_tests
       - name: run snippets
         run: pipenv run pytest -v
-        working-directory: ./tests
+        working-directory: ./extra_tests
       - name: run cpython tests
         run: target/release/rustpython -m test -v
         env:
@@ -124,7 +136,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: ${{ env.CARGO_ARGS }} -- -Dwarnings
+          args: ${{ env.CARGO_ARGS }} ${{ env.NON_WASM_PACKAGES }} -- -Dwarnings
       - name: run clippy on wasm
         uses: actions-rs/cargo@v1
         with:
@@ -178,6 +190,13 @@ jobs:
           npm install
           npm run test
         working-directory: ./wasm/demo
+      - name: build notebook demo
+        if: github.ref == 'refs/heads/release'
+        run: |
+          npm install
+          npm run dist
+          mv dist ../demo/dist/notebook
+        working-directory: ./wasm/notebook
       - name: Deploy demo to Github Pages
         if: success() && github.ref == 'refs/heads/release'
         uses: peaceiris/actions-gh-pages@v2

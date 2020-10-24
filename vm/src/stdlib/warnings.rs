@@ -2,19 +2,19 @@ pub(crate) use _warnings::make_module;
 
 #[pymodule]
 mod _warnings {
+    use crate::builtins::pystr::PyStrRef;
+    use crate::builtins::pytype::PyTypeRef;
     use crate::function::OptionalArg;
-    use crate::obj::objstr::PyStringRef;
-    use crate::obj::objtype::{self, PyClassRef};
     use crate::pyobject::{PyResult, TypeProtocol};
     use crate::vm::VirtualMachine;
 
     #[derive(FromArgs)]
     struct WarnArgs {
-        #[pyarg(positional_only, optional = false)]
-        message: PyStringRef,
-        #[pyarg(positional_or_keyword, optional = true)]
-        category: OptionalArg<PyClassRef>,
-        #[pyarg(positional_or_keyword, optional = true)]
+        #[pyarg(positional)]
+        message: PyStrRef,
+        #[pyarg(any, optional)]
+        category: OptionalArg<PyTypeRef>,
+        #[pyarg(any, optional)]
         stacklevel: OptionalArg<u32>,
     }
 
@@ -23,10 +23,10 @@ mod _warnings {
         // TODO: Implement correctly
         let level = args.stacklevel.unwrap_or(1);
         let category = if let OptionalArg::Present(category) = args.category {
-            if !objtype::issubclass(&category, &vm.ctx.exceptions.warning) {
+            if !category.issubclass(&vm.ctx.exceptions.warning) {
                 return Err(vm.new_type_error(format!(
                     "category must be a Warning subclass, not '{}'",
-                    category.lease_class().name
+                    category.class().name
                 )));
             }
             category

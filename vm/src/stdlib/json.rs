@@ -3,12 +3,17 @@ mod machinery;
 
 #[pymodule]
 mod _json {
-    use crate::obj::objiter;
-    use crate::obj::objstr::PyStringRef;
-    use crate::obj::{objbool, objtype::PyClassRef};
+    use super::*;
+    use crate::builtins::pystr::PyStrRef;
+    use crate::builtins::{pybool, pytype::PyTypeRef};
+    use crate::exceptions::PyBaseExceptionRef;
+    use crate::function::{FuncArgs, OptionalArg};
+    use crate::iterator;
     use crate::pyobject::{
-        BorrowValue, IdProtocol, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue,
+        BorrowValue, IdProtocol, IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, StaticType,
+        TryFromObject,
     };
+    use crate::slots::Callable;
     use crate::VirtualMachine;
 
     use num_bigint::BigInt;
@@ -28,16 +33,16 @@ mod _json {
     }
 
     impl PyValue for JsonScanner {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("_json", "make_scanner")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
-    #[pyimpl]
+    #[pyimpl(with(Callable))]
     impl JsonScanner {
         #[pyslot]
-        fn tp_new(cls: PyClassRef, ctx: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-            let strict = objbool::boolval(vm, vm.get_attribute(ctx.clone(), "strict")?)?;
+        fn tp_new(cls: PyTypeRef, ctx: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+            let strict = pybool::boolval(vm, vm.get_attribute(ctx.clone(), "strict")?)?;
             let object_hook = vm.option_if_none(vm.get_attribute(ctx.clone(), "object_hook")?);
             let object_pairs_hook =
                 vm.option_if_none(vm.get_attribute(ctx.clone(), "object_pairs_hook")?);
@@ -71,7 +76,7 @@ mod _json {
         fn parse(
             &self,
             s: &str,
-            pystr: PyStringRef,
+            pystr: PyStrRef,
             idx: usize,
             scan_once: PyObjectRef,
             vm: &VirtualMachine,
@@ -79,36 +84,26 @@ mod _json {
             let c = s
                 .chars()
                 .next()
-                .ok_or_else(|| objiter::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
+                .ok_or_else(|| iterator::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
             let next_idx = idx + c.len_utf8();
             match c {
                 '"' => {
-                    // TODO: parse the string in rust
-                    let parse_str = vm.get_attribute(self.ctx.clone(), "parse_string")?;
-                    return vm.invoke(
-                        &parse_str,
-                        vec![
-                            pystr.into_object(),
-                            vm.ctx.new_int(next_idx),
-                            vm.ctx.new_bool(self.strict),
-                        ],
-                    );
+                    return scanstring(pystr, next_idx, OptionalArg::Present(self.strict), vm)
+                        .map(|x| x.into_pyobject(vm))
                 }
                 '{' => {
                     // TODO: parse the object in rust
                     let parse_obj = vm.get_attribute(self.ctx.clone(), "parse_object")?;
                     return vm.invoke(
                         &parse_obj,
-                        vec![
+                        (
                             vm.ctx
                                 .new_tuple(vec![pystr.into_object(), vm.ctx.new_int(next_idx)]),
-                            vm.ctx.new_bool(self.strict),
+                            self.strict,
                             scan_once,
-                            self.object_hook.clone().unwrap_or_else(|| vm.get_none()),
-                            self.object_pairs_hook
-                                .clone()
-                                .unwrap_or_else(|| vm.get_none()),
-                        ],
+                            self.object_hook.clone(),
+                            self.object_pairs_hook.clone(),
+                        ),
                     );
                 }
                 '[' => {
@@ -134,7 +129,7 @@ mod _json {
                 };
             }
 
-            parse_const!("null", vm.get_none());
+            parse_const!("null", vm.ctx.none());
             parse_const!("true", vm.ctx.new_bool(true));
             parse_const!("false", vm.ctx.new_bool(false));
 
@@ -146,7 +141,7 @@ mod _json {
                 ($s:literal) => {
                     if s.starts_with($s) {
                         return Ok(vm.ctx.new_tuple(vec![
-                            vm.invoke(&self.parse_constant, vec![vm.ctx.new_str($s.to_owned())])?,
+                            vm.invoke(&self.parse_constant, ($s.to_owned(),))?,
                             vm.ctx.new_int(idx + $s.len()),
                         ]));
                     }
@@ -157,7 +152,7 @@ mod _json {
             parse_constant!("Infinity");
             parse_constant!("-Infinity");
 
-            Err(objiter::stop_iter_with_value(vm.ctx.new_int(idx), vm))
+            Err(iterator::stop_iter_with_value(vm.ctx.new_int(idx), vm))
         }
 
         fn parse_number(&self, s: &str, vm: &VirtualMachine) -> Option<(PyResult, usize)> {
@@ -184,25 +179,19 @@ mod _json {
             let ret = if has_decimal || has_exponent {
                 // float
                 if let Some(ref parse_float) = self.parse_float {
-                    vm.invoke(parse_float, vec![vm.ctx.new_str(buf.to_owned())])
+                    vm.invoke(parse_float, (buf.to_owned(),))
                 } else {
                     Ok(vm.ctx.new_float(f64::from_str(buf).unwrap()))
                 }
             } else if let Some(ref parse_int) = self.parse_int {
-                vm.invoke(parse_int, vec![vm.ctx.new_str(buf.to_owned())])
+                vm.invoke(parse_int, (buf.to_owned(),))
             } else {
                 Ok(vm.ctx.new_int(BigInt::from_str(buf).unwrap()))
             };
             Some((ret, buf.len()))
         }
 
-        #[pyslot]
-        fn call(
-            zelf: PyRef<Self>,
-            pystr: PyStringRef,
-            idx: isize,
-            vm: &VirtualMachine,
-        ) -> PyResult {
+        fn call(zelf: &PyRef<Self>, pystr: PyStrRef, idx: isize, vm: &VirtualMachine) -> PyResult {
             if idx < 0 {
                 return Err(vm.new_value_error("idx cannot be negative".to_owned()));
             }
@@ -211,7 +200,7 @@ mod _json {
             if idx > 0 {
                 chars
                     .nth(idx - 1)
-                    .ok_or_else(|| objiter::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
+                    .ok_or_else(|| iterator::stop_iter_with_value(vm.ctx.new_int(idx), vm))?;
             }
             zelf.parse(
                 chars.as_str(),
@@ -223,22 +212,55 @@ mod _json {
         }
     }
 
+    impl Callable for JsonScanner {
+        fn call(zelf: &PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            let (pystr, idx) = args.bind::<(PyStrRef, isize)>(vm)?;
+            JsonScanner::call(zelf, pystr, idx, vm)
+        }
+    }
+
     fn encode_string(s: &str, ascii_only: bool) -> String {
         let mut buf = Vec::<u8>::with_capacity(s.len() + 2);
-        super::machinery::write_json_string(s, ascii_only, &mut buf)
-            // writing to a vec can't fail
+        machinery::write_json_string(s, ascii_only, &mut buf)
+            // SAFETY: writing to a vec can't fail
             .unwrap_or_else(|_| unsafe { std::hint::unreachable_unchecked() });
-        // TODO: verify that the implementation is correct enough to use `from_utf8_unchecked`
-        String::from_utf8(buf).expect("invalid utf-8 in json output")
+        // SAFETY: we only output valid utf8 from write_json_string
+        unsafe { String::from_utf8_unchecked(buf) }
     }
 
     #[pyfunction]
-    fn encode_basestring(s: PyStringRef) -> String {
+    fn encode_basestring(s: PyStrRef) -> String {
         encode_string(s.borrow_value(), false)
     }
 
     #[pyfunction]
-    fn encode_basestring_ascii(s: PyStringRef) -> String {
+    fn encode_basestring_ascii(s: PyStrRef) -> String {
         encode_string(s.borrow_value(), true)
+    }
+
+    fn py_decode_error(
+        e: machinery::DecodeError,
+        s: PyStrRef,
+        vm: &VirtualMachine,
+    ) -> PyBaseExceptionRef {
+        let get_error = || -> PyResult<_> {
+            let cls = vm.try_class("json", "JSONDecodeError")?;
+            let exc = vm.invoke(cls.as_object(), (e.msg, s, e.pos))?;
+            PyBaseExceptionRef::try_from_object(vm, exc)
+        };
+        match get_error() {
+            Ok(x) | Err(x) => x,
+        }
+    }
+
+    #[pyfunction]
+    fn scanstring(
+        s: PyStrRef,
+        end: usize,
+        strict: OptionalArg<bool>,
+        vm: &VirtualMachine,
+    ) -> PyResult<(String, usize)> {
+        machinery::scanstring(s.borrow_value(), end, strict.unwrap_or(true))
+            .map_err(|e| py_decode_error(e, s, vm))
     }
 }

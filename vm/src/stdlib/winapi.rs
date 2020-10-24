@@ -10,9 +10,9 @@ use winapi::um::{
 };
 
 use super::os::errno_err;
+use crate::builtins::dict::{PyDictRef, PyMapping};
+use crate::builtins::pystr::PyStrRef;
 use crate::function::OptionalArg;
-use crate::obj::objdict::{PyDictRef, PyMapping};
-use crate::obj::objstr::PyStringRef;
 use crate::pyobject::{BorrowValue, PyObjectRef, PyResult, PySequence, TryFromObject};
 use crate::VirtualMachine;
 
@@ -106,23 +106,23 @@ fn _winapi_GetFileType(h: usize, vm: &VirtualMachine) -> PyResult<u32> {
 
 #[derive(FromArgs)]
 struct CreateProcessArgs {
-    #[pyarg(positional_only)]
-    name: Option<PyStringRef>,
-    #[pyarg(positional_only)]
-    command_line: Option<PyStringRef>,
-    #[pyarg(positional_only)]
+    #[pyarg(positional)]
+    name: Option<PyStrRef>,
+    #[pyarg(positional)]
+    command_line: Option<PyStrRef>,
+    #[pyarg(positional)]
     _proc_attrs: PyObjectRef,
-    #[pyarg(positional_only)]
+    #[pyarg(positional)]
     _thread_attrs: PyObjectRef,
-    #[pyarg(positional_only)]
+    #[pyarg(positional)]
     inherit_handles: i32,
-    #[pyarg(positional_only)]
+    #[pyarg(positional)]
     creation_flags: u32,
-    #[pyarg(positional_only)]
+    #[pyarg(positional)]
     env_mapping: Option<PyMapping>,
-    #[pyarg(positional_only)]
-    current_dir: Option<PyStringRef>,
-    #[pyarg(positional_only)]
+    #[pyarg(positional)]
+    current_dir: Option<PyStrRef>,
+    #[pyarg(positional)]
     startup_info: PyObjectRef,
 }
 
@@ -169,7 +169,7 @@ fn _winapi_CreateProcess(
         .as_mut()
         .map_or_else(null_mut, |l| l.attrlist.as_mut_ptr() as _);
 
-    let wstr = |s: PyStringRef| {
+    let wstr = |s: PyStrRef| {
         if s.borrow_value().contains('\0') {
             Err(vm.new_value_error("embedded null character".to_owned()))
         } else {
@@ -226,9 +226,9 @@ fn _winapi_CreateProcess(
 fn getenvironment(env: PyDictRef, vm: &VirtualMachine) -> PyResult<Vec<u16>> {
     let mut out = vec![];
     for (k, v) in env {
-        let k = PyStringRef::try_from_object(vm, k)?;
+        let k = PyStrRef::try_from_object(vm, k)?;
         let k = k.borrow_value();
-        let v = PyStringRef::try_from_object(vm, v)?;
+        let v = PyStrRef::try_from_object(vm, v)?;
         let v = v.borrow_value();
         if k.contains('\0') || v.contains('\0') {
             return Err(vm.new_value_error("embedded null character".to_owned()));

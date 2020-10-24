@@ -138,8 +138,6 @@ class DictTest(unittest.TestCase):
 
         self.assertRaises(TypeError, d.clear, None)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_update(self):
         d = {}
         d.update({1:100})
@@ -368,8 +366,6 @@ class DictTest(unittest.TestCase):
         x.fail = True
         self.assertRaises(Exc, d.setdefault, x, [])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_setdefault_atomic(self):
         # Issue #13521: setdefault() calls __hash__ and __eq__ only once.
         class Hashed(object):
@@ -582,7 +578,6 @@ class DictTest(unittest.TestCase):
         with self.assertRaises(Exc):
             d1 == d2
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_keys_contained(self):
         self.helper_keys_contained(lambda x: x.keys())
         self.helper_keys_contained(lambda x: x.items())
@@ -631,8 +626,6 @@ class DictTest(unittest.TestCase):
         self.assertTrue(larger != larger3)
         self.assertFalse(larger == larger3)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_errors_in_view_containment_check(self):
         class C:
             def __eq__(self, other):
@@ -1329,8 +1322,6 @@ class DictTest(unittest.TestCase):
         pair = [X(), 123]
         dict([pair])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_oob_indexing_dictiter_iternextitem(self):
         class X(int):
             def __del__(self):

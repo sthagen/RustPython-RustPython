@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
-use crate::common::cell::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
+use crate::builtins::pystr::PyStrRef;
+use crate::builtins::pytype::PyTypeRef;
+use crate::common::lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
 use crate::exceptions::IntoPyException;
 use crate::function::OptionalArg;
-use crate::obj::objstr::PyStringRef;
-use crate::obj::objtype::PyClassRef;
 use crate::pyobject::{
-    BorrowValue, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    BorrowValue, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject,
 };
 use crate::VirtualMachine;
 
@@ -25,8 +25,8 @@ type PyHKEYRef = PyRef<PyHKEY>;
 unsafe impl Sync for PyHKEY {}
 
 impl PyValue for PyHKEY {
-    fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.class("winreg", "HKEYType")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -102,7 +102,7 @@ impl Hkey {
 
 fn winreg_OpenKey(
     key: Hkey,
-    subkey: Option<PyStringRef>,
+    subkey: Option<PyStrRef>,
     reserved: OptionalArg<i32>,
     access: OptionalArg<u32>,
     vm: &VirtualMachine,
@@ -122,11 +122,7 @@ fn winreg_OpenKey(
     Ok(PyHKEY::new(key))
 }
 
-fn winreg_QueryValue(
-    key: Hkey,
-    subkey: Option<PyStringRef>,
-    vm: &VirtualMachine,
-) -> PyResult<String> {
+fn winreg_QueryValue(key: Hkey, subkey: Option<PyStrRef>, vm: &VirtualMachine) -> PyResult<String> {
     let subkey = subkey.as_ref().map_or("", |s| s.borrow_value());
     key.with_key(|k| k.get_value(subkey))
         .map_err(|e| e.into_pyexception(vm))
@@ -134,7 +130,7 @@ fn winreg_QueryValue(
 
 fn winreg_QueryValueEx(
     key: Hkey,
-    subkey: Option<PyStringRef>,
+    subkey: Option<PyStrRef>,
     vm: &VirtualMachine,
 ) -> PyResult<(PyObjectRef, usize)> {
     let subkey = subkey.as_ref().map_or("", |s| s.borrow_value());
@@ -239,7 +235,7 @@ fn reg_to_py(value: RegValue, vm: &VirtualMachine) -> PyResult {
         }
         RegType::REG_BINARY | _ => {
             if value.bytes.is_empty() {
-                Ok(vm.get_none())
+                Ok(vm.ctx.none())
             } else {
                 Ok(vm.ctx.new_bytes(value.bytes))
             }
@@ -252,13 +248,13 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let hkey_type = PyHKEY::make_class(ctx);
     let module = py_module!(vm, "winreg", {
         "HKEYType" => hkey_type,
-        "OpenKey" => ctx.new_function(winreg_OpenKey),
-        "OpenKeyEx" => ctx.new_function(winreg_OpenKey),
-        "QueryValue" => ctx.new_function(winreg_QueryValue),
-        "QueryValueEx" => ctx.new_function(winreg_QueryValueEx),
-        "EnumKey" => ctx.new_function(winreg_EnumKey),
-        "EnumValue" => ctx.new_function(winreg_EnumValue),
-        "CloseKey" => ctx.new_function(winreg_CloseKey),
+        "OpenKey" => named_function!(ctx, winreg, OpenKey),
+        "OpenKeyEx" => named_function!(ctx, winreg, OpenKey),
+        "QueryValue" => named_function!(ctx, winreg, QueryValue),
+        "QueryValueEx" => named_function!(ctx, winreg, QueryValueEx),
+        "EnumKey" => named_function!(ctx, winreg, EnumKey),
+        "EnumValue" => named_function!(ctx, winreg, EnumValue),
+        "CloseKey" => named_function!(ctx, winreg, CloseKey),
     });
 
     macro_rules! add_constants {

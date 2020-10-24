@@ -134,8 +134,6 @@ class AbstractMemoryTests:
             with self.assertRaises(TypeError):
                 del m[1:4]
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_tobytes(self):
         for tp in self._types:
             m = self._view(tp(self._source))
@@ -146,8 +144,6 @@ class AbstractMemoryTests:
             self.assertEqual(b, expected)
             self.assertIsInstance(b, bytes)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_tolist(self):
         for tp in self._types:
             m = self._view(tp(self._source))
@@ -303,8 +299,6 @@ class AbstractMemoryTests:
             with m:
                 m.release()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_release(self):
         for tp in self._types:
             b = tp(self._source)
@@ -315,8 +309,6 @@ class AbstractMemoryTests:
             m.release()
             self._check_released(m, tp)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_writable_readonly(self):
         # Issue #10451: memoryview incorrectly exposes a readonly
         # buffer as writable causing a segfault if using mmap
@@ -379,8 +371,6 @@ class AbstractMemoryTests:
             self.assertIs(wr(), None)
             self.assertIs(L[0], b)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_reversed(self):
         for tp in self._types:
             b = tp(self._source)
@@ -389,8 +379,6 @@ class AbstractMemoryTests:
             self.assertEqual(list(reversed(m)), aslist)
             self.assertEqual(list(reversed(m)), list(m[::-1]))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_toreadonly(self):
         for tp in self._types:
             b = tp(self._source)
@@ -444,11 +432,9 @@ class BaseArrayMemoryTests(AbstractMemoryTests):
     itemsize = array.array('i').itemsize
     format = 'i'
 
-    @unittest.skip('XXX test should be adapted for non-byte buffers')
     def test_getbuffer(self):
         pass
 
-    @unittest.skip('XXX NotImplementedError: tolist() only supports byte views')
     def test_tolist(self):
         pass
 
@@ -497,8 +483,6 @@ class BaseMemorySliceSliceTests:
 class BytesMemoryviewTest(unittest.TestCase,
     BaseMemoryviewTests, BaseBytesMemoryTests):
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_constructor(self):
         for tp in self._types:
             ob = tp(self._source)
@@ -509,7 +493,6 @@ class BytesMemoryviewTest(unittest.TestCase,
             self.assertRaises(TypeError, memoryview, argument=ob)
             self.assertRaises(TypeError, memoryview, ob, argument=True)
 
-@unittest.skip("TODO: RUSTPYTHON")
 class ArrayMemoryviewTest(unittest.TestCase,
     BaseMemoryviewTests, BaseArrayMemoryTests):
 
@@ -526,7 +509,6 @@ class BytesMemorySliceTest(unittest.TestCase,
     BaseMemorySliceTests, BaseBytesMemoryTests):
     pass
 
-@unittest.skip("TODO: RUSTPYTHON")
 class ArrayMemorySliceTest(unittest.TestCase,
     BaseMemorySliceTests, BaseArrayMemoryTests):
     pass
@@ -535,7 +517,6 @@ class BytesMemorySliceSliceTest(unittest.TestCase,
     BaseMemorySliceSliceTests, BaseBytesMemoryTests):
     pass
 
-@unittest.skip("TODO: RUSTPYTHON")
 class ArrayMemorySliceSliceTest(unittest.TestCase,
     BaseMemorySliceSliceTests, BaseArrayMemoryTests):
     pass
@@ -573,8 +554,6 @@ class OtherTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             copy.copy(m)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickle(self):
         m = memoryview(b'abc')
         for proto in range(pickle.HIGHEST_PROTOCOL + 1):

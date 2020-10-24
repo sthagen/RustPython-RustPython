@@ -2,11 +2,11 @@ pub(crate) use decl::make_module;
 
 #[pymodule(name = "binascii")]
 mod decl {
+    use crate::builtins::bytearray::{PyByteArray, PyByteArrayRef};
+    use crate::builtins::bytes::{PyBytes, PyBytesRef};
+    use crate::builtins::pystr::{PyStr, PyStrRef};
     use crate::byteslike::PyBytesLike;
     use crate::function::OptionalArg;
-    use crate::obj::objbytearray::{PyByteArray, PyByteArrayRef};
-    use crate::obj::objbytes::{PyBytes, PyBytesRef};
-    use crate::obj::objstr::{PyString, PyStringRef};
     use crate::pyobject::{BorrowValue, PyObjectRef, PyResult, TryFromObject, TypeProtocol};
     use crate::vm::VirtualMachine;
     use crc::{crc32, Hasher32};
@@ -15,7 +15,7 @@ mod decl {
     enum SerializedData {
         Bytes(PyBytesRef),
         Buffer(PyByteArrayRef),
-        Ascii(PyStringRef),
+        Ascii(PyStrRef),
     }
 
     impl TryFromObject for SerializedData {
@@ -23,7 +23,7 @@ mod decl {
             match_class!(match obj {
                 b @ PyBytes => Ok(SerializedData::Bytes(b)),
                 b @ PyByteArray => Ok(SerializedData::Buffer(b)),
-                a @ PyString => {
+                a @ PyStr => {
                     if a.borrow_value().is_ascii() {
                         Ok(SerializedData::Ascii(a))
                     } else {
@@ -114,7 +114,7 @@ mod decl {
 
     #[derive(FromArgs)]
     struct NewlineArg {
-        #[pyarg(keyword_only, default = "true")]
+        #[pyarg(named, default = "true")]
         newline: bool,
     }
 
@@ -135,7 +135,8 @@ mod decl {
 
     #[pyfunction]
     fn b2a_base64(data: PyBytesLike, NewlineArg { newline }: NewlineArg) -> Vec<u8> {
-        let mut encoded = data.with_ref(base64::encode).into_bytes();
+        #[allow(clippy::redundant_closure)] // https://stackoverflow.com/questions/63916821
+        let mut encoded = data.with_ref(|b| base64::encode(b)).into_bytes();
         if newline {
             encoded.push(b'\n');
         }

@@ -5,8 +5,7 @@ use rustpython_parser::error::{LexicalErrorType, ParseErrorType};
 use rustpython_vm::readline::{Readline, ReadlineResult};
 use rustpython_vm::{
     exceptions::{print_exception, PyBaseExceptionRef},
-    obj::objtype,
-    pyobject::{BorrowValue, PyResult},
+    pyobject::{BorrowValue, PyResult, TypeProtocol},
     scope::Scope,
     VirtualMachine,
 };
@@ -77,7 +76,7 @@ pub fn run_shell(vm: &VirtualMachine, scope: Scope) -> PyResult<()> {
                 } else {
                     full_input.push_str(&line);
                 }
-                full_input.push_str("\n");
+                full_input.push('\n');
 
                 if continuing {
                     if stop_continuing {
@@ -127,7 +126,7 @@ pub fn run_shell(vm: &VirtualMachine, scope: Scope) -> PyResult<()> {
         };
 
         if let Err(exc) = result {
-            if objtype::isinstance(&exc, &vm.ctx.exceptions.system_exit) {
+            if exc.isinstance(&vm.ctx.exceptions.system_exit) {
                 repl.save_history(&repl_history_path).unwrap();
                 return Err(exc);
             }

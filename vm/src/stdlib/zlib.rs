@@ -2,14 +2,14 @@ pub(crate) use decl::make_module;
 
 #[pymodule(name = "zlib")]
 mod decl {
+    use crate::builtins::bytes::{PyBytes, PyBytesRef};
+    use crate::builtins::pytype::PyTypeRef;
     use crate::byteslike::PyBytesLike;
-    use crate::common::cell::PyMutex;
+    use crate::common::lock::PyMutex;
     use crate::exceptions::PyBaseExceptionRef;
     use crate::function::OptionalArg;
-    use crate::obj::objbytes::{PyBytes, PyBytesRef};
-    use crate::obj::objtype::PyClassRef;
-    use crate::pyobject::{BorrowValue, IntoPyRef, PyClassImpl, PyResult, PyValue};
-    use crate::types::create_type;
+    use crate::pyobject::{BorrowValue, IntoPyRef, PyResult, PyValue, StaticType};
+    use crate::types::create_simple_type;
     use crate::vm::VirtualMachine;
 
     use adler32::RollingAdler32 as Adler32;
@@ -23,15 +23,10 @@ mod decl {
     use std::io::Write;
 
     #[pyattr]
-    use libz::Z_BEST_COMPRESSION;
-    #[pyattr]
-    use libz::Z_BEST_SPEED;
-    #[pyattr]
-    use libz::Z_DEFAULT_COMPRESSION;
-    #[pyattr]
-    use libz::Z_DEFLATED as DEFLATED;
-    #[pyattr]
-    use libz::Z_NO_COMPRESSION;
+    use libz::{
+        Z_BEST_COMPRESSION, Z_BEST_SPEED, Z_DEFAULT_COMPRESSION, Z_DEFLATED as DEFLATED,
+        Z_NO_COMPRESSION,
+    };
 
     // copied from zlibmodule.c (commit 530f506ac91338)
     #[pyattr]
@@ -40,12 +35,8 @@ mod decl {
     const DEF_BUF_SIZE: usize = 16 * 1024;
 
     #[pyattr]
-    fn error(vm: &VirtualMachine) -> PyClassRef {
-        create_type(
-            "error",
-            &vm.ctx.types.type_type,
-            vm.ctx.exceptions.exception_type.clone(),
-        )
+    fn error(vm: &VirtualMachine) -> PyTypeRef {
+        create_simple_type("error", &vm.ctx.exceptions.exception_type)
     }
 
     /// Compute an Adler-32 checksum of data.
@@ -223,8 +214,8 @@ mod decl {
         unconsumed_tail: PyMutex<PyBytesRef>,
     }
     impl PyValue for PyDecompress {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("zlib", "Decompress")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
     #[pyimpl]
@@ -337,9 +328,9 @@ mod decl {
 
     #[derive(FromArgs)]
     struct DecompressArgs {
-        #[pyarg(positional_only)]
+        #[pyarg(positional)]
         data: PyBytesRef,
-        #[pyarg(positional_or_keyword, default = "0")]
+        #[pyarg(any, default = "0")]
         max_length: usize,
     }
 
@@ -382,8 +373,8 @@ mod decl {
     }
 
     impl PyValue for PyCompress {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("zlib", "Compress")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 

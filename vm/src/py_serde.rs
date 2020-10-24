@@ -3,11 +3,8 @@ use num_traits::sign::Signed;
 use serde::de::{DeserializeSeed, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq};
 
-use crate::obj::{
-    objbool, objdict::PyDictRef, objfloat, objint, objlist::PyList, objstr, objtuple::PyTuple,
-    objtype,
-};
-use crate::pyobject::{BorrowValue, IdProtocol, ItemProtocol, PyObjectRef, TypeProtocol};
+use crate::builtins::{dict::PyDictRef, float, int, list::PyList, pybool, pystr, tuple::PyTuple};
+use crate::pyobject::{BorrowValue, ItemProtocol, PyObjectRef, TypeProtocol};
 use crate::VirtualMachine;
 
 #[inline]
@@ -66,14 +63,14 @@ impl<'s> serde::Serialize for PyObjectSerializer<'s> {
                 }
                 seq.end()
             };
-        if objtype::isinstance(self.pyobject, &self.vm.ctx.types.str_type) {
-            serializer.serialize_str(objstr::borrow_value(&self.pyobject))
-        } else if objtype::isinstance(self.pyobject, &self.vm.ctx.types.float_type) {
-            serializer.serialize_f64(objfloat::get_value(self.pyobject))
-        } else if objtype::isinstance(self.pyobject, &self.vm.ctx.types.bool_type) {
-            serializer.serialize_bool(objbool::get_value(self.pyobject))
-        } else if objtype::isinstance(self.pyobject, &self.vm.ctx.types.int_type) {
-            let v = objint::get_value(self.pyobject);
+        if self.pyobject.isinstance(&self.vm.ctx.types.str_type) {
+            serializer.serialize_str(pystr::borrow_value(&self.pyobject))
+        } else if self.pyobject.isinstance(&self.vm.ctx.types.float_type) {
+            serializer.serialize_f64(float::get_value(self.pyobject))
+        } else if self.pyobject.isinstance(&self.vm.ctx.types.bool_type) {
+            serializer.serialize_bool(pybool::get_value(self.pyobject))
+        } else if self.pyobject.isinstance(&self.vm.ctx.types.int_type) {
+            let v = int::get_value(self.pyobject);
             let int_too_large = || serde::ser::Error::custom("int too large to serialize");
             // TODO: serialize BigInt when it does not fit into i64
             // BigInt implements serialization to a tuple of sign and a list of u32s,
@@ -88,7 +85,7 @@ impl<'s> serde::Serialize for PyObjectSerializer<'s> {
             serialize_seq_elements(serializer, &list.borrow_value())
         } else if let Some(tuple) = self.pyobject.payload_if_subclass::<PyTuple>(self.vm) {
             serialize_seq_elements(serializer, tuple.borrow_value())
-        } else if objtype::isinstance(self.pyobject, &self.vm.ctx.types.dict_type) {
+        } else if self.pyobject.isinstance(&self.vm.ctx.types.dict_type) {
             let dict: PyDictRef = self.pyobject.clone().downcast().unwrap();
             let pairs: Vec<_> = dict.into_iter().collect();
             let mut map = serializer.serialize_map(Some(pairs.len()))?;
@@ -96,12 +93,12 @@ impl<'s> serde::Serialize for PyObjectSerializer<'s> {
                 map.serialize_entry(&self.clone_with_object(key), &self.clone_with_object(&e))?;
             }
             map.end()
-        } else if self.pyobject.is(&self.vm.get_none()) {
+        } else if self.vm.is_none(&self.pyobject) {
             serializer.serialize_none()
         } else {
             Err(serde::ser::Error::custom(format!(
                 "Object of type '{}' is not serializable",
-                self.pyobject.lease_class()
+                self.pyobject.class()
             )))
         }
     }
@@ -187,7 +184,7 @@ impl<'de> Visitor<'de> for PyObjectDeserializer<'de> {
     where
         E: serde::de::Error,
     {
-        Ok(self.vm.get_none())
+        Ok(self.vm.ctx.none())
     }
 
     fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>

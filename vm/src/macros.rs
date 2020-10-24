@@ -39,18 +39,21 @@ macro_rules! py_class {
     ( $ctx:expr, $class_name:expr, $class_base:expr, $flags:expr, { $($name:tt => $value:expr),* $(,)* }) => {
         {
             #[allow(unused_mut)]
-            let mut slots = $crate::slots::PyClassSlots::from_flags($crate::slots::PyTpFlags::DEFAULT | $flags);
+            let mut slots = $crate::slots::PyTypeSlots::from_flags($crate::slots::PyTpFlags::DEFAULT | $flags);
             $($crate::py_class!(@extract_slots($ctx, &mut slots, $name, $value));)*
-            let py_class = $ctx.new_class($class_name, $class_base.clone(), slots);
+            let py_class = $ctx.new_class($class_name, $class_base, slots);
             $($crate::py_class!(@extract_attrs($ctx, &py_class, $name, $value));)*
             $ctx.add_tp_new_wrapper(&py_class);
             py_class
         }
     };
-    (@extract_slots($ctx:expr, $slots:expr, (slot $slot_name:ident), $value:expr)) => {
-        $slots.$slot_name = Some(
+    (@extract_slots($ctx:expr, $slots:expr, (slot new), $value:expr)) => {
+        $slots.new = Some(
             $crate::function::IntoPyNativeFunc::into_func($value)
         );
+    };
+    (@extract_slots($ctx:expr, $slots:expr, (slot $slot_name:ident), $value:expr)) => {
+        $slots.$slot_name.store(Some($value));
     };
     (@extract_slots($ctx:expr, $class:expr, $name:expr, $value:expr)) => {};
     (@extract_attrs($ctx:expr, $slots:expr, (slot $slot_name:ident), $value:expr)) => {};
@@ -93,13 +96,12 @@ macro_rules! py_namespace {
 /// use num_bigint::ToBigInt;
 /// use num_traits::Zero;
 ///
-/// use rustpython_vm::VirtualMachine;
 /// use rustpython_vm::match_class;
-/// use rustpython_vm::obj::objfloat::PyFloat;
-/// use rustpython_vm::obj::objint::PyInt;
+/// use rustpython_vm::builtins::PyFloat;
+/// use rustpython_vm::builtins::PyInt;
 /// use rustpython_vm::pyobject::PyValue;
 ///
-/// let vm: VirtualMachine = Default::default();
+/// # rustpython_vm::Interpreter::default().enter(|vm| {
 /// let obj = PyInt::from(0).into_ref(&vm).into_object();
 /// assert_eq!(
 ///     "int",
@@ -109,6 +111,7 @@ macro_rules! py_namespace {
 ///         _ => "neither",
 ///     })
 /// );
+/// # });
 ///
 /// ```
 ///
@@ -118,13 +121,12 @@ macro_rules! py_namespace {
 /// use num_bigint::ToBigInt;
 /// use num_traits::Zero;
 ///
-/// use rustpython_vm::VirtualMachine;
 /// use rustpython_vm::match_class;
-/// use rustpython_vm::obj::objfloat::PyFloat;
-/// use rustpython_vm::obj::objint::PyInt;
+/// use rustpython_vm::builtins::PyFloat;
+/// use rustpython_vm::builtins::PyInt;
 /// use rustpython_vm::pyobject::{PyValue, BorrowValue};
 ///
-/// let vm: VirtualMachine = Default::default();
+/// # rustpython_vm::Interpreter::default().enter(|vm| {
 /// let obj = PyInt::from(0).into_ref(&vm).into_object();
 ///
 /// let int_value = match_class!(match obj {
@@ -134,6 +136,7 @@ macro_rules! py_namespace {
 /// });
 ///
 /// assert!(int_value.is_zero());
+/// # });
 /// ```
 #[macro_export]
 macro_rules! match_class {
@@ -224,10 +227,10 @@ macro_rules! flame_guard {
 
 #[macro_export]
 macro_rules! class_or_notimplemented {
-    ($vm:expr, $t:ty, $obj:expr) => {
-        match $crate::pyobject::PyObject::downcast::<$t>($obj) {
-            Ok(pyref) => pyref,
-            Err(_) => return Ok(PyArithmaticValue::NotImplemented),
+    ($t:ty, $obj:expr) => {
+        match $crate::pyobject::PyObjectRef::downcast_ref::<$t>($obj) {
+            Some(pyref) => pyref,
+            None => return Ok($crate::pyobject::PyArithmaticValue::NotImplemented),
         }
     };
 }
@@ -235,13 +238,16 @@ macro_rules! class_or_notimplemented {
 #[macro_export]
 macro_rules! named_function {
     ($ctx:expr, $module:ident, $func:ident) => {{
-        paste::expr! {
-            $crate::pyobject::PyContext::new_function_named(
-                &$ctx,
+        #[allow(unused_variables)] // weird lint, something to do with paste probably
+        let ctx: &$crate::pyobject::PyContext = &$ctx;
+        $crate::__exports::paste::expr! {
+            ctx.new_function_named(
                 [<$module _ $func>],
                 stringify!($module).to_owned(),
-                stringify!($func).to_owned(),
             )
+            .into_function()
+            .with_module(ctx.new_str(stringify!($func).to_owned()))
+            .build(ctx)
         }
     }};
 }

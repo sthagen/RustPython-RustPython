@@ -9,6 +9,7 @@ use rustpython_bytecode::bytecode;
 mod instructions;
 
 use instructions::FunctionCompiler;
+use std::convert::TryFrom;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JitCompileError {
@@ -20,10 +21,12 @@ pub enum JitCompileError {
     CraneliftError(#[from] ModuleError),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum JitArgumentError {
     #[error("argument is of wrong type")]
     ArgumentTypeMismatch,
+    #[error("wrong number of arguments")]
+    WrongNumberOfArguments,
 }
 
 struct Jit {
@@ -60,20 +63,18 @@ impl Jit {
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
-        builder.seal_block(entry_block);
 
         let sig = {
             let mut arg_names = bytecode.arg_names.clone();
             arg_names.extend(bytecode.kwonlyarg_names.iter().cloned());
             let mut compiler = FunctionCompiler::new(&mut builder, &arg_names, args, entry_block);
 
-            for instruction in &bytecode.instructions {
-                compiler.add_instruction(instruction)?;
-            }
+            compiler.compile(bytecode)?;
 
             compiler.sig
         };
 
+        builder.seal_all_blocks();
         builder.finalize();
 
         let id = self.module.declare_function(
@@ -120,16 +121,29 @@ impl CompiledCode {
         ArgsBuilder::new(self)
     }
 
-    pub fn invoke<'a>(&self, args: &Args<'a>) -> Option<AbiValue> {
-        debug_assert_eq!(self as *const _, args.code as *const _);
-        let cif = self.sig.to_cif();
-        unsafe {
-            let value = cif.call::<UnTypedAbiValue>(
-                libffi::middle::CodePtr::from_ptr(self.code as *const _),
-                &args.cif_args,
-            );
-            self.sig.ret.as_ref().map(|ty| value.to_typed(ty))
+    pub fn invoke(&self, args: &[AbiValue]) -> Result<Option<AbiValue>, JitArgumentError> {
+        if self.sig.args.len() != args.len() {
+            return Err(JitArgumentError::WrongNumberOfArguments);
         }
+
+        let cif_args = self
+            .sig
+            .args
+            .iter()
+            .zip(args.iter())
+            .map(|(ty, val)| type_check(ty, val).map(|_| val))
+            .map(|v| v.map(AbiValue::to_libffi_arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(unsafe { self.invoke_raw(&cif_args) })
+    }
+
+    unsafe fn invoke_raw(&self, cif_args: &[libffi::middle::Arg]) -> Option<AbiValue> {
+        let cif = self.sig.to_cif();
+        let value = cif.call::<UnTypedAbiValue>(
+            libffi::middle::CodePtr::from_ptr(self.code as *const _),
+            cif_args,
+        );
+        self.sig.ret.as_ref().map(|ty| value.to_typed(ty))
     }
 }
 
@@ -152,6 +166,7 @@ impl JitSig {
 pub enum JitType {
     Int,
     Float,
+    Bool,
 }
 
 impl JitType {
@@ -159,6 +174,7 @@ impl JitType {
         match self {
             Self::Int => types::I64,
             Self::Float => types::F64,
+            Self::Bool => types::I8,
         }
     }
 
@@ -166,20 +182,93 @@ impl JitType {
         match self {
             Self::Int => libffi::middle::Type::i64(),
             Self::Float => libffi::middle::Type::f64(),
+            Self::Bool => libffi::middle::Type::u8(),
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AbiValue {
     Float(f64),
     Int(i64),
+    Bool(bool),
+}
+
+impl AbiValue {
+    fn to_libffi_arg(&self) -> libffi::middle::Arg {
+        match self {
+            AbiValue::Int(ref i) => libffi::middle::Arg::new(i),
+            AbiValue::Float(ref f) => libffi::middle::Arg::new(f),
+            AbiValue::Bool(ref b) => libffi::middle::Arg::new(b),
+        }
+    }
+}
+
+impl From<i64> for AbiValue {
+    fn from(i: i64) -> Self {
+        AbiValue::Int(i)
+    }
+}
+
+impl From<f64> for AbiValue {
+    fn from(f: f64) -> Self {
+        AbiValue::Float(f)
+    }
+}
+
+impl From<bool> for AbiValue {
+    fn from(b: bool) -> Self {
+        AbiValue::Bool(b)
+    }
+}
+
+impl TryFrom<AbiValue> for i64 {
+    type Error = ();
+
+    fn try_from(value: AbiValue) -> Result<Self, Self::Error> {
+        match value {
+            AbiValue::Int(i) => Ok(i),
+            _ => Err(()),
+        }
+    }
+}
+
+impl TryFrom<AbiValue> for f64 {
+    type Error = ();
+
+    fn try_from(value: AbiValue) -> Result<Self, Self::Error> {
+        match value {
+            AbiValue::Float(f) => Ok(f),
+            _ => Err(()),
+        }
+    }
+}
+
+impl TryFrom<AbiValue> for bool {
+    type Error = ();
+
+    fn try_from(value: AbiValue) -> Result<Self, Self::Error> {
+        match value {
+            AbiValue::Bool(b) => Ok(b),
+            _ => Err(()),
+        }
+    }
+}
+
+fn type_check(ty: &JitType, val: &AbiValue) -> Result<(), JitArgumentError> {
+    match (ty, val) {
+        (JitType::Int, AbiValue::Int(_))
+        | (JitType::Float, AbiValue::Float(_))
+        | (JitType::Bool, AbiValue::Bool(_)) => Ok(()),
+        _ => Err(JitArgumentError::ArgumentTypeMismatch),
+    }
 }
 
 #[derive(Copy, Clone)]
 union UnTypedAbiValue {
     float: f64,
     int: i64,
+    boolean: u8,
     _void: (),
 }
 
@@ -188,6 +277,7 @@ impl UnTypedAbiValue {
         match ty {
             JitType::Int => AbiValue::Int(self.int),
             JitType::Float => AbiValue::Float(self.float),
+            JitType::Bool => AbiValue::Bool(self.boolean != 0),
         }
     }
 }
@@ -222,13 +312,9 @@ impl<'a> ArgsBuilder<'a> {
     }
 
     pub fn set(&mut self, idx: usize, value: AbiValue) -> Result<(), JitArgumentError> {
-        match (&self.code.sig.args[idx], &value) {
-            (JitType::Int, AbiValue::Int(_)) | (JitType::Float, AbiValue::Float(_)) => {
-                self.values[idx] = Some(value);
-                Ok(())
-            }
-            _ => Err(JitArgumentError::ArgumentTypeMismatch),
-        }
+        type_check(&self.code.sig.args[idx], &value).map(|_| {
+            self.values[idx] = Some(value);
+        })
     }
 
     pub fn is_set(&self, idx: usize) -> bool {
@@ -238,12 +324,7 @@ impl<'a> ArgsBuilder<'a> {
     pub fn into_args(self) -> Option<Args<'a>> {
         self.values
             .iter()
-            .map(|v| {
-                v.as_ref().map(|v| match v {
-                    AbiValue::Int(ref i) => libffi::middle::Arg::new(i),
-                    AbiValue::Float(ref f) => libffi::middle::Arg::new(f),
-                })
-            })
+            .map(|v| v.as_ref().map(AbiValue::to_libffi_arg))
             .collect::<Option<_>>()
             .map(|cif_args| Args {
                 _values: self.values,
@@ -257,4 +338,10 @@ pub struct Args<'a> {
     _values: Vec<Option<AbiValue>>,
     cif_args: Vec<libffi::middle::Arg>,
     code: &'a CompiledCode,
+}
+
+impl<'a> Args<'a> {
+    pub fn invoke(&self) -> Option<AbiValue> {
+        unsafe { self.code.invoke_raw(&self.cif_args) }
+    }
 }

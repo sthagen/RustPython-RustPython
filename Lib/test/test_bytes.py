@@ -113,8 +113,6 @@ class BaseBytesTest:
         b = self.type2test([1, 2, 3])
         self.assertEqual(b, b"\x01\x02\x03")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_from_mutating_list(self):
         # Issue #34973: Crash in bytes constructor with mutating list.
         class X:
@@ -132,8 +130,6 @@ class BaseBytesTest:
         a = [Y()]
         self.assertEqual(bytes(a), b'*' * 1000)  # should not crash
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_from_index(self):
         b = self.type2test([Indexable(), Indexable(1), Indexable(254),
                             Indexable(255)])
@@ -381,8 +377,6 @@ class BaseBytesTest:
             self.assertNotIn(f(b"dab"), b)
             self.assertNotIn(f(b"abd"), b)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_fromhex(self):
         self.assertRaises(TypeError, self.type2test.fromhex)
         self.assertRaises(TypeError, self.type2test.fromhex, 1)
@@ -420,8 +414,6 @@ class BaseBytesTest:
                 self.type2test.fromhex(data)
             self.assertIn('at position %s' % pos, str(cm.exception))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hex(self):
         self.assertRaises(TypeError, self.type2test.hex)
         self.assertRaises(TypeError, self.type2test.hex, 1)
@@ -430,8 +422,6 @@ class BaseBytesTest:
         self.assertEqual(self.type2test(b"\x1a\x2b\x30").hex(), '1a2b30')
         self.assertEqual(memoryview(b"\x1a\x2b\x30").hex(), '1a2b30')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hex_separator_basics(self):
         three_bytes = self.type2test(b'\xb9\x01\xef')
         self.assertEqual(three_bytes.hex(), 'b901ef')
@@ -473,8 +463,6 @@ class BaseBytesTest:
         five_bytes = self.type2test(range(90,95))
         self.assertEqual(five_bytes.hex(), '5a5b5c5d5e')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hex_separator_six_bytes(self):
         six_bytes = self.type2test(x*3 for x in range(1, 7))
         self.assertEqual(six_bytes.hex(), '0306090c0f12')
@@ -740,8 +728,6 @@ class BaseBytesTest:
         self.assertRaises(TypeError, self.type2test(b'a b').partition, 32)
         self.assertRaises(TypeError, self.type2test(b'a b').rpartition, 32)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickling(self):
         for proto in range(pickle.HIGHEST_PROTOCOL + 1):
             for b in b"", b"a", b"abc", b"\xffab\x80", b"\0\0\377\0\0":
@@ -826,7 +812,6 @@ class BaseBytesTest:
         self.assertRaises(ValueError, self.type2test.maketrans, b'abc', b'xyzq')
         self.assertRaises(TypeError, self.type2test.maketrans, 'abc', 'def')
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_none_arguments(self):
         # issue 11828
         b = self.type2test(b'hello')
@@ -940,8 +925,6 @@ class BaseBytesTest:
 class BytesTest(BaseBytesTest, unittest.TestCase):
     type2test = bytes
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_getitem_error(self):
         b = b'python'
         msg = "byte indices must be integers or slices"
@@ -1139,8 +1122,6 @@ class BytesTest(BaseBytesTest, unittest.TestCase):
 class ByteArrayTest(BaseBytesTest, unittest.TestCase):
     type2test = bytearray
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_getitem_error(self):
         b = bytearray(b'python')
         msg = "bytearray indices must be integers or slices"
@@ -1238,8 +1219,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         b = by("Hello, world")
         self.assertEqual(re.findall(br"\w+", b), [by("Hello"), by("world")])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_setitem(self):
         b = bytearray([1, 2, 3])
         b[1] = 100
@@ -1283,8 +1262,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         del b[4]
         self.assertEqual(b, bytearray([1, 2, 3, 4, 6, 7, 8]))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_setslice(self):
         b = bytearray(range(10))
         self.assertEqual(list(b), list(range(10)))
@@ -1371,7 +1348,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
                     del b[start:stop:step]
                     self.assertEqual(b, bytearray(L))
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_setslice_trap(self):
         # This test verifies that we correctly handle assigning self
         # to a slice of self (the old Lambert Meertens trap).
@@ -1379,8 +1355,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         b[8:] = b
         self.assertEqual(b, bytearray(list(range(8)) + list(range(256))))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_iconcat(self):
         b = bytearray(b"abc")
         b1 = b
@@ -1397,8 +1371,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         else:
             self.fail("bytes += unicode didn't raise TypeError")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_irepeat(self):
         b = bytearray(b"abc")
         b1 = b
@@ -1407,8 +1379,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         self.assertEqual(b, b1)
         self.assertIs(b, b1)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_irepeat_1char(self):
         b = bytearray(b"x")
         b1 = b
@@ -1450,7 +1420,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         alloc = b.__alloc__()
         self.assertGreater(alloc, len(b))
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_extend(self):
         orig = b'hello'
         a = bytearray(orig)
@@ -1479,8 +1448,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         a.extend([Indexable(ord('a'))])
         self.assertEqual(a, b'a')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_remove(self):
         b = bytearray(b'hello')
         b.remove(ord('l'))
@@ -1505,8 +1472,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         c.remove(129)
         self.assertEqual(c, bytes([126, 128]))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pop(self):
         b = bytearray(b'world')
         self.assertEqual(b.pop(), ord('d'))
@@ -1520,8 +1485,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
     def test_nosort(self):
         self.assertRaises(AttributeError, lambda: bytearray().sort())
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_append(self):
         b = bytearray(b'hell')
         b.append(ord('o'))
@@ -1535,8 +1498,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         b.append(Indexable(ord('A')))
         self.assertEqual(b, b'A')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_insert(self):
         b = bytearray(b'msssspp')
         b.insert(1, ord('i'))
@@ -1580,8 +1541,6 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         self.assertEqual(b, b"")
         self.assertEqual(c, b"")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_resize_forbidden(self):
         # #4509: can't resize a bytearray when there are buffer exports, even
         # if it wouldn't reallocate the underlying buffer.
@@ -1901,8 +1860,6 @@ class SubclassTest:
         s3 = s1.join([b"abcd"])
         self.assertIs(type(s3), self.basetype)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickle(self):
         a = self.type2test(b"abcd")
         a.x = 10
@@ -1916,8 +1873,6 @@ class SubclassTest:
             self.assertEqual(type(a), type(b))
             self.assertEqual(type(a.y), type(b.y))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_copy(self):
         a = self.type2test(b"abcd")
         a.x = 10

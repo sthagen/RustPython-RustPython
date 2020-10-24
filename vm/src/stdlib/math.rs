@@ -3,16 +3,14 @@
  *
  */
 
+use num_bigint::BigInt;
+use num_traits::{One, Signed, Zero};
 use statrs::function::erf::{erf, erfc};
 use statrs::function::gamma::{gamma, ln_gamma};
 
-use num_bigint::BigInt;
-use num_traits::{One, Signed, Zero};
-
+use crate::builtins::float::{self, IntoPyFloat, PyFloatRef};
+use crate::builtins::int::{self, PyInt, PyIntRef};
 use crate::function::{Args, OptionalArg};
-use crate::obj::objfloat::{self, IntoPyFloat, PyFloatRef};
-use crate::obj::objint::{self, PyInt, PyIntRef};
-use crate::obj::objtype;
 use crate::pyobject::{BorrowValue, Either, PyObjectRef, PyResult, TypeProtocol};
 use crate::vm::VirtualMachine;
 use rustpython_common::float_ops;
@@ -47,13 +45,13 @@ make_math_func_bool!(math_isnan, is_nan);
 
 #[derive(FromArgs)]
 struct IsCloseArgs {
-    #[pyarg(positional_only, optional = false)]
+    #[pyarg(positional)]
     a: IntoPyFloat,
-    #[pyarg(positional_only, optional = false)]
+    #[pyarg(positional)]
     b: IntoPyFloat,
-    #[pyarg(keyword_only, optional = true)]
+    #[pyarg(named, optional)]
     rel_tol: OptionalArg<IntoPyFloat>,
-    #[pyarg(keyword_only, optional = true)]
+    #[pyarg(named, optional)]
     abs_tol: OptionalArg<IntoPyFloat>,
 }
 
@@ -127,11 +125,50 @@ fn math_pow(x: IntoPyFloat, y: IntoPyFloat) -> f64 {
     x.to_f64().powf(y.to_f64())
 }
 
-make_math_func!(math_sqrt, sqrt);
+fn math_sqrt(value: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+    let value = value.to_f64();
+    if value.is_sign_negative() {
+        return Err(vm.new_value_error("math domain error".to_owned()));
+    }
+    Ok(value.sqrt())
+}
+
+fn math_isqrt(x: PyObjectRef, vm: &VirtualMachine) -> PyResult<BigInt> {
+    let index = vm.to_index(&x).ok_or_else(|| {
+        vm.new_type_error(format!(
+            "'{}' object cannot be interpreted as an integer",
+            x.class().name
+        ))
+    })?;
+    // __index__ may have returned non-int type
+    let python_value = index?;
+    let value = python_value.borrow_value();
+
+    if value.is_negative() {
+        return Err(vm.new_value_error("isqrt() argument must be nonnegative".to_owned()));
+    }
+    Ok(value.sqrt())
+}
 
 // Trigonometric functions:
-make_math_func!(math_acos, acos);
-make_math_func!(math_asin, asin);
+fn math_acos(x: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+    let x = x.to_f64();
+    if x.is_nan() || (-1.0_f64..=1.0_f64).contains(&x) {
+        Ok(x.acos())
+    } else {
+        Err(vm.new_value_error("math domain error".to_owned()))
+    }
+}
+
+fn math_asin(x: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+    let x = x.to_f64();
+    if x.is_nan() || (-1.0_f64..=1.0_f64).contains(&x) {
+        Ok(x.asin())
+    } else {
+        Err(vm.new_value_error("math domain error".to_owned()))
+    }
+}
+
 make_math_func!(math_atan, atan);
 
 fn math_atan2(y: IntoPyFloat, x: IntoPyFloat) -> f64 {
@@ -208,11 +245,11 @@ fn try_magic_method(func_name: &str, vm: &VirtualMachine, value: &PyObjectRef) -
     let method = vm.get_method_or_type_error(value.clone(), func_name, || {
         format!(
             "type '{}' doesn't define '{}' method",
-            value.lease_class().name,
+            value.class().name,
             func_name,
         )
     })?;
-    vm.invoke(&method, vec![])
+    vm.invoke(&method, ())
 }
 
 fn math_trunc(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
@@ -226,9 +263,9 @@ fn math_trunc(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
 /// * `value` - Either a float or a python object which implements __ceil__
 /// * `vm` - Represents the python state.
 fn math_ceil(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-    if objtype::isinstance(&value, &vm.ctx.types.float_type) {
-        let v = objfloat::get_value(&value);
-        let v = objfloat::try_bigint(v.ceil(), vm)?;
+    if value.isinstance(&vm.ctx.types.float_type) {
+        let v = float::get_value(&value);
+        let v = float::try_bigint(v.ceil(), vm)?;
         Ok(vm.ctx.new_int(v))
     } else {
         try_magic_method("__ceil__", vm, &value)
@@ -242,9 +279,9 @@ fn math_ceil(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
 /// * `value` - Either a float or a python object which implements __ceil__
 /// * `vm` - Represents the python state.
 fn math_floor(value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-    if objtype::isinstance(&value, &vm.ctx.types.float_type) {
-        let v = objfloat::get_value(&value);
-        let v = objfloat::try_bigint(v.floor(), vm)?;
+    if value.isinstance(&vm.ctx.types.float_type) {
+        let v = float::get_value(&value);
+        let v = float::try_bigint(v.floor(), vm)?;
         Ok(vm.ctx.new_int(v))
     } else {
         try_magic_method("__floor__", vm, &value)
@@ -268,9 +305,9 @@ fn math_ldexp(
 ) -> PyResult<f64> {
     let value = match value {
         Either::A(f) => f.to_f64(),
-        Either::B(z) => objint::try_float(z.borrow_value(), vm)?,
+        Either::B(z) => int::try_float(z.borrow_value(), vm)?,
     };
-    Ok(value * (2_f64).powf(objint::try_float(i.borrow_value(), vm)?))
+    Ok(value * (2_f64).powf(int::try_float(i.borrow_value(), vm)?))
 }
 
 fn math_perf_arb_len_int_op<F>(args: Args<PyIntRef>, op: F, default: BigInt) -> BigInt
@@ -326,18 +363,46 @@ fn math_modf(x: IntoPyFloat) -> (f64, f64) {
     (x.fract(), x.trunc())
 }
 
+#[inline]
 #[cfg(not(target_arch = "wasm32"))]
-fn math_nextafter(x: IntoPyFloat, y: IntoPyFloat) -> PyResult<f64> {
+fn libc_nextafter(x: f64, y: f64) -> f64 {
     extern "C" {
         fn nextafter(x: c_double, y: c_double) -> c_double;
     }
+    unsafe { nextafter(x, y) }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn math_nextafter(x: IntoPyFloat, y: IntoPyFloat) -> PyResult<f64> {
     let x = x.to_f64();
     let y = y.to_f64();
-    Ok(unsafe { nextafter(x, y) })
+    Ok(libc_nextafter(x, y))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn math_nextafter(x: IntoPyFloat, y: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+fn math_nextafter(_x: IntoPyFloat, _y: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+    Err(vm.new_not_implemented_error("not implemented for this platform".to_owned()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn math_ulp(x: IntoPyFloat) -> PyResult<f64> {
+    let mut x = x.to_f64();
+    if x.is_nan() {
+        return Ok(x);
+    }
+    x = x.abs();
+    let mut x2 = libc_nextafter(x, f64::INFINITY);
+    Ok(if x2.is_infinite() {
+        // special case: x is the largest positive representable float
+        x2 = libc_nextafter(x, f64::NEG_INFINITY);
+        x - x2
+    } else {
+        x2 - x
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn math_ulp(_x: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
     Err(vm.new_not_implemented_error("not implemented for this platform".to_owned()))
 }
 
@@ -404,69 +469,72 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
 
     py_module!(vm, "math", {
         // Number theory functions:
-        "fabs" => ctx.new_function(math_fabs),
-        "isfinite" => ctx.new_function(math_isfinite),
-        "isinf" => ctx.new_function(math_isinf),
-        "isnan" => ctx.new_function(math_isnan),
-        "isclose" => ctx.new_function(math_isclose),
-        "copysign" => ctx.new_function(math_copysign),
+        "fabs" => named_function!(ctx, math, fabs),
+        "isfinite" => named_function!(ctx, math, isfinite),
+        "isinf" => named_function!(ctx, math, isinf),
+        "isnan" => named_function!(ctx, math, isnan),
+        "isclose" => named_function!(ctx, math, isclose),
+        "copysign" => named_function!(ctx, math, copysign),
 
         // Power and logarithmic functions:
-        "exp" => ctx.new_function(math_exp),
-        "expm1" => ctx.new_function(math_expm1),
-        "log" => ctx.new_function(math_log),
-        "log1p" => ctx.new_function(math_log1p),
-        "log2" => ctx.new_function(math_log2),
-        "log10" => ctx.new_function(math_log10),
-        "pow" => ctx.new_function(math_pow),
-        "sqrt" => ctx.new_function(math_sqrt),
+        "exp" => named_function!(ctx, math, exp),
+        "expm1" => named_function!(ctx, math, expm1),
+        "log" => named_function!(ctx, math, log),
+        "log1p" => named_function!(ctx, math, log1p),
+        "log2" => named_function!(ctx, math, log2),
+        "log10" => named_function!(ctx, math, log10),
+        "pow" => named_function!(ctx, math, pow),
+        "sqrt" => named_function!(ctx, math, sqrt),
+        "isqrt" => named_function!(ctx, math, isqrt),
 
         // Trigonometric functions:
-        "acos" => ctx.new_function(math_acos),
-        "asin" => ctx.new_function(math_asin),
-        "atan" => ctx.new_function(math_atan),
-        "atan2" => ctx.new_function(math_atan2),
-        "cos" => ctx.new_function(math_cos),
-        "hypot" => ctx.new_function(math_hypot),
-        "sin" => ctx.new_function(math_sin),
-        "tan" => ctx.new_function(math_tan),
+        "acos" => named_function!(ctx, math, acos),
+        "asin" => named_function!(ctx, math, asin),
+        "atan" => named_function!(ctx, math, atan),
+        "atan2" => named_function!(ctx, math, atan2),
+        "cos" => named_function!(ctx, math, cos),
+        "hypot" => named_function!(ctx, math, hypot),
+        "sin" => named_function!(ctx, math, sin),
+        "tan" => named_function!(ctx, math, tan),
 
-        "degrees" => ctx.new_function(math_degrees),
-        "radians" => ctx.new_function(math_radians),
+        "degrees" => named_function!(ctx, math, degrees),
+        "radians" => named_function!(ctx, math, radians),
 
         // Hyperbolic functions:
-        "acosh" => ctx.new_function(math_acosh),
-        "asinh" => ctx.new_function(math_asinh),
-        "atanh" => ctx.new_function(math_atanh),
-        "cosh" => ctx.new_function(math_cosh),
-        "sinh" => ctx.new_function(math_sinh),
-        "tanh" => ctx.new_function(math_tanh),
+        "acosh" => named_function!(ctx, math, acosh),
+        "asinh" => named_function!(ctx, math, asinh),
+        "atanh" => named_function!(ctx, math, atanh),
+        "cosh" => named_function!(ctx, math, cosh),
+        "sinh" => named_function!(ctx, math, sinh),
+        "tanh" => named_function!(ctx, math, tanh),
 
         // Special functions:
-        "erf" => ctx.new_function(math_erf),
-        "erfc" => ctx.new_function(math_erfc),
-        "gamma" => ctx.new_function(math_gamma),
-        "lgamma" => ctx.new_function(math_lgamma),
+        "erf" => named_function!(ctx, math, erf),
+        "erfc" => named_function!(ctx, math, erfc),
+        "gamma" => named_function!(ctx, math, gamma),
+        "lgamma" => named_function!(ctx, math, lgamma),
 
-        "frexp" => ctx.new_function(math_frexp),
-        "ldexp" => ctx.new_function(math_ldexp),
-        "modf" => ctx.new_function(math_modf),
-        "fmod" => ctx.new_function(math_fmod),
-        "remainder" => ctx.new_function(math_remainder),
+        "frexp" => named_function!(ctx, math, frexp),
+        "ldexp" => named_function!(ctx, math, ldexp),
+        "modf" => named_function!(ctx, math, modf),
+        "fmod" => named_function!(ctx, math, fmod),
+        "remainder" => named_function!(ctx, math, remainder),
 
         // Rounding functions:
-        "trunc" => ctx.new_function(math_trunc),
-        "ceil" => ctx.new_function(math_ceil),
-        "floor" => ctx.new_function(math_floor),
+        "trunc" => named_function!(ctx, math, trunc),
+        "ceil" => named_function!(ctx, math, ceil),
+        "floor" => named_function!(ctx, math, floor),
 
         // Gcd function
-        "gcd" => ctx.new_function(math_gcd),
-        "lcm" => ctx.new_function(math_lcm),
+        "gcd" => named_function!(ctx, math, gcd),
+        "lcm" => named_function!(ctx, math, lcm),
 
         // Factorial function
-        "factorial" => ctx.new_function(math_factorial),
+        "factorial" => named_function!(ctx, math, factorial),
 
-        "nextafter" => ctx.new_function(math_nextafter),
+        // Floating point
+        "nextafter" => named_function!(ctx, math, nextafter),
+        "ulp" => named_function!(ctx, math, ulp),
 
         // Constants:
         "pi" => ctx.new_float(std::f64::consts::PI), // 3.14159...

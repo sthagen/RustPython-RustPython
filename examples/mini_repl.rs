@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // this needs to be in scope in order to insert things into scope.globals
 use vm::pyobject::ItemProtocol;
 
-// This has to be a macro because it uses the py_compile_bytecode macro,
+// This has to be a macro because it uses the py_compile macro,
 // which compiles python source to optimized bytecode at compile time, so that
 // the program you're embedding this into doesn't take longer to start up.
 macro_rules! add_python_function {
@@ -19,15 +19,7 @@ macro_rules! add_python_function {
         // (a PyRef is a special reference that points to something in the VirtualMachine)
         use vm::pyobject::PyValue;
 
-        // you can safely assume that only one module will be created when passing a source literal
-        // to py_compile_bytecode. However, it is also possible to pass directories, which may
-        // return more modules.
-        let (_, vm::bytecode::FrozenModule { code, .. }): (String, _) =
-            vm::py_compile_bytecode!(source = $src)
-                .into_iter()
-                .collect::<Vec<_>>()
-                .pop()
-                .expect("No modules found in the provided source!");
+        let code = vm::py_compile!(source = $src);
 
         // takes the first constant in the file that's a function
         let def = code
@@ -42,7 +34,7 @@ macro_rules! add_python_function {
         $scope.globals.set_item(
             def.obj_name.as_str(),
             $vm.ctx.new_pyfunction(
-                vm::obj::objcode::PyCode::new(*def.clone()).into_ref(&$vm),
+                vm::builtins::PyCode::new(*def.clone()).into_ref(&$vm),
                 $scope.clone(),
                 None,
                 None,
@@ -59,14 +51,17 @@ fn on(b: bool) {
 }
 
 fn main() -> vm::pyobject::PyResult<()> {
+    vm::Interpreter::default().enter(run)
+}
+
+fn run(vm: &vm::VirtualMachine) -> vm::pyobject::PyResult<()> {
     let mut input = String::with_capacity(50);
     let stdin = std::io::stdin();
 
-    let vm = vm::VirtualMachine::new(vm::PySettings::default());
     let scope: vm::scope::Scope = vm.new_scope_with_builtins();
 
     // typing `quit()` is too long, let's make `on(False)` work instead.
-    scope.globals.set_item("on", vm.ctx.new_function(on), &vm)?;
+    scope.globals.set_item("on", vm.ctx.new_function(on), vm)?;
 
     // let's include a fibonacci function, but let's be lazy and write it in Python
     add_python_function!(
@@ -97,11 +92,11 @@ fn main() -> vm::pyobject::PyResult<()> {
             Ok(output) => {
                 // store the last value in the "last" variable
                 if !vm.is_none(&output) {
-                    scope.globals.set_item("last", output, &vm)?;
+                    scope.globals.set_item("last", output, vm)?;
                 }
             }
             Err(e) => {
-                vm::exceptions::print_exception(&vm, e);
+                vm::exceptions::print_exception(vm, e);
             }
         }
     }

@@ -1,26 +1,25 @@
-use crate::common::cell::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
-use std::io::{self, prelude::*};
-use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
-
 use byteorder::{BigEndian, ByteOrder};
 use crossbeam_utils::atomic::AtomicCell;
 use gethostname::gethostname;
 #[cfg(all(unix, not(target_os = "redox")))]
 use nix::unistd::sethostname;
 use socket2::{Domain, Protocol, Socket, Type as SocketType};
+use std::io::{self, prelude::*};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, ToSocketAddrs};
+use std::time::Duration;
 
+use crate::builtins::bytearray::PyByteArrayRef;
+use crate::builtins::bytes::PyBytesRef;
+use crate::builtins::pystr::{PyStr, PyStrRef};
+use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::tuple::PyTupleRef;
 use crate::byteslike::PyBytesLike;
+use crate::common::lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard};
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
-use crate::function::{OptionalArg, PyFuncArgs};
-use crate::obj::objbytearray::PyByteArrayRef;
-use crate::obj::objbytes::PyBytesRef;
-use crate::obj::objstr::{PyString, PyStringRef};
-use crate::obj::objtuple::PyTupleRef;
-use crate::obj::objtype::PyClassRef;
+use crate::function::{FuncArgs, OptionalArg};
 use crate::pyobject::{
     BorrowValue, Either, IntoPyObject, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject,
+    StaticType, TryFromObject,
 };
 use crate::vm::VirtualMachine;
 
@@ -64,8 +63,8 @@ pub struct PySocket {
 }
 
 impl PyValue for PySocket {
-    fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.class("_socket", "socket")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -82,7 +81,7 @@ impl PySocket {
     }
 
     #[pyslot]
-    fn tp_new(cls: PyClassRef, _args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+    fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         PySocket {
             kind: AtomicCell::default(),
             family: AtomicCell::default(),
@@ -428,7 +427,7 @@ impl io::Write for PySocketRef {
 }
 
 struct Address {
-    host: PyStringRef,
+    host: PyStrRef,
     port: u16,
 }
 
@@ -445,9 +444,9 @@ impl TryFromObject for Address {
         if tuple.borrow_value().len() != 2 {
             Err(vm.new_type_error("Address tuple should have only 2 values".to_owned()))
         } else {
-            let host = PyStringRef::try_from_object(vm, tuple.borrow_value()[0].clone())?;
+            let host = PyStrRef::try_from_object(vm, tuple.borrow_value()[0].clone())?;
             let host = if host.borrow_value().is_empty() {
-                PyString::from("0.0.0.0").into_ref(vm)
+                PyStr::from("0.0.0.0").into_ref(vm)
             } else {
                 host
             };
@@ -478,11 +477,11 @@ fn socket_gethostname(vm: &VirtualMachine) -> PyResult {
 }
 
 #[cfg(all(unix, not(target_os = "redox")))]
-fn socket_sethostname(hostname: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
+fn socket_sethostname(hostname: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
     sethostname(hostname.borrow_value()).map_err(|err| err.into_pyexception(vm))
 }
 
-fn socket_inet_aton(ip_string: PyStringRef, vm: &VirtualMachine) -> PyResult {
+fn socket_inet_aton(ip_string: PyStrRef, vm: &VirtualMachine) -> PyResult {
     ip_string
         .borrow_value()
         .parse::<Ipv4Addr>()
@@ -498,20 +497,39 @@ fn socket_inet_ntoa(packed_ip: PyBytesRef, vm: &VirtualMachine) -> PyResult {
     Ok(vm.ctx.new_str(Ipv4Addr::from(ip_num).to_string()))
 }
 
+fn socket_getservbyname(
+    servicename: PyStrRef,
+    protocolname: OptionalArg<PyStrRef>,
+    vm: &VirtualMachine,
+) -> PyResult {
+    use std::ffi::CString;
+    let cstr_name = CString::new(servicename.borrow_value())
+        .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
+    let protocolname = protocolname.as_ref().map_or("", |s| s.borrow_value());
+    let cstr_proto = CString::new(protocolname)
+        .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
+    let serv = unsafe { c::getservbyname(cstr_name.as_ptr(), cstr_proto.as_ptr()) };
+    if serv.is_null() {
+        return Err(vm.new_os_error("service/proto not found".to_owned()));
+    }
+    let port = unsafe { (*serv).s_port };
+    Ok(vm.ctx.new_int(u16::from_be(port as u16)))
+}
+
 #[derive(FromArgs)]
 struct GAIOptions {
-    #[pyarg(positional_only)]
-    host: Option<PyStringRef>,
-    #[pyarg(positional_only)]
-    port: Option<Either<PyStringRef, i32>>,
+    #[pyarg(positional)]
+    host: Option<PyStrRef>,
+    #[pyarg(positional)]
+    port: Option<Either<PyStrRef, i32>>,
 
-    #[pyarg(positional_only, default = "0")]
+    #[pyarg(positional, default = "0")]
     family: i32,
-    #[pyarg(positional_only, default = "0")]
+    #[pyarg(positional, default = "0")]
     ty: i32,
-    #[pyarg(positional_only, default = "0")]
+    #[pyarg(positional, default = "0")]
     proto: i32,
-    #[pyarg(positional_only, default = "0")]
+    #[pyarg(positional, default = "0")]
     flags: i32,
 }
 
@@ -545,10 +563,7 @@ fn socket_getaddrinfo(opts: GAIOptions, vm: &VirtualMachine) -> PyResult {
                     vm.ctx.new_int(ai.address),
                     vm.ctx.new_int(ai.socktype),
                     vm.ctx.new_int(ai.protocol),
-                    match ai.canonname {
-                        Some(s) => vm.ctx.new_str(s),
-                        None => vm.get_none(),
-                    },
+                    ai.canonname.into_pyobject(vm),
                     get_addr_tuple(ai.sockaddr).into_pyobject(vm),
                 ])
             })
@@ -560,7 +575,7 @@ fn socket_getaddrinfo(opts: GAIOptions, vm: &VirtualMachine) -> PyResult {
 
 #[cfg(not(target_os = "redox"))]
 fn socket_gethostbyaddr(
-    addr: PyStringRef,
+    addr: PyStrRef,
     vm: &VirtualMachine,
 ) -> PyResult<(String, PyObjectRef, PyObjectRef)> {
     // TODO: figure out how to do this properly
@@ -580,10 +595,10 @@ fn socket_gethostbyaddr(
 }
 
 #[cfg(not(target_os = "redox"))]
-fn socket_gethostbyname(name: PyStringRef, vm: &VirtualMachine) -> PyResult<String> {
+fn socket_gethostbyname(name: PyStrRef, vm: &VirtualMachine) -> PyResult<String> {
     match socket_gethostbyaddr(name, vm) {
         Ok((_, _, hosts)) => {
-            let lst = vm.extract_elements::<PyStringRef>(&hosts)?;
+            let lst = vm.extract_elements::<PyStrRef>(&hosts)?;
             Ok(lst.get(0).unwrap().to_string())
         }
         Err(_) => {
@@ -596,7 +611,7 @@ fn socket_gethostbyname(name: PyStringRef, vm: &VirtualMachine) -> PyResult<Stri
     }
 }
 
-fn socket_inet_pton(af_inet: i32, ip_string: PyStringRef, vm: &VirtualMachine) -> PyResult {
+fn socket_inet_pton(af_inet: i32, ip_string: PyStrRef, vm: &VirtualMachine) -> PyResult {
     match af_inet {
         c::AF_INET => ip_string
             .borrow_value()
@@ -646,7 +661,7 @@ fn socket_inet_ntop(af_inet: i32, packed_ip: PyBytesRef, vm: &VirtualMachine) ->
     }
 }
 
-fn socket_getprotobyname(name: PyStringRef, vm: &VirtualMachine) -> PyResult {
+fn socket_getprotobyname(name: PyStrRef, vm: &VirtualMachine) -> PyResult {
     use std::ffi::CString;
     let cstr = CString::new(name.borrow_value())
         .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
@@ -658,21 +673,45 @@ fn socket_getprotobyname(name: PyStringRef, vm: &VirtualMachine) -> PyResult {
     Ok(vm.ctx.new_int(num))
 }
 
-fn get_addr<T, I>(vm: &VirtualMachine, addr: T) -> PyResult<socket2::SockAddr>
-where
-    T: ToSocketAddrs<Iter = I>,
-    I: ExactSizeIterator<Item = SocketAddr>,
-{
+fn socket_getnameinfo(
+    address: Address,
+    flags: i32,
+    vm: &VirtualMachine,
+) -> PyResult<(String, String)> {
+    let addr = get_addr(vm, address)?;
+    let nameinfo = addr
+        .as_std()
+        .and_then(|addr| dns_lookup::getnameinfo(&addr, flags).ok());
+    nameinfo.ok_or_else(|| {
+        let error_type = vm.class("_socket", "gaierror");
+        vm.new_exception_msg(
+            error_type,
+            "nodename nor servname provided, or not known".to_owned(),
+        )
+    })
+}
+
+fn get_addr(vm: &VirtualMachine, addr: impl ToSocketAddrs) -> PyResult<socket2::SockAddr> {
     match addr.to_socket_addrs() {
         Ok(mut sock_addrs) => {
-            if sock_addrs.len() == 0 {
+            if let Some(mut addr) = sock_addrs.next() {
+                if option_env!("RUSTPYTHON_NO_IPV6").is_some() {
+                    while addr.ip() == IpAddr::V6(Ipv6Addr::LOCALHOST) {
+                        if let Some(other) = sock_addrs.next() {
+                            addr = other
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                Ok(addr.into())
+            } else {
                 let error_type = vm.class("_socket", "gaierror");
                 Err(vm.new_exception_msg(
                     error_type,
                     "nodename nor servname provided, or not known".to_owned(),
                 ))
-            } else {
-                Ok(sock_addrs.next().unwrap().into())
             }
         }
         Err(e) => {
@@ -747,12 +786,12 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let ctx = &vm.ctx;
     let socket_timeout = ctx.new_class(
         "socket.timeout",
-        vm.ctx.exceptions.os_error.clone(),
+        &vm.ctx.exceptions.os_error,
         Default::default(),
     );
     let socket_gaierror = ctx.new_class(
         "socket.gaierror",
-        vm.ctx.exceptions.os_error.clone(),
+        &vm.ctx.exceptions.os_error,
         Default::default(),
     );
 
@@ -768,11 +807,13 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         "htons" => ctx.new_function(u16::to_be),
         "ntohl" => ctx.new_function(u32::from_be),
         "ntohs" => ctx.new_function(u16::from_be),
-        "getdefaulttimeout" => ctx.new_function(|vm: &VirtualMachine| vm.get_none()),
+        "getdefaulttimeout" => ctx.new_function(|vm: &VirtualMachine| vm.ctx.none()),
         "has_ipv6" => ctx.new_bool(false),
         "inet_pton" => ctx.new_function(socket_inet_pton),
         "inet_ntop" => ctx.new_function(socket_inet_ntop),
         "getprotobyname" => ctx.new_function(socket_getprotobyname),
+        "getnameinfo" => ctx.new_function(socket_getnameinfo),
+        "getservbyname" => ctx.new_function(socket_getservbyname),
         // constants
         "AF_UNSPEC" => ctx.new_int(0),
         "AF_INET" => ctx.new_int(c::AF_INET),
@@ -794,9 +835,19 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         "SO_REUSEADDR" => ctx.new_int(c::SO_REUSEADDR),
         "SO_TYPE" => ctx.new_int(c::SO_TYPE),
         "SO_BROADCAST" => ctx.new_int(c::SO_BROADCAST),
+        // "SO_EXCLUSIVEADDRUSE" => ctx.new_int(c::SO_EXCLUSIVEADDRUSE),
         "TCP_NODELAY" => ctx.new_int(c::TCP_NODELAY),
         "AI_ALL" => ctx.new_int(c::AI_ALL),
         "AI_PASSIVE" => ctx.new_int(c::AI_PASSIVE),
+        "NI_NAMEREQD" => ctx.new_int(c::NI_NAMEREQD),
+        "NI_NOFQDN" => ctx.new_int(c::NI_NOFQDN),
+        "NI_NUMERICHOST" => ctx.new_int(c::NI_NUMERICHOST),
+        "NI_NUMERICSERV" => ctx.new_int(c::NI_NUMERICSERV),
+    });
+
+    #[cfg(not(windows))]
+    extend_module!(vm, module, {
+        "SO_REUSEPORT" => ctx.new_int(c::SO_REUSEPORT),
     });
 
     #[cfg(not(target_os = "redox"))]

@@ -1,25 +1,25 @@
-use crate::common::cell::PyRwLock;
-use crate::function::PyFuncArgs;
-use crate::obj::objnone::PyNone;
-use crate::obj::objstr::{PyString, PyStringRef};
-use crate::obj::objtraceback::PyTracebackRef;
-use crate::obj::objtuple::{PyTuple, PyTupleRef};
-use crate::obj::objtype::{self, PyClass, PyClassRef};
+use crate::builtins::pystr::{PyStr, PyStrRef};
+use crate::builtins::pytype::{PyType, PyTypeRef};
+use crate::builtins::singletons::{PyNone, PyNoneRef};
+use crate::builtins::traceback::PyTracebackRef;
+use crate::builtins::tuple::{PyTuple, PyTupleRef};
+use crate::common::lock::PyRwLock;
+use crate::function::FuncArgs;
 use crate::py_io::{self, Write};
+use crate::pyobject::StaticType;
 use crate::pyobject::{
-    BorrowValue, PyClassDef, PyClassImpl, PyContext, PyIterable, PyObjectRef, PyRef, PyResult,
+    BorrowValue, IntoPyObject, PyClassImpl, PyContext, PyIterable, PyObjectRef, PyRef, PyResult,
     PyValue, TryFromObject, TypeProtocol,
 };
 use crate::types::create_type_with_slots;
 use crate::VirtualMachine;
 use crate::{py_serde, sysmodule};
 
+use crossbeam_utils::atomic::AtomicCell;
 use itertools::Itertools;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-
-use crossbeam_utils::atomic::AtomicCell;
 
 #[pyclass(module = false, name = "BaseException")]
 pub struct PyBaseException {
@@ -44,8 +44,8 @@ pub trait IntoPyException {
 }
 
 impl PyValue for PyBaseException {
-    fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.ctx.exceptions.base_exception_type.clone()
+    fn class(vm: &VirtualMachine) -> &PyTypeRef {
+        &vm.ctx.exceptions.base_exception_type
     }
 }
 
@@ -57,19 +57,23 @@ impl PyBaseException {
             cause: PyRwLock::new(None),
             context: PyRwLock::new(None),
             suppress_context: AtomicCell::new(false),
-            args: PyRwLock::new(PyTuple::from(args).into_ref(vm)),
+            args: PyRwLock::new(PyTupleRef::with_elements(args, &vm.ctx)),
         }
     }
 
     #[pyslot]
-    fn tp_new(cls: PyClassRef, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+    fn tp_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         PyBaseException::new(args.args, vm).into_ref_with_type(vm, cls)
     }
 
     #[pymethod(name = "__init__")]
-    fn init(&self, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<()> {
-        *self.args.write() = PyTuple::from(args.args).into_ref(vm);
+    fn init(&self, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+        *self.args.write() = PyTupleRef::with_elements(args.args, &vm.ctx);
         Ok(())
+    }
+
+    pub fn get_arg(&self, idx: usize) -> Option<PyObjectRef> {
+        self.args.read().borrow_value().get(idx).cloned()
     }
 
     #[pyproperty]
@@ -80,7 +84,7 @@ impl PyBaseException {
     #[pyproperty(setter)]
     fn set_args(&self, args: PyIterable, vm: &VirtualMachine) -> PyResult<()> {
         let args = args.iter(vm)?.collect::<PyResult<Vec<_>>>()?;
-        *self.args.write() = PyTuple::from(args).into_ref(vm);
+        *self.args.write() = PyTupleRef::with_elements(args, &vm.ctx);
         Ok(())
     }
 
@@ -131,19 +135,19 @@ impl PyBaseException {
     }
 
     #[pymethod(name = "__str__")]
-    fn str(&self, vm: &VirtualMachine) -> PyStringRef {
+    fn str(&self, vm: &VirtualMachine) -> PyStrRef {
         let str_args = exception_args_as_string(vm, self.args(), true);
         match str_args.into_iter().exactly_one() {
-            Err(i) if i.len() == 0 => PyString::from("").into_ref(vm),
+            Err(i) if i.len() == 0 => PyStr::from("").into_ref(vm),
             Ok(s) => s,
-            Err(i) => PyString::from(format!("({})", i.format(", "))).into_ref(vm),
+            Err(i) => PyStr::from(format!("({})", i.format(", "))).into_ref(vm),
         }
     }
 
     #[pymethod(name = "__repr__")]
     fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> String {
         let repr_args = exception_args_as_string(vm, zelf.args(), false);
-        let cls = zelf.lease_class();
+        let cls = zelf.class();
         format!("{}({})", cls.name, repr_args.iter().format(", "))
     }
 }
@@ -162,10 +166,10 @@ pub fn print_exception(vm: &VirtualMachine, exc: PyBaseExceptionRef) {
         }
     };
     if let Ok(excepthook) = vm.get_attribute(vm.sys_module.clone(), "excepthook") {
-        let (exc_type, exc_val, exc_tb) = split(exc, vm);
+        let (exc_type, exc_val, exc_tb) = split(exc.clone(), vm);
         if let Err(eh_exc) = vm.invoke(&excepthook, vec![exc_type, exc_val, exc_tb]) {
             write_fallback(&eh_exc, "Error in sys.excepthook:");
-            write_fallback(&eh_exc, "Original exception was:");
+            write_fallback(&exc, "Original exception was:");
         }
     } else {
         write_fallback(&exc, "missing sys.excepthook");
@@ -252,7 +256,7 @@ pub fn write_exception_inner<W: Write>(
     let varargs = exc.args();
     let args_repr = exception_args_as_string(vm, varargs, true);
 
-    let exc_name = exc.lease_class().name.clone();
+    let exc_name = exc.class().name.clone();
     match args_repr.len() {
         0 => writeln!(output, "{}", exc_name),
         1 => writeln!(output, "{}: {}", exc_name, args_repr[0]),
@@ -269,17 +273,17 @@ fn exception_args_as_string(
     vm: &VirtualMachine,
     varargs: PyTupleRef,
     str_single: bool,
-) -> Vec<PyStringRef> {
+) -> Vec<PyStrRef> {
     let varargs = varargs.borrow_value();
     match varargs.len() {
         0 => vec![],
         1 => {
             let args0_repr = if str_single {
                 vm.to_str(&varargs[0])
-                    .unwrap_or_else(|_| PyString::from("<element str() failed>").into_ref(vm))
+                    .unwrap_or_else(|_| PyStr::from("<element str() failed>").into_ref(vm))
             } else {
                 vm.to_repr(&varargs[0])
-                    .unwrap_or_else(|_| PyString::from("<element repr() failed>").into_ref(vm))
+                    .unwrap_or_else(|_| PyStr::from("<element repr() failed>").into_ref(vm))
             };
             vec![args0_repr]
         }
@@ -287,7 +291,7 @@ fn exception_args_as_string(
             .iter()
             .map(|vararg| {
                 vm.to_repr(vararg)
-                    .unwrap_or_else(|_| PyString::from("<element repr() failed>").into_ref(vm))
+                    .unwrap_or_else(|_| PyStr::from("<element repr() failed>").into_ref(vm))
             })
             .collect(),
     }
@@ -295,15 +299,15 @@ fn exception_args_as_string(
 
 #[derive(Clone)]
 pub enum ExceptionCtor {
-    Class(PyClassRef),
+    Class(PyTypeRef),
     Instance(PyBaseExceptionRef),
 }
 
 impl TryFromObject for ExceptionCtor {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-        obj.downcast::<PyClass>()
+        obj.downcast::<PyType>()
             .and_then(|cls| {
-                if objtype::issubclass(&cls, &vm.ctx.exceptions.base_exception_type) {
+                if cls.issubclass(&vm.ctx.exceptions.base_exception_type) {
                     Ok(Self::Class(cls))
                 } else {
                     Err(cls.into_object())
@@ -313,14 +317,14 @@ impl TryFromObject for ExceptionCtor {
             .map_err(|obj| {
                 vm.new_type_error(format!(
                     "exceptions must be classes or instances deriving from BaseException, not {}",
-                    obj.lease_class().name
+                    obj.class().name
                 ))
             })
     }
 }
 
 pub fn invoke(
-    cls: PyClassRef,
+    cls: PyTypeRef,
     args: Vec<PyObjectRef>,
     vm: &VirtualMachine,
 ) -> PyResult<PyBaseExceptionRef> {
@@ -352,7 +356,7 @@ impl ExceptionCtor {
             // if the "type" is an instance and the value isn't, use the "type"
             (Self::Instance(exc), None) => Ok(exc),
             // if the value is an instance of the type, use the instance value
-            (Self::Class(cls), Some(exc)) if objtype::isinstance(&exc, &cls) => Ok(exc),
+            (Self::Class(cls), Some(exc)) if exc.isinstance(&cls) => Ok(exc),
             // otherwise; construct an exception of the type using the value as args
             (Self::Class(cls), _) => {
                 let args = match_class!(match value {
@@ -371,8 +375,8 @@ pub fn split(
     exc: PyBaseExceptionRef,
     vm: &VirtualMachine,
 ) -> (PyObjectRef, PyObjectRef, PyObjectRef) {
-    let tb = exc.traceback().map_or(vm.get_none(), |tb| tb.into_object());
-    (exc.class().into_object(), exc.into_object(), tb)
+    let tb = exc.traceback().into_pyobject(vm);
+    (exc.clone_class().into_object(), exc.into_object(), tb)
 }
 
 /// Similar to PyErr_NormalizeException in CPython
@@ -390,86 +394,91 @@ pub fn normalize(
     Ok(exc)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExceptionZoo {
-    pub base_exception_type: PyClassRef,
-    pub system_exit: PyClassRef,
-    pub keyboard_interrupt: PyClassRef,
-    pub generator_exit: PyClassRef,
-    pub exception_type: PyClassRef,
-    pub stop_iteration: PyClassRef,
-    pub stop_async_iteration: PyClassRef,
-    pub arithmetic_error: PyClassRef,
-    pub floating_point_error: PyClassRef,
-    pub overflow_error: PyClassRef,
-    pub zero_division_error: PyClassRef,
-    pub assertion_error: PyClassRef,
-    pub attribute_error: PyClassRef,
-    pub buffer_error: PyClassRef,
-    pub eof_error: PyClassRef,
-    pub import_error: PyClassRef,
-    pub module_not_found_error: PyClassRef,
-    pub lookup_error: PyClassRef,
-    pub index_error: PyClassRef,
-    pub key_error: PyClassRef,
-    pub memory_error: PyClassRef,
-    pub name_error: PyClassRef,
-    pub unbound_local_error: PyClassRef,
-    pub os_error: PyClassRef,
-    pub blocking_io_error: PyClassRef,
-    pub child_process_error: PyClassRef,
-    pub connection_error: PyClassRef,
-    pub broken_pipe_error: PyClassRef,
-    pub connection_aborted_error: PyClassRef,
-    pub connection_refused_error: PyClassRef,
-    pub connection_reset_error: PyClassRef,
-    pub file_exists_error: PyClassRef,
-    pub file_not_found_error: PyClassRef,
-    pub interrupted_error: PyClassRef,
-    pub is_a_directory_error: PyClassRef,
-    pub not_a_directory_error: PyClassRef,
-    pub permission_error: PyClassRef,
-    pub process_lookup_error: PyClassRef,
-    pub timeout_error: PyClassRef,
-    pub reference_error: PyClassRef,
-    pub runtime_error: PyClassRef,
-    pub not_implemented_error: PyClassRef,
-    pub recursion_error: PyClassRef,
-    pub syntax_error: PyClassRef,
-    pub target_scope_error: PyClassRef,
-    pub indentation_error: PyClassRef,
-    pub tab_error: PyClassRef,
-    pub system_error: PyClassRef,
-    pub type_error: PyClassRef,
-    pub value_error: PyClassRef,
-    pub unicode_error: PyClassRef,
-    pub unicode_decode_error: PyClassRef,
-    pub unicode_encode_error: PyClassRef,
-    pub unicode_translate_error: PyClassRef,
+    pub base_exception_type: PyTypeRef,
+    pub system_exit: PyTypeRef,
+    pub keyboard_interrupt: PyTypeRef,
+    pub generator_exit: PyTypeRef,
+    pub exception_type: PyTypeRef,
+    pub stop_iteration: PyTypeRef,
+    pub stop_async_iteration: PyTypeRef,
+    pub arithmetic_error: PyTypeRef,
+    pub floating_point_error: PyTypeRef,
+    pub overflow_error: PyTypeRef,
+    pub zero_division_error: PyTypeRef,
+    pub assertion_error: PyTypeRef,
+    pub attribute_error: PyTypeRef,
+    pub buffer_error: PyTypeRef,
+    pub eof_error: PyTypeRef,
+    pub import_error: PyTypeRef,
+    pub module_not_found_error: PyTypeRef,
+    pub lookup_error: PyTypeRef,
+    pub index_error: PyTypeRef,
+    pub key_error: PyTypeRef,
+    pub memory_error: PyTypeRef,
+    pub name_error: PyTypeRef,
+    pub unbound_local_error: PyTypeRef,
+    pub os_error: PyTypeRef,
+    pub blocking_io_error: PyTypeRef,
+    pub child_process_error: PyTypeRef,
+    pub connection_error: PyTypeRef,
+    pub broken_pipe_error: PyTypeRef,
+    pub connection_aborted_error: PyTypeRef,
+    pub connection_refused_error: PyTypeRef,
+    pub connection_reset_error: PyTypeRef,
+    pub file_exists_error: PyTypeRef,
+    pub file_not_found_error: PyTypeRef,
+    pub interrupted_error: PyTypeRef,
+    pub is_a_directory_error: PyTypeRef,
+    pub not_a_directory_error: PyTypeRef,
+    pub permission_error: PyTypeRef,
+    pub process_lookup_error: PyTypeRef,
+    pub timeout_error: PyTypeRef,
+    pub reference_error: PyTypeRef,
+    pub runtime_error: PyTypeRef,
+    pub not_implemented_error: PyTypeRef,
+    pub recursion_error: PyTypeRef,
+    pub syntax_error: PyTypeRef,
+    pub target_scope_error: PyTypeRef,
+    pub indentation_error: PyTypeRef,
+    pub tab_error: PyTypeRef,
+    pub system_error: PyTypeRef,
+    pub type_error: PyTypeRef,
+    pub value_error: PyTypeRef,
+    pub unicode_error: PyTypeRef,
+    pub unicode_decode_error: PyTypeRef,
+    pub unicode_encode_error: PyTypeRef,
+    pub unicode_translate_error: PyTypeRef,
 
     #[cfg(feature = "jit")]
-    pub jit_error: PyClassRef,
+    pub jit_error: PyTypeRef,
 
-    pub warning: PyClassRef,
-    pub deprecation_warning: PyClassRef,
-    pub pending_deprecation_warning: PyClassRef,
-    pub runtime_warning: PyClassRef,
-    pub syntax_warning: PyClassRef,
-    pub user_warning: PyClassRef,
-    pub future_warning: PyClassRef,
-    pub import_warning: PyClassRef,
-    pub unicode_warning: PyClassRef,
-    pub bytes_warning: PyClassRef,
-    pub resource_warning: PyClassRef,
+    pub warning: PyTypeRef,
+    pub deprecation_warning: PyTypeRef,
+    pub pending_deprecation_warning: PyTypeRef,
+    pub runtime_warning: PyTypeRef,
+    pub syntax_warning: PyTypeRef,
+    pub user_warning: PyTypeRef,
+    pub future_warning: PyTypeRef,
+    pub import_warning: PyTypeRef,
+    pub unicode_warning: PyTypeRef,
+    pub bytes_warning: PyTypeRef,
+    pub resource_warning: PyTypeRef,
 }
 
 impl ExceptionZoo {
-    pub fn new(type_type: &PyClassRef, object_type: &PyClassRef) -> Self {
-        let create_exception_type = |name: &str, base: &PyClassRef| {
-            create_type_with_slots(name, type_type, base.clone(), PyBaseException::make_slots())
+    pub(crate) fn init() -> Self {
+        let base_exception_type = PyBaseException::init_bare_type().clone();
+        let create_exception_type = |name: &str, base: &PyTypeRef| {
+            create_type_with_slots(
+                name,
+                PyType::static_type(),
+                base,
+                PyBaseException::make_slots(),
+            )
         };
         // Sorted By Hierarchy then alphabetized.
-        let base_exception_type = create_exception_type(PyBaseExceptionRef::NAME, &object_type);
         let system_exit = create_exception_type("SystemExit", &base_exception_type);
         let keyboard_interrupt = create_exception_type("KeyboardInterrupt", &base_exception_type);
         let generator_exit = create_exception_type("GeneratorExit", &base_exception_type);
@@ -548,7 +557,7 @@ impl ExceptionZoo {
         let bytes_warning = create_exception_type("BytesWarning", &warning);
         let resource_warning = create_exception_type("ResourceWarning", &warning);
 
-        ExceptionZoo {
+        Self {
             base_exception_type,
             system_exit,
             keyboard_interrupt,
@@ -620,44 +629,87 @@ impl ExceptionZoo {
             resource_warning,
         }
     }
+
+    pub fn extend(ctx: &PyContext) {
+        let excs = &ctx.exceptions;
+
+        PyBaseException::extend_class(ctx, &excs.base_exception_type);
+
+        extend_class!(ctx, &excs.syntax_error, {
+            "msg" => ctx.new_readonly_getset("msg", make_arg_getter(0)),
+            // TODO: members
+            "filename" => ctx.none(),
+            "lineno" => ctx.none(),
+            "offset" => ctx.none(),
+            "text" => ctx.none(),
+        });
+
+        extend_class!(ctx, &excs.system_exit, {
+            "code" => ctx.new_readonly_getset("code", system_exit_code),
+        });
+
+        extend_class!(ctx, &excs.import_error, {
+            "__init__" => ctx.new_method(import_error_init),
+            "msg" => ctx.new_readonly_getset("msg", make_arg_getter(0)),
+        });
+
+        extend_class!(ctx, &excs.stop_iteration, {
+            "value" => ctx.new_readonly_getset("value", make_arg_getter(0)),
+        });
+
+        extend_class!(ctx, &excs.key_error, {
+            "__str__" => ctx.new_method(key_error_str),
+        });
+
+        extend_class!(ctx, &excs.unicode_decode_error, {
+            "encoding" => ctx.new_readonly_getset("encoding", make_arg_getter(0)),
+            "object" => ctx.new_readonly_getset("object", make_arg_getter(1)),
+            "start" => ctx.new_readonly_getset("start", make_arg_getter(2)),
+            "end" => ctx.new_readonly_getset("end", make_arg_getter(3)),
+            "reason" => ctx.new_readonly_getset("reason", make_arg_getter(4)),
+        });
+
+        extend_class!(ctx, &excs.unicode_encode_error, {
+            "encoding" => ctx.new_readonly_getset("encoding", make_arg_getter(0)),
+            "object" => ctx.new_readonly_getset("object", make_arg_getter(1)),
+            "start" => ctx.new_readonly_getset("start", make_arg_getter(2)),
+            "end" => ctx.new_readonly_getset("end", make_arg_getter(3)),
+            "reason" => ctx.new_readonly_getset("reason", make_arg_getter(4)),
+        });
+
+        extend_class!(ctx, &excs.unicode_translate_error, {
+            "encoding" => ctx.new_readonly_getset("encoding", none_getter),
+            "object" => ctx.new_readonly_getset("object", make_arg_getter(0)),
+            "start" => ctx.new_readonly_getset("start", make_arg_getter(1)),
+            "end" => ctx.new_readonly_getset("end", make_arg_getter(2)),
+            "reason" => ctx.new_readonly_getset("reason", make_arg_getter(3)),
+        });
+    }
 }
 
-fn import_error_init(exc_self: PyObjectRef, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+fn import_error_init(exc_self: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
     vm.set_attr(
         &exc_self,
         "name",
-        args.kwargs
-            .get("name")
-            .cloned()
-            .unwrap_or_else(|| vm.get_none()),
+        vm.unwrap_or_none(args.kwargs.get("name").cloned()),
     )?;
     vm.set_attr(
         &exc_self,
         "path",
-        args.kwargs
-            .get("path")
-            .cloned()
-            .unwrap_or_else(|| vm.get_none()),
+        vm.unwrap_or_none(args.kwargs.get("path").cloned()),
     )?;
     Ok(())
 }
 
-fn none_getter(_obj: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
-    vm.get_none()
+fn none_getter(_obj: PyObjectRef, vm: &VirtualMachine) -> PyNoneRef {
+    vm.ctx.none.clone()
 }
 
-fn make_arg_getter(idx: usize) -> impl Fn(PyBaseExceptionRef, &VirtualMachine) -> PyObjectRef {
-    move |exc, vm| {
-        exc.args
-            .read()
-            .borrow_value()
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| vm.get_none())
-    }
+fn make_arg_getter(idx: usize) -> impl Fn(PyBaseExceptionRef) -> Option<PyObjectRef> {
+    move |exc| exc.get_arg(idx)
 }
 
-fn key_error_str(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyStringRef {
+fn key_error_str(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyStrRef {
     let args = exc.args();
     if args.borrow_value().len() == 1 {
         exception_args_as_string(vm, args, false)
@@ -669,73 +721,16 @@ fn key_error_str(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyStringRef {
     }
 }
 
-fn system_exit_code(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyObjectRef {
-    match exc.args.read().borrow_value().first() {
-        Some(code) => match_class!(match code {
+fn system_exit_code(exc: PyBaseExceptionRef) -> Option<PyObjectRef> {
+    exc.args.read().borrow_value().first().map(|code| {
+        match_class!(match code {
             ref tup @ PyTuple => match tup.borrow_value() {
                 [x] => x.clone(),
                 _ => code.clone(),
             },
             other => other.clone(),
-        }),
-        None => vm.get_none(),
-    }
-}
-
-pub fn init(ctx: &PyContext) {
-    let excs = &ctx.exceptions;
-
-    PyBaseException::extend_class(ctx, &excs.base_exception_type);
-
-    extend_class!(ctx, &excs.syntax_error, {
-        "msg" => ctx.new_readonly_getset("msg", make_arg_getter(0)),
-        // TODO: members
-        "filename" => ctx.none(),
-        "lineno" => ctx.none(),
-        "offset" => ctx.none(),
-        "text" => ctx.none(),
-    });
-
-    extend_class!(ctx, &excs.system_exit, {
-        "code" => ctx.new_readonly_getset("code", system_exit_code),
-    });
-
-    extend_class!(ctx, &excs.import_error, {
-        "__init__" => ctx.new_method(import_error_init),
-        "msg" => ctx.new_readonly_getset("msg", make_arg_getter(0)),
-    });
-
-    extend_class!(ctx, &excs.stop_iteration, {
-        "value" => ctx.new_readonly_getset("value", make_arg_getter(0)),
-    });
-
-    extend_class!(ctx, &excs.key_error, {
-        "__str__" => ctx.new_method(key_error_str),
-    });
-
-    extend_class!(ctx, &excs.unicode_decode_error, {
-        "encoding" => ctx.new_readonly_getset("encoding", make_arg_getter(0)),
-        "object" => ctx.new_readonly_getset("object", make_arg_getter(1)),
-        "start" => ctx.new_readonly_getset("start", make_arg_getter(2)),
-        "end" => ctx.new_readonly_getset("end", make_arg_getter(3)),
-        "reason" => ctx.new_readonly_getset("reason", make_arg_getter(4)),
-    });
-
-    extend_class!(ctx, &excs.unicode_encode_error, {
-        "encoding" => ctx.new_readonly_getset("encoding", make_arg_getter(0)),
-        "object" => ctx.new_readonly_getset("object", make_arg_getter(1)),
-        "start" => ctx.new_readonly_getset("start", make_arg_getter(2)),
-        "end" => ctx.new_readonly_getset("end", make_arg_getter(3)),
-        "reason" => ctx.new_readonly_getset("reason", make_arg_getter(4)),
-    });
-
-    extend_class!(ctx, &excs.unicode_translate_error, {
-        "encoding" => ctx.new_readonly_getset("encoding", none_getter),
-        "object" => ctx.new_readonly_getset("object", make_arg_getter(0)),
-        "start" => ctx.new_readonly_getset("start", make_arg_getter(1)),
-        "end" => ctx.new_readonly_getset("end", make_arg_getter(2)),
-        "reason" => ctx.new_readonly_getset("reason", make_arg_getter(3)),
-    });
+        })
+    })
 }
 
 pub struct SerializeException<'s> {
@@ -754,7 +749,7 @@ impl serde::Serialize for SerializeException<'_> {
         use serde::ser::*;
 
         let mut struc = s.serialize_struct("PyBaseException", 7)?;
-        struc.serialize_field("exc_type", &self.exc.lease_class().name)?;
+        struc.serialize_field("exc_type", &self.exc.class().name)?;
         let tbs = {
             struct Tracebacks(PyTracebackRef);
             impl serde::Serialize for Tracebacks {

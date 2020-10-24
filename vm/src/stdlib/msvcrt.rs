@@ -1,6 +1,6 @@
 use super::os::errno_err;
-use crate::obj::objbytes::PyBytesRef;
-use crate::obj::objstr::PyStringRef;
+use crate::builtins::bytes::PyBytesRef;
+use crate::builtins::pystr::PyStrRef;
 use crate::pyobject::{BorrowValue, PyObjectRef, PyResult};
 use crate::VirtualMachine;
 
@@ -40,7 +40,7 @@ fn msvcrt_putch(b: PyBytesRef, vm: &VirtualMachine) -> PyResult<()> {
     unsafe { suppress_iph!(_putch(c.into())) };
     Ok(())
 }
-fn msvcrt_putwch(s: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
+fn msvcrt_putwch(s: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
     let c = s.borrow_value().chars().exactly_one().map_err(|_| {
         vm.new_type_error("putch() argument must be a string of length 1".to_owned())
     })?;
@@ -86,15 +86,15 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
 
     let ctx = &vm.ctx;
     py_module!(vm, "msvcrt", {
-        "getch" => ctx.new_function(msvcrt_getch),
-        "getwch" => ctx.new_function(msvcrt_getwch),
-        "getche" => ctx.new_function(msvcrt_getche),
-        "getwche" => ctx.new_function(msvcrt_getwche),
-        "putch" => ctx.new_function(msvcrt_putch),
-        "putwch" => ctx.new_function(msvcrt_putwch),
-        "setmode" => ctx.new_function(msvcrt_setmode),
-        "open_osfhandle" => ctx.new_function(msvcrt_open_osfhandle),
-        "SetErrorMode" => ctx.new_function(msvcrt_seterrormode),
+        "getch" => named_function!(ctx, msvcrt, getch),
+        "getwch" => named_function!(ctx, msvcrt, getwch),
+        "getche" => named_function!(ctx, msvcrt, getche),
+        "getwche" => named_function!(ctx, msvcrt, getwche),
+        "putch" => named_function!(ctx, msvcrt, putch),
+        "putwch" => named_function!(ctx, msvcrt, putwch),
+        "setmode" => named_function!(ctx, msvcrt, setmode),
+        "open_osfhandle" => named_function!(ctx, msvcrt, open_osfhandle),
+        "SetErrorMode" => named_function!(ctx, msvcrt, seterrormode),
         "SEM_FAILCRITICALERRORS" => ctx.new_int(SEM_FAILCRITICALERRORS),
         "SEM_NOALIGNMENTFAULTEXCEPT" => ctx.new_int(SEM_NOALIGNMENTFAULTEXCEPT),
         "SEM_NOGPFAULTERRORBOX" => ctx.new_int(SEM_NOGPFAULTERRORBOX),

@@ -1,7 +1,8 @@
+use indexmap::map::IndexMap;
 use proc_macro2::{Span, TokenStream};
 use quote::{quote, ToTokens};
 use std::collections::HashMap;
-use syn::{spanned::Spanned, Attribute, Ident, Meta, MetaList, NestedMeta, Path, Result};
+use syn::{spanned::Spanned, Attribute, Ident, Meta, MetaList, NestedMeta, Path, Result, UseTree};
 use syn_ext::ext::{AttributeExt as SynAttributeExt, *};
 use syn_ext::types::PunctuatedNestedMeta;
 
@@ -18,7 +19,7 @@ pub(crate) const ALL_ALLOWED_NAMES: &[&str] = &[
 ];
 
 #[derive(Default)]
-pub(crate) struct ItemNursery(HashMap<(String, Vec<Attribute>), TokenStream>);
+pub(crate) struct ItemNursery(IndexMap<(String, Vec<Attribute>), TokenStream>);
 
 impl ItemNursery {
     pub fn add_item(
@@ -27,10 +28,10 @@ impl ItemNursery {
         cfgs: Vec<Attribute>,
         tokens: TokenStream,
     ) -> Result<()> {
-        if let Some(existing) = self.0.insert((name, cfgs), tokens) {
+        if let Some(existing) = self.0.insert((name.clone(), cfgs), tokens) {
             Err(syn::Error::new_spanned(
                 existing,
-                "Duplicated #[py*] attribute found",
+                format!("Duplicated #[py*] attribute found for '{}'", name),
             ))
         } else {
             Ok(())
@@ -177,6 +178,11 @@ impl ItemMetaInner {
 pub(crate) trait ItemMeta: Sized {
     const ALLOWED_NAMES: &'static [&'static str];
 
+    fn from_attr(item_ident: Ident, attr: &Attribute) -> Result<Self> {
+        let (meta_ident, nested) = attr.ident_and_promoted_nested()?;
+        Self::from_nested(item_ident, meta_ident.clone(), nested.into_iter())
+    }
+
     fn from_nested<I>(item_ident: Ident, meta_ident: Ident, nested: I) -> Result<Self>
     where
         I: std::iter::Iterator<Item = NestedMeta>,
@@ -227,7 +233,7 @@ impl ItemMeta for SimpleItemMeta {
 pub(crate) struct ClassItemMeta(ItemMetaInner);
 
 impl ItemMeta for ClassItemMeta {
-    const ALLOWED_NAMES: &'static [&'static str] = &["module", "name"];
+    const ALLOWED_NAMES: &'static [&'static str] = &["module", "name", "base"];
 
     fn from_inner(inner: ItemMetaInner) -> Self {
         Self(inner)
@@ -260,6 +266,10 @@ impl ClassItemMeta {
             ),
         ))?;
         Ok(value)
+    }
+
+    pub fn base(&self) -> Result<Option<String>> {
+        self.inner()._optional_str("base")
     }
 
     pub fn module(&self) -> Result<Option<String>> {
@@ -450,4 +460,41 @@ macro_rules! iter_chain {
         ::std::iter::empty()
             $(.chain(::std::iter::once($it)))*
     };
+}
+
+pub(crate) fn iter_use_idents<F>(item_use: &syn::ItemUse, mut f: F) -> Result<()>
+where
+    F: FnMut(&syn::Ident, bool) -> Result<()>,
+{
+    match &item_use.tree {
+        UseTree::Name(name) => f(&name.ident, true)?,
+        UseTree::Rename(rename) => f(&rename.rename, true)?,
+        UseTree::Path(path) => match &*path.tree {
+            UseTree::Name(name) => f(&name.ident, true)?,
+            UseTree::Rename(rename) => f(&rename.rename, true)?,
+            other => iter_use_tree_idents(other, &mut f)?,
+        },
+        other => iter_use_tree_idents(other, &mut f)?,
+    }
+    Ok(())
+}
+
+fn iter_use_tree_idents<F>(tree: &syn::UseTree, f: &mut F) -> Result<()>
+where
+    F: FnMut(&syn::Ident, bool) -> Result<()>,
+{
+    match tree {
+        UseTree::Name(name) => f(&name.ident, false)?,
+        UseTree::Rename(rename) => f(&rename.rename, false)?,
+        UseTree::Path(path) => iter_use_tree_idents(&*path.tree, f)?,
+        UseTree::Group(syn::UseGroup { items, .. }) => {
+            for subtree in items {
+                iter_use_tree_idents(subtree, f)?;
+            }
+        }
+        UseTree::Glob(glob) => {
+            return Err(syn::Error::new_spanned(glob, "#[py*] doesn't allow '*'"))
+        }
+    }
+    Ok(())
 }

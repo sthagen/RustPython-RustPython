@@ -13,7 +13,7 @@ use crate::pyobject::PyObjectRef;
 use crate::VirtualMachine;
 
 #[pymodule]
-mod _struct {
+pub(crate) mod _struct {
     use byteorder::{ReadBytesExt, WriteBytesExt};
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
@@ -22,15 +22,15 @@ mod _struct {
     use std::io::{Cursor, Read, Write};
     use std::iter::Peekable;
 
+    use crate::builtins::{
+        bytes::PyBytesRef, pybool::IntoPyBool, pystr::PyStr, pystr::PyStrRef, pytype::PyTypeRef,
+        tuple::PyTupleRef,
+    };
     use crate::byteslike::{PyBytesLike, PyRwBytesLike};
     use crate::exceptions::PyBaseExceptionRef;
     use crate::function::Args;
-    use crate::obj::{
-        objbool::IntoPyBool, objbytes::PyBytesRef, objiter, objstr::PyString, objstr::PyStringRef,
-        objtuple::PyTuple, objtype::PyClassRef,
-    };
     use crate::pyobject::{
-        BorrowValue, Either, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+        BorrowValue, Either, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject,
     };
     use crate::VirtualMachine;
 
@@ -56,10 +56,13 @@ mod _struct {
 
     impl FormatCode {
         fn unit_size(&self) -> usize {
+            // XXX: size of l L q Q is platform depended?
             match self.code {
                 'x' | 'c' | 'b' | 'B' | '?' | 's' | 'p' => 1,
                 'h' | 'H' => 2,
-                'i' | 'l' | 'I' | 'L' | 'f' => 4,
+                // 'i' | 'I' | 'f' => 4,
+                // 'l' | 'L' | 'q' | 'Q' | 'd' => 8,
+                'i' | 'I' | 'l' | 'L' | 'f' => 4,
                 'q' | 'Q' | 'd' => 8,
                 'n' | 'N' | 'P' => std::mem::size_of::<usize>(),
                 c => {
@@ -82,7 +85,7 @@ mod _struct {
     }
 
     #[derive(Debug, Clone)]
-    struct FormatSpec {
+    pub(crate) struct FormatSpec {
         endianness: Endianness,
         codes: Vec<FormatCode>,
     }
@@ -90,7 +93,7 @@ mod _struct {
     impl FormatSpec {
         fn decode_and_parse(
             vm: &VirtualMachine,
-            fmt: &Either<PyStringRef, PyBytesRef>,
+            fmt: &Either<PyStrRef, PyBytesRef>,
         ) -> PyResult<FormatSpec> {
             let decoded_fmt = match fmt {
                 Either::A(string) => string.borrow_value(),
@@ -104,7 +107,7 @@ mod _struct {
             FormatSpec::parse(decoded_fmt).map_err(|err| new_struct_error(vm, err))
         }
 
-        fn parse(fmt: &str) -> Result<FormatSpec, String> {
+        pub fn parse(fmt: &str) -> Result<FormatSpec, String> {
             let mut chars = fmt.chars().peekable();
 
             // First determine "@", "<", ">","!" or "="
@@ -116,7 +119,7 @@ mod _struct {
             Ok(FormatSpec { endianness, codes })
         }
 
-        fn pack(&self, args: &[PyObjectRef], vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        pub fn pack(&self, args: &[PyObjectRef], vm: &VirtualMachine) -> PyResult<Vec<u8>> {
             // Create data vector:
             let mut data = Vec::<u8>::new();
 
@@ -159,7 +162,7 @@ mod _struct {
             Ok(())
         }
 
-        fn unpack(&self, data: &[u8], vm: &VirtualMachine) -> PyResult<PyTuple> {
+        pub fn unpack(&self, data: &[u8], vm: &VirtualMachine) -> PyResult<PyTupleRef> {
             if self.size() != data.len() {
                 return Err(new_struct_error(
                     vm,
@@ -187,10 +190,10 @@ mod _struct {
                 };
             }
 
-            Ok(PyTuple::from(items))
+            Ok(PyTupleRef::with_elements(items, &vm.ctx))
         }
 
-        fn size(&self) -> usize {
+        pub fn size(&self) -> usize {
             self.codes.iter().map(FormatCode::size).sum()
         }
     }
@@ -267,7 +270,10 @@ mod _struct {
         Ok(codes)
     }
 
+    #[allow(clippy::match_like_matches_macro)] // if we change it to matches!() rustc hangs forever
     fn is_supported_format_character(c: char) -> bool {
+        // https://github.com/rust-lang/rustfmt/issues/4462
+        #[allow(clippy::match_like_matches_macro)]
         match c {
             'x' | 'c' | 'b' | 'B' | '?' | 'h' | 'H' | 'i' | 'I' | 'l' | 'L' | 'q' | 'Q' | 'n'
             | 'N' | 'f' | 'd' | 's' | 'p' | 'P' => true,
@@ -497,8 +503,13 @@ mod _struct {
             '?' => pack_bool,
             'h' => pack_i16::<Endianness>,
             'H' => pack_u16::<Endianness>,
-            'i' | 'l' => pack_i32::<Endianness>,
-            'I' | 'L' => pack_u32::<Endianness>,
+            'i' => pack_i32::<Endianness>,
+            'I' => pack_u32::<Endianness>,
+            'l' => pack_i32::<Endianness>,
+            'L' => pack_u32::<Endianness>,
+            // FIXME
+            // 'l' => pack_i64::<Endianness>,
+            // 'L' => pack_u64::<Endianness>,
             'q' => pack_i64::<Endianness>,
             'Q' => pack_u64::<Endianness>,
             'n' => pack_isize::<Endianness>,
@@ -532,7 +543,7 @@ mod _struct {
 
     #[pyfunction]
     fn pack(
-        fmt: Either<PyStringRef, PyBytesRef>,
+        fmt: Either<PyStrRef, PyBytesRef>,
         args: Args,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<u8>> {
@@ -542,7 +553,7 @@ mod _struct {
 
     #[pyfunction]
     fn pack_into(
-        fmt: Either<PyStringRef, PyBytesRef>,
+        fmt: Either<PyStrRef, PyBytesRef>,
         buffer: PyRwBytesLike,
         offset: isize,
         args: Args,
@@ -711,10 +722,10 @@ mod _struct {
 
     #[pyfunction]
     fn unpack(
-        fmt: Either<PyStringRef, PyBytesRef>,
+        fmt: Either<PyStrRef, PyBytesRef>,
         buffer: PyBytesLike,
         vm: &VirtualMachine,
-    ) -> PyResult<PyTuple> {
+    ) -> PyResult<PyTupleRef> {
         let format_spec = FormatSpec::decode_and_parse(vm, &fmt)?;
         buffer.with_ref(|buf| format_spec.unpack(buf, vm))
     }
@@ -735,8 +746,13 @@ mod _struct {
             '?' => unpack_bool,
             'h' => unpack_i16::<Endianness>,
             'H' => unpack_u16::<Endianness>,
-            'i' | 'l' => unpack_i32::<Endianness>,
-            'I' | 'L' => unpack_u32::<Endianness>,
+            'i' => unpack_i32::<Endianness>,
+            'I' => unpack_u32::<Endianness>,
+            'l' => unpack_i32::<Endianness>,
+            'L' => unpack_u32::<Endianness>,
+            // FIXME: arch depended
+            // 'l' => unpack_i64::<Endianness>,
+            // 'L' => unpack_u64::<Endianness>,
             'q' => unpack_i64::<Endianness>,
             'Q' => unpack_u64::<Endianness>,
             'n' => unpack_isize::<Endianness>,
@@ -769,16 +785,16 @@ mod _struct {
     #[derive(FromArgs)]
     struct UpdateFromArgs {
         buffer: PyBytesLike,
-        #[pyarg(positional_or_keyword, default = "0")]
+        #[pyarg(any, default = "0")]
         offset: isize,
     }
 
     #[pyfunction]
     fn unpack_from(
-        fmt: Either<PyStringRef, PyBytesRef>,
+        fmt: Either<PyStrRef, PyBytesRef>,
         args: UpdateFromArgs,
         vm: &VirtualMachine,
-    ) -> PyResult<PyTuple> {
+    ) -> PyResult<PyTupleRef> {
         let format_spec = FormatSpec::decode_and_parse(vm, &fmt)?;
         let size = format_spec.size();
         let offset = get_buffer_offset(args.buffer.len(), args.offset, size, false, vm)?;
@@ -825,19 +841,19 @@ mod _struct {
     }
 
     impl PyValue for UnpackIterator {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("_struct", "unpack_iterator")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
     #[pyimpl]
     impl UnpackIterator {
         #[pymethod(magic)]
-        fn next(&self, vm: &VirtualMachine) -> PyResult<PyTuple> {
+        fn next(&self, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
             let size = self.format_spec.size();
             let offset = self.offset.fetch_add(size);
             if offset + size > self.buffer.len() {
-                Err(objiter::new_stop_iteration(vm))
+                Err(vm.new_stop_iteration())
             } else {
                 self.buffer
                     .with_ref(|buf| self.format_spec.unpack(&buf[offset..offset + size], vm))
@@ -857,7 +873,7 @@ mod _struct {
 
     #[pyfunction]
     fn iter_unpack(
-        fmt: Either<PyStringRef, PyBytesRef>,
+        fmt: Either<PyStrRef, PyBytesRef>,
         buffer: PyBytesLike,
         vm: &VirtualMachine,
     ) -> PyResult<UnpackIterator> {
@@ -866,7 +882,7 @@ mod _struct {
     }
 
     #[pyfunction]
-    fn calcsize(fmt: Either<PyStringRef, PyBytesRef>, vm: &VirtualMachine) -> PyResult<usize> {
+    fn calcsize(fmt: Either<PyStrRef, PyBytesRef>, vm: &VirtualMachine) -> PyResult<usize> {
         let format_spec = FormatSpec::decode_and_parse(vm, &fmt)?;
         Ok(format_spec.size())
     }
@@ -876,12 +892,12 @@ mod _struct {
     #[derive(Debug)]
     struct PyStruct {
         spec: FormatSpec,
-        fmt_str: PyStringRef,
+        fmt_str: PyStrRef,
     }
 
     impl PyValue for PyStruct {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("_struct", "Struct")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
@@ -889,21 +905,21 @@ mod _struct {
     impl PyStruct {
         #[pyslot]
         fn tp_new(
-            cls: PyClassRef,
-            fmt: Either<PyStringRef, PyBytesRef>,
+            cls: PyTypeRef,
+            fmt: Either<PyStrRef, PyBytesRef>,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
             let spec = FormatSpec::decode_and_parse(vm, &fmt)?;
             let fmt_str = match fmt {
                 Either::A(s) => s,
-                Either::B(b) => PyString::from(std::str::from_utf8(b.borrow_value()).unwrap())
+                Either::B(b) => PyStr::from(std::str::from_utf8(b.borrow_value()).unwrap())
                     .into_ref_with_type(vm, vm.ctx.types.str_type.clone())?,
             };
             PyStruct { spec, fmt_str }.into_ref_with_type(vm, cls)
         }
 
         #[pyproperty]
-        fn format(&self) -> PyStringRef {
+        fn format(&self) -> PyStrRef {
             self.fmt_str.clone()
         }
 
@@ -933,12 +949,12 @@ mod _struct {
         }
 
         #[pymethod]
-        fn unpack(&self, data: PyBytesLike, vm: &VirtualMachine) -> PyResult<PyTuple> {
+        fn unpack(&self, data: PyBytesLike, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
             data.with_ref(|buf| self.spec.unpack(buf, vm))
         }
 
         #[pymethod]
-        fn unpack_from(&self, args: UpdateFromArgs, vm: &VirtualMachine) -> PyResult<PyTuple> {
+        fn unpack_from(&self, args: UpdateFromArgs, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
             let size = self.size();
             let offset = get_buffer_offset(args.buffer.len(), args.offset, size, false, vm)?;
             args.buffer
@@ -972,7 +988,7 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
 
     let struct_error = ctx.new_class(
         "struct.error",
-        ctx.exceptions.exception_type.clone(),
+        &ctx.exceptions.exception_type,
         Default::default(),
     );
 

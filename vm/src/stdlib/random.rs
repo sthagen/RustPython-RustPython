@@ -4,11 +4,11 @@ pub(crate) use _random::make_module;
 
 #[pymodule]
 mod _random {
-    use crate::common::cell::PyMutex;
+    use crate::builtins::int::PyIntRef;
+    use crate::builtins::pytype::PyTypeRef;
+    use crate::common::lock::PyMutex;
     use crate::function::OptionalOption;
-    use crate::obj::objint::PyIntRef;
-    use crate::obj::objtype::PyClassRef;
-    use crate::pyobject::{BorrowValue, PyClassImpl, PyRef, PyResult, PyValue};
+    use crate::pyobject::{BorrowValue, PyRef, PyResult, PyValue, StaticType};
     use crate::VirtualMachine;
     use num_bigint::{BigInt, Sign};
     use num_traits::Signed;
@@ -61,15 +61,15 @@ mod _random {
     }
 
     impl PyValue for PyRandom {
-        fn class(vm: &VirtualMachine) -> PyClassRef {
-            vm.class("_random", "Random")
+        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+            Self::static_type()
         }
     }
 
     #[pyimpl(flags(BASETYPE))]
     impl PyRandom {
         #[pyslot(new)]
-        fn new(cls: PyClassRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        fn new(cls: PyTypeRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             PyRandom {
                 rng: PyMutex::default(),
             }

@@ -7,12 +7,12 @@ pub(crate) use _string::make_module;
 mod _string {
     use std::mem;
 
+    use crate::builtins::list::PyList;
+    use crate::builtins::pystr::PyStrRef;
     use crate::exceptions::IntoPyException;
     use crate::format::{
         FieldName, FieldNamePart, FieldType, FormatPart, FormatString, FromTemplate,
     };
-    use crate::obj::objlist::PyList;
-    use crate::obj::objstr::PyStringRef;
     use crate::pyobject::{BorrowValue, IntoPyObject, PyObjectRef, PyResult};
     use crate::vm::VirtualMachine;
 
@@ -33,7 +33,7 @@ mod _string {
     }
 
     #[pyfunction]
-    fn formatter_parser(text: PyStringRef, vm: &VirtualMachine) -> PyResult<PyList> {
+    fn formatter_parser(text: PyStrRef, vm: &VirtualMachine) -> PyResult<PyList> {
         let format_string =
             FormatString::from_str(text.borrow_value()).map_err(|e| e.into_pyexception(vm))?;
 
@@ -71,7 +71,7 @@ mod _string {
 
     #[pyfunction]
     fn formatter_field_name_split(
-        text: PyStringRef,
+        text: PyStrRef,
         vm: &VirtualMachine,
     ) -> PyResult<(PyObjectRef, PyList)> {
         let field_name =

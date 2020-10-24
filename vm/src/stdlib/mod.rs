@@ -5,6 +5,7 @@ use std::collections::HashMap;
 pub mod array;
 #[cfg(feature = "rustpython-parser")]
 pub(crate) mod ast;
+mod atexit;
 mod binascii;
 mod collections;
 mod csv;
@@ -22,16 +23,16 @@ mod marshal;
 mod math;
 mod operator;
 mod platform;
-mod pystruct;
+pub(crate) mod pystruct;
 mod random;
 mod re;
+mod serde_json;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod socket;
 mod string;
 #[cfg(feature = "rustpython-compiler")]
 mod symtable;
 mod sysconfigdata;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "threading")]
 mod thread;
 mod time_module;
@@ -74,6 +75,7 @@ pub fn get_module_inits() -> HashMap<String, StdlibInitFunc> {
     #[allow(unused_mut)]
     let mut modules = hashmap! {
         "array".to_owned() => Box::new(array::make_module) as StdlibInitFunc,
+        "atexit".to_owned() => Box::new(atexit::make_module),
         "binascii".to_owned() => Box::new(binascii::make_module),
         "_collections".to_owned() => Box::new(collections::make_module),
         "_csv".to_owned() => Box::new(csv::make_module),
@@ -90,6 +92,7 @@ pub fn get_module_inits() -> HashMap<String, StdlibInitFunc> {
         "_platform".to_owned() => Box::new(platform::make_module),
         "regex_crate".to_owned() => Box::new(re::make_module),
         "_random".to_owned() => Box::new(random::make_module),
+        "_serde_json".to_owned() => Box::new(serde_json::make_module),
         "_string".to_owned() => Box::new(string::make_module),
         "_struct".to_owned() => Box::new(pystruct::make_module),
         "time".to_owned() => Box::new(time_module::make_module),
@@ -128,7 +131,7 @@ pub fn get_module_inits() -> HashMap<String, StdlibInitFunc> {
             "_multiprocessing".to_owned(),
             Box::new(multiprocessing::make_module),
         );
-        modules.insert("signal".to_owned(), Box::new(signal::make_module));
+        modules.insert("_signal".to_owned(), Box::new(signal::make_module));
         modules.insert("select".to_owned(), Box::new(select::make_module));
         #[cfg(feature = "ssl")]
         modules.insert("_ssl".to_owned(), Box::new(ssl::make_module));

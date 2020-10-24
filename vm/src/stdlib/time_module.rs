@@ -7,10 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::naive::{NaiveDate, NaiveDateTime, NaiveTime};
 use chrono::{Datelike, Timelike};
 
+use crate::builtins::pystr::PyStrRef;
+use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::tuple::PyTupleRef;
 use crate::function::OptionalArg;
-use crate::obj::objstr::PyStringRef;
-use crate::obj::objtuple::PyTupleRef;
-use crate::obj::objtype::PyClassRef;
 use crate::pyobject::{
     BorrowValue, Either, PyClassImpl, PyObjectRef, PyResult, PyStructSequence, TryFromObject,
 };
@@ -144,11 +144,7 @@ fn time_ctime(secs: OptionalArg<Either<f64, i64>>, vm: &VirtualMachine) -> PyRes
     Ok(instant.format(&CFMT).to_string())
 }
 
-fn time_strftime(
-    format: PyStringRef,
-    t: OptionalArg<PyStructTime>,
-    vm: &VirtualMachine,
-) -> PyResult {
+fn time_strftime(format: PyStrRef, t: OptionalArg<PyStructTime>, vm: &VirtualMachine) -> PyResult {
     let default = chrono::offset::Local::now().naive_local();
     let instant = match t {
         OptionalArg::Present(t) => t.to_date_time(vm)?,
@@ -158,11 +154,7 @@ fn time_strftime(
     Ok(vm.ctx.new_str(formatted_time))
 }
 
-fn time_strptime(
-    string: PyStringRef,
-    format: OptionalArg<PyStringRef>,
-    vm: &VirtualMachine,
-) -> PyResult {
+fn time_strptime(string: PyStrRef, format: OptionalArg<PyStrRef>, vm: &VirtualMachine) -> PyResult {
     let format = match format {
         OptionalArg::Present(ref format) => format.borrow_value(),
         OptionalArg::Missing => "%a %b %H:%M:%S %Y",
@@ -226,14 +218,13 @@ impl PyStructTime {
     }
 
     fn into_obj(self, vm: &VirtualMachine) -> PyObjectRef {
-        self.into_struct_sequence(vm, vm.class("time", "struct_time"))
-            .unwrap()
-            .into_object()
+        self.into_struct_sequence(vm).unwrap().into_object()
     }
 
     #[pyslot]
-    fn tp_new(cls: PyClassRef, seq: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
-        Self::try_from_object(vm, seq)?.into_struct_sequence(vm, cls)
+    fn tp_new(_cls: PyTypeRef, seq: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+        // cls is ignorable because this is not a basetype
+        Self::try_from_object(vm, seq)?.into_struct_sequence(vm)
     }
 }
 
@@ -266,17 +257,17 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let struct_time_type = PyStructTime::make_class(ctx);
 
     py_module!(vm, "time", {
-        "asctime" => ctx.new_function(time_asctime),
-        "ctime" => ctx.new_function(time_ctime),
-        "gmtime" => ctx.new_function(time_gmtime),
-        "mktime" => ctx.new_function(time_mktime),
-        "localtime" => ctx.new_function(time_localtime),
-        "monotonic" => ctx.new_function(time_monotonic),
-        "strftime" => ctx.new_function(time_strftime),
-        "strptime" => ctx.new_function(time_strptime),
-        "sleep" => ctx.new_function(time_sleep),
+        "asctime" => named_function!(ctx, time, asctime),
+        "ctime" => named_function!(ctx, time, ctime),
+        "gmtime" => named_function!(ctx, time, gmtime),
+        "mktime" => named_function!(ctx, time, mktime),
+        "localtime" => named_function!(ctx, time, localtime),
+        "monotonic" => named_function!(ctx, time, monotonic),
+        "strftime" => named_function!(ctx, time, strftime),
+        "strptime" => named_function!(ctx, time, strptime),
+        "sleep" => named_function!(ctx, time, sleep),
         "struct_time" => struct_time_type,
-        "time" => ctx.new_function(time_time),
-        "perf_counter" => ctx.new_function(time_time), // TODO: fix
+        "time" => named_function!(ctx, time, time),
+        "perf_counter" => named_function!(ctx, time, time), // TODO: fix
     })
 }

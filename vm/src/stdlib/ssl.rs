@@ -1,16 +1,16 @@
 use super::socket::PySocketRef;
+use crate::builtins::bytearray::PyByteArrayRef;
+use crate::builtins::pystr::PyStrRef;
+use crate::builtins::{pytype::PyTypeRef, weakref::PyWeak};
 use crate::byteslike::PyBytesLike;
-use crate::common::cell::{PyRwLock, PyRwLockWriteGuard};
+use crate::common::lock::{PyRwLock, PyRwLockWriteGuard};
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
 use crate::function::OptionalArg;
-use crate::obj::objbytearray::PyByteArrayRef;
-use crate::obj::objstr::PyStringRef;
-use crate::obj::{objtype::PyClassRef, objweakref::PyWeak};
 use crate::pyobject::{
     BorrowValue, Either, IntoPyObject, ItemProtocol, PyClassImpl, PyObjectRef, PyRef, PyResult,
-    PyValue,
+    PyValue, StaticType,
 };
-use crate::types::create_type;
+use crate::types::create_simple_type;
 use crate::VirtualMachine;
 
 use foreign_types_shared::{ForeignType, ForeignTypeRef};
@@ -112,8 +112,8 @@ fn obj2py(obj: &Asn1ObjectRef) -> PyNid {
 }
 
 #[cfg(windows)]
-fn ssl_enum_certificates(store_name: PyStringRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-    use crate::obj::objset::PyFrozenSet;
+fn ssl_enum_certificates(store_name: PyStrRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+    use crate::builtins::set::PyFrozenSet;
     use schannel::{cert_context::ValidUses, cert_store::CertStore, RawPointer};
     use winapi::um::wincrypt;
     // TODO: check every store for it, not just 2 of them:
@@ -153,9 +153,9 @@ fn ssl_enum_certificates(store_name: PyStringRef, vm: &VirtualMachine) -> PyResu
 
 #[derive(FromArgs)]
 struct Txt2ObjArgs {
-    #[pyarg(positional_or_keyword)]
+    #[pyarg(any)]
     txt: CString,
-    #[pyarg(positional_or_keyword, default = "false")]
+    #[pyarg(any, default = "false")]
     name: bool,
 }
 fn ssl_txt2obj(args: Txt2ObjArgs, vm: &VirtualMachine) -> PyResult<PyNid> {
@@ -194,7 +194,7 @@ fn ssl_rand_status() -> i32 {
     unsafe { sys::RAND_status() }
 }
 
-fn ssl_rand_add(string: Either<PyStringRef, PyBytesLike>, entropy: f64) {
+fn ssl_rand_add(string: Either<PyStrRef, PyBytesLike>, entropy: f64) {
     let f = |b: &[u8]| {
         for buf in b.chunks(libc::c_int::max_value() as usize) {
             unsafe { sys::RAND_add(buf.as_ptr() as *const _, buf.len() as _, entropy) }
@@ -241,8 +241,8 @@ impl fmt::Debug for PySslContext {
 }
 
 impl PyValue for PySslContext {
-    fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.class("_ssl", "_SSLContext")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -263,7 +263,7 @@ impl PySslContext {
     }
 
     #[pyslot]
-    fn tp_new(cls: PyClassRef, proto_version: i32, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+    fn tp_new(cls: PyTypeRef, proto_version: i32, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         let proto = SslVersion::try_from(proto_version)
             .map_err(|_| vm.new_value_error("invalid protocol version".to_owned()))?;
         let method = match proto {
@@ -315,7 +315,7 @@ impl PySslContext {
     }
 
     #[pymethod]
-    fn set_ciphers(&self, cipherlist: PyStringRef, vm: &VirtualMachine) -> PyResult<()> {
+    fn set_ciphers(&self, cipherlist: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
         let ciphers = cipherlist.borrow_value();
         if ciphers.contains('\0') {
             return Err(vm.new_value_error("embedded null character".to_owned()));
@@ -482,26 +482,26 @@ impl PySslContext {
 #[derive(FromArgs)]
 // #[allow(dead_code)]
 struct WrapSocketArgs {
-    #[pyarg(positional_or_keyword)]
+    #[pyarg(any)]
     sock: PySocketRef,
-    #[pyarg(positional_or_keyword)]
+    #[pyarg(any)]
     server_side: bool,
-    #[pyarg(positional_or_keyword, default = "None")]
-    server_hostname: Option<PyStringRef>,
-    #[pyarg(keyword_only, default = "None")]
+    #[pyarg(any, default)]
+    server_hostname: Option<PyStrRef>,
+    #[pyarg(named, default)]
     owner: Option<PyObjectRef>,
-    #[pyarg(keyword_only, default = "None")]
+    #[pyarg(named, default)]
     session: Option<PyObjectRef>,
 }
 
 #[derive(FromArgs)]
 struct LoadVerifyLocationsArgs {
-    #[pyarg(positional_or_keyword, default = "None")]
+    #[pyarg(any, default)]
     cafile: Option<CString>,
-    #[pyarg(positional_or_keyword, default = "None")]
+    #[pyarg(any, default)]
     capath: Option<CString>,
-    #[pyarg(positional_or_keyword, default = "None")]
-    cadata: Option<Either<PyStringRef, PyBytesLike>>,
+    #[pyarg(any, default)]
+    cadata: Option<Either<PyStrRef, PyBytesLike>>,
 }
 
 #[pyclass(module = "ssl", name = "_SSLSocket")]
@@ -509,7 +509,7 @@ struct PySslSocket {
     ctx: PyRef<PySslContext>,
     stream: PyRwLock<Option<ssl::SslStreamBuilder<PySocketRef>>>,
     socket_type: SslServerOrClient,
-    server_hostname: Option<PyStringRef>,
+    server_hostname: Option<PyStrRef>,
     owner: PyRwLock<Option<PyWeak>>,
 }
 
@@ -520,8 +520,8 @@ impl fmt::Debug for PySslSocket {
 }
 
 impl PyValue for PySslSocket {
-    fn class(vm: &VirtualMachine) -> PyClassRef {
-        vm.class("_ssl", "_SSLSocket")
+    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
+        Self::static_type()
     }
 }
 
@@ -560,7 +560,7 @@ impl PySslSocket {
         self.ctx.clone()
     }
     #[pyproperty]
-    fn server_hostname(&self) -> Option<PyStringRef> {
+    fn server_hostname(&self) -> Option<PyStrRef> {
         self.server_hostname.clone()
     }
 
@@ -629,7 +629,7 @@ impl PySslSocket {
     }
 }
 
-fn ssl_error(vm: &VirtualMachine) -> PyClassRef {
+fn ssl_error(vm: &VirtualMachine) -> PyTypeRef {
     vm.class("_ssl", "SSLError")
 }
 
@@ -668,10 +668,7 @@ fn cert_to_py(vm: &VirtualMachine, cert: &X509Ref, binary: bool) -> PyResult {
         let name_to_py = |name: &x509::X509NameRef| {
             name.entries()
                 .map(|entry| {
-                    let txt = match obj2txt(entry.object(), false) {
-                        Some(s) => vm.ctx.new_str(s),
-                        None => vm.get_none(),
-                    };
+                    let txt = obj2txt(entry.object(), false).into_pyobject(vm);
                     let data = vm.ctx.new_str(entry.data().as_utf8()?.to_owned());
                     Ok(vm.ctx.new_tuple(vec![vm.ctx.new_tuple(vec![txt, data])]))
                 })
@@ -754,11 +751,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     }
     openssl::init();
     let ctx = &vm.ctx;
-    let ssl_error = create_type(
-        "SSLError",
-        &vm.ctx.types.type_type,
-        vm.ctx.exceptions.os_error.clone(),
-    );
+    let ssl_error = create_simple_type("SSLError", &vm.ctx.exceptions.os_error);
     let module = py_module!(vm, "_ssl", {
         "_SSLContext" => PySslContext::make_class(ctx),
         "_SSLSocket" => PySslSocket::make_class(ctx),

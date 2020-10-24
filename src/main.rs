@@ -7,12 +7,12 @@ extern crate log;
 use clap::{App, AppSettings, Arg, ArgMatches};
 use rustpython_compiler::compile;
 use rustpython_vm::{
+    builtins::PyInt,
     exceptions::print_exception,
     match_class,
-    obj::{objint::PyInt, objtype},
-    pyobject::{BorrowValue, ItemProtocol, PyResult},
+    pyobject::{BorrowValue, ItemProtocol, PyResult, TypeProtocol},
     scope::Scope,
-    util, InitParameter, PySettings, VirtualMachine,
+    util, InitParameter, Interpreter, PySettings, VirtualMachine,
 };
 
 use std::convert::TryInto;
@@ -29,12 +29,7 @@ fn main() {
     env_logger::init();
     let app = App::new("RustPython");
     let matches = parse_arguments(app);
-    let mut settings = create_settings(&matches);
-
-    // We only include the standard library bytecode in WASI when initializing
-    if cfg!(target_os = "wasi") {
-        settings.initialization_parameter = InitParameter::InitializeInternal;
-    }
+    let settings = create_settings(&matches);
 
     // don't translate newlines (\r\n <=> \n)
     #[cfg(windows)]
@@ -49,49 +44,69 @@ fn main() {
         }
     }
 
-    let vm = VirtualMachine::new(settings);
+    // We only include the standard library bytecode in WASI when initializing
+    let init = if cfg!(target_os = "wasi") {
+        InitParameter::Internal
+    } else {
+        InitParameter::External
+    };
 
-    let res = run_rustpython(&vm, &matches);
+    let interp = Interpreter::new(settings, init);
 
-    #[cfg(feature = "flame-it")]
-    {
-        main_guard.end();
-        if let Err(e) = write_profile(&matches) {
-            error!("Error writing profile information: {}", e);
+    let exitcode = interp.enter(move |vm| {
+        let res = run_rustpython(vm, &matches);
+
+        #[cfg(feature = "flame-it")]
+        {
+            main_guard.end();
+            if let Err(e) = write_profile(&matches) {
+                error!("Error writing profile information: {}", e);
+            }
         }
-    }
 
-    // See if any exception leaked out:
-    if let Err(err) = res {
-        if objtype::isinstance(&err, &vm.ctx.exceptions.system_exit) {
-            let args = err.args();
-            match args.borrow_value().len() {
-                0 => return,
-                1 => match_class!(match args.borrow_value()[0].clone() {
-                    i @ PyInt => {
-                        use num_traits::cast::ToPrimitive;
-                        process::exit(i.borrow_value().to_i32().unwrap_or(0));
-                    }
-                    arg => {
-                        if vm.is_none(&arg) {
-                            return;
+        // See if any exception leaked out:
+        let exitcode = match res {
+            Ok(()) => 0,
+            Err(err) if err.isinstance(&vm.ctx.exceptions.system_exit) => {
+                let args = err.args();
+                match args.borrow_value().len() {
+                    0 => 0,
+                    1 => match_class!(match args.borrow_value()[0].clone() {
+                        i @ PyInt => {
+                            use num_traits::cast::ToPrimitive;
+                            i.borrow_value().to_i32().unwrap_or(0)
                         }
-                        if let Ok(s) = vm.to_str(&arg) {
-                            eprintln!("{}", s);
+                        arg => {
+                            if vm.is_none(&arg) {
+                                0
+                            } else {
+                                if let Ok(s) = vm.to_str(&arg) {
+                                    eprintln!("{}", s);
+                                }
+                                1
+                            }
                         }
-                    }
-                }),
-                _ => {
-                    if let Ok(r) = vm.to_repr(args.as_object()) {
-                        eprintln!("{}", r);
+                    }),
+                    _ => {
+                        if let Ok(r) = vm.to_repr(args.as_object()) {
+                            eprintln!("{}", r);
+                        }
+                        1
                     }
                 }
             }
-        } else {
-            print_exception(&vm, err);
-        }
-        process::exit(1);
-    }
+            Err(err) => {
+                print_exception(&vm, err);
+                1
+            }
+        };
+
+        let _ = vm.run_atexit_funcs();
+
+        exitcode
+    });
+
+    process::exit(exitcode);
 }
 
 fn parse_arguments<'a>(app: App<'a, '_>) -> ArgMatches<'a> {
@@ -181,13 +196,21 @@ fn parse_arguments<'a>(app: App<'a, '_>) -> ArgMatches<'a> {
             Arg::with_name("implementation-option")
                 .short("X")
                 .takes_value(true)
+                .multiple(true)
                 .help("set implementation-specific option"),
         )
         .arg(
             Arg::with_name("warning-control")
                 .short("W")
                 .takes_value(true)
+                .multiple(true)
                 .help("warning control; arg is action:message:category:module:lineno"),
+        )
+        .arg(
+            Arg::with_name("bytes-warning")
+                .short("b")
+                .multiple(true)
+                .help("issue warnings about using bytes where strings are usually expected (-bb: issue errors)"),
         );
     #[cfg(feature = "flame-it")]
     let app = app
@@ -209,10 +232,14 @@ fn parse_arguments<'a>(app: App<'a, '_>) -> ArgMatches<'a> {
 /// Create settings by examining command line arguments and environment
 /// variables.
 fn create_settings(matches: &ArgMatches) -> PySettings {
-    let ignore_environment =
-        matches.is_present("ignore-environment") || matches.is_present("isolate");
     let mut settings = PySettings::default();
-    settings.ignore_environment = ignore_environment;
+    settings.isolated = matches.is_present("isolate");
+    settings.ignore_environment = matches.is_present("ignore-environment");
+    let ignore_environment = settings.ignore_environment || settings.isolated;
+
+    settings.interactive = !matches.is_present("c")
+        && !matches.is_present("m")
+        && (!matches.is_present("script") || matches.is_present("inspect"));
 
     // add the current directory to sys.path
     settings.path_list.push("".to_owned());
@@ -260,6 +287,8 @@ fn create_settings(matches: &ArgMatches) -> PySettings {
         }
     }
 
+    settings.bytes_warning = matches.occurrences_of("bytes-warning");
+
     settings.no_site = matches.is_present("no-site");
 
     if matches.is_present("no-user-site")
@@ -277,6 +306,35 @@ fn create_settings(matches: &ArgMatches) -> PySettings {
         || (!ignore_environment && env::var_os("PYTHONDONTWRITEBYTECODE").is_some())
     {
         settings.dont_write_bytecode = true;
+    }
+
+    let mut dev_mode = false;
+    if let Some(xopts) = matches.values_of("implementation-option") {
+        settings.xopts.extend(xopts.map(|s| {
+            let mut parts = s.splitn(2, '=');
+            let name = parts.next().unwrap().to_owned();
+            if name == "dev" {
+                dev_mode = true
+            }
+            let value = parts.next().map(ToOwned::to_owned);
+            (name, value)
+        }));
+    }
+    settings.dev_mode = dev_mode;
+
+    if dev_mode {
+        settings.warnopts.push("default".to_owned())
+    }
+    if settings.bytes_warning > 0 {
+        let warn = if settings.bytes_warning > 1 {
+            "error::BytesWarning"
+        } else {
+            "default::BytesWarning"
+        };
+        settings.warnopts.push(warn.to_owned());
+    }
+    if let Some(warnings) = matches.values_of("warning-control") {
+        settings.warnopts.extend(warnings.map(ToOwned::to_owned));
     }
 
     let argv = if let Some(script) = matches.values_of("script") {
@@ -438,7 +496,7 @@ fn run_module(vm: &VirtualMachine, module: &str) -> PyResult<()> {
     debug!("Running module {}", module);
     let runpy = vm.import("runpy", &[], 0)?;
     let run_module_as_main = vm.get_attribute(runpy, "_run_module_as_main")?;
-    vm.invoke(&run_module_as_main, vec![vm.ctx.new_str(module)])?;
+    vm.invoke(&run_module_as_main, (module,))?;
     Ok(())
 }
 
@@ -469,11 +527,7 @@ fn run_script(vm: &VirtualMachine, scope: Scope, script_file: &str) -> PyResult<
 
     let dir = file_path.parent().unwrap().to_str().unwrap().to_owned();
     let sys_path = vm.get_attribute(vm.sys_module.clone(), "path").unwrap();
-    vm.call_method(
-        &sys_path,
-        "insert",
-        vec![vm.ctx.new_int(0), vm.ctx.new_str(dir)],
-    )?;
+    vm.call_method(&sys_path, "insert", (0, dir))?;
 
     match util::read_file(&file_path) {
         Ok(source) => {
@@ -493,17 +547,21 @@ fn run_script(vm: &VirtualMachine, scope: Scope, script_file: &str) -> PyResult<
 
 #[test]
 fn test_run_script() {
-    let vm: VirtualMachine = Default::default();
+    Interpreter::default().enter(|vm| {
+        // test file run
+        let r = run_script(
+            vm,
+            vm.new_scope_with_builtins(),
+            "extra_tests/snippets/dir_main/__main__.py",
+        );
+        assert!(r.is_ok());
 
-    // test file run
-    let r = run_script(
-        &vm,
-        vm.new_scope_with_builtins(),
-        "tests/snippets/dir_main/__main__.py",
-    );
-    assert!(r.is_ok());
-
-    // test module run
-    let r = run_script(&vm, vm.new_scope_with_builtins(), "tests/snippets/dir_main");
-    assert!(r.is_ok());
+        // test module run
+        let r = run_script(
+            vm,
+            vm.new_scope_with_builtins(),
+            "extra_tests/snippets/dir_main",
+        );
+        assert!(r.is_ok());
+    })
 }

@@ -223,8 +223,6 @@ class BaseTest:
         self.assertIsInstance(bi[1], int)
         self.assertEqual(bi[1], len(a))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_byteswap(self):
         if self.typecode == 'u':
             example = '\U00100100'
@@ -242,8 +240,6 @@ class BaseTest:
             b.byteswap()
             self.assertEqual(a, b)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_copy(self):
         import copy
         a = array.array(self.typecode, self.example)
@@ -251,8 +247,6 @@ class BaseTest:
         self.assertNotEqual(id(a), id(b))
         self.assertEqual(a, b)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_deepcopy(self):
         import copy
         a = array.array(self.typecode, self.example)
@@ -445,8 +439,6 @@ class BaseTest:
                 f.close()
             support.unlink(support.TESTFN)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_tofromlist(self):
         a = array.array(self.typecode, 2*self.example)
         b = array.array(self.typecode)
@@ -965,7 +957,6 @@ class BaseTest:
             array.array(self.typecode, self.example[::-1])
         )
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_extend(self):
         a = array.array(self.typecode, self.example)
         self.assertRaises(TypeError, a.extend)
@@ -1022,8 +1013,6 @@ class BaseTest:
         l.append(l)
         gc.collect()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_buffer(self):
         a = array.array(self.typecode, self.example)
         m = memoryview(a)
@@ -1401,8 +1390,6 @@ class FPTest(NumberTest):
     def assertEntryEqual(self, entry1, entry2):
         self.assertAlmostEqual(entry1, entry2)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_nan(self):
         a = array.array(self.typecode, [float('nan')])
         b = array.array(self.typecode, [float('nan')])
@@ -1413,8 +1400,6 @@ class FPTest(NumberTest):
         self.assertIs(a < b, False)
         self.assertIs(a <= b, False)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_byteswap(self):
         a = array.array(self.typecode, self.example)
         self.assertRaises(TypeError, a.byteswap, 42)
@@ -1431,16 +1416,15 @@ class FPTest(NumberTest):
             b.byteswap()
             self.assertEqual(a, b)
 
-@unittest.skip("TODO: RUSTPYTHON")
 class FloatTest(FPTest, unittest.TestCase):
     typecode = 'f'
     minitemsize = 4
 
-@unittest.skip("TODO: RUSTPYTHON")
 class DoubleTest(FPTest, unittest.TestCase):
     typecode = 'd'
     minitemsize = 8
 
+    @unittest.skip("TODO: RUSTPYTHON")
     def test_alloc_overflow(self):
         from sys import maxsize
         a = array.array('d', [-1]*65536)
@@ -1459,7 +1443,6 @@ class DoubleTest(FPTest, unittest.TestCase):
             self.fail("Array of size > maxsize created - MemoryError expected")
 
 
-@unittest.skip("TODO: RUSTPYTHON")
 class LargeArrayTest(unittest.TestCase):
     typecode = 'b'
 
