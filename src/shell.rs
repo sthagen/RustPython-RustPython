@@ -1,9 +1,9 @@
 mod helper;
 
-use rustpython_compiler::{compile, error::CompileError, error::CompileErrorType};
 use rustpython_parser::error::{LexicalErrorType, ParseErrorType};
 use rustpython_vm::readline::{Readline, ReadlineResult};
 use rustpython_vm::{
+    compile::{self, CompileError, CompileErrorType},
     exceptions::{print_exception, PyBaseExceptionRef},
     pyobject::{BorrowValue, PyResult, TypeProtocol},
     scope::Scope,
@@ -35,7 +35,7 @@ fn shell_exec(vm: &VirtualMachine, source: &str, scope: Scope) -> ShellExecResul
 }
 
 pub fn run_shell(vm: &VirtualMachine, scope: Scope) -> PyResult<()> {
-    let mut repl = Readline::new(helper::ShellHelper::new(vm, scope.clone()));
+    let mut repl = Readline::new(helper::ShellHelper::new(vm, scope.globals.clone()));
     let mut full_input = String::new();
 
     // Retrieve a `history_path_str` dependent on the OS

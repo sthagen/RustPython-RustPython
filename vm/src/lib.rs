@@ -12,10 +12,6 @@
 #![allow(clippy::module_inception)]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/RustPython/RustPython/master/logo.png")]
 #![doc(html_root_url = "https://docs.rs/rustpython-vm/")]
-#![cfg_attr(
-    target_os = "redox",
-    feature(matches_macro, proc_macro_hygiene, result_map_or)
-)]
 
 #[cfg(feature = "flame-it")]
 #[macro_use]
@@ -69,7 +65,7 @@ mod sequence;
 mod sliceable;
 pub mod slots;
 pub mod stdlib;
-mod sysmodule;
+pub mod sysmodule;
 pub mod types;
 pub mod util;
 mod version;
@@ -77,8 +73,10 @@ mod vm;
 
 // pub use self::pyobject::Executor;
 pub use self::vm::{InitParameter, Interpreter, PySettings, VirtualMachine};
-pub use rustpython_bytecode::*;
+pub use rustpython_bytecode as bytecode;
 pub use rustpython_common as common;
+#[cfg(feature = "rustpython-compiler")]
+pub use rustpython_compiler as compile;
 
 #[doc(hidden)]
 pub mod __exports {

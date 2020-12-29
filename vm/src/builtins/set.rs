@@ -5,13 +5,15 @@ use super::pytype::PyTypeRef;
 use crate::common::hash::PyHash;
 use crate::common::rc::PyRc;
 use crate::dictdatatype;
+use crate::function::OptionalArg::{Missing, Present};
 use crate::function::{Args, OptionalArg};
 use crate::pyobject::{
-    self, BorrowValue, PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef,
-    PyResult, PyValue, TryFromObject, TypeProtocol,
+    self, BorrowValue, IdProtocol, PyClassImpl, PyComparisonValue, PyContext, PyIterable,
+    PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
 };
-use crate::slots::{Comparable, Hashable, PyComparisonOp, Unhashable};
+use crate::slots::{Comparable, Hashable, Iterable, PyComparisonOp, PyIter, Unhashable};
 use crate::vm::{ReprGuard, VirtualMachine};
+use crossbeam_utils::atomic::AtomicCell;
 use std::fmt;
 
 pub type SetContentType = dictdatatype::Dict<()>;
@@ -192,7 +194,7 @@ impl PySetInner {
         Ok(true)
     }
 
-    fn iter(&self, _vm: &VirtualMachine) -> PySetIterator {
+    fn iter(&self) -> PySetIterator {
         let set_size = SetSizeInfo {
             position: 0,
             size: Some(self.content.len()),
@@ -200,7 +202,7 @@ impl PySetInner {
 
         PySetIterator {
             dict: PyRc::clone(&self.content),
-            size_info: crossbeam_utils::atomic::AtomicCell::new(set_size),
+            size_info: AtomicCell::new(set_size),
         }
     }
 
@@ -311,7 +313,7 @@ macro_rules! multi_args_set {
     }};
 }
 
-#[pyimpl(with(Hashable, Comparable), flags(BASETYPE))]
+#[pyimpl(with(Hashable, Comparable, Iterable), flags(BASETYPE))]
 impl PySet {
     #[pyslot]
     fn tp_new(
@@ -426,11 +428,6 @@ impl PySet {
         self.xor(other, vm)
     }
 
-    #[pymethod(name = "__iter__")]
-    fn iter(&self, vm: &VirtualMachine) -> PySetIterator {
-        self.inner.iter(vm)
-    }
-
     #[pymethod(name = "__repr__")]
     fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
         let s = if zelf.inner.len() == 0 {
@@ -539,6 +536,12 @@ impl Comparable for PySet {
 
 impl Unhashable for PySet {}
 
+impl Iterable for PySet {
+    fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        Ok(zelf.inner.iter().into_object(vm))
+    }
+}
+
 macro_rules! multi_args_frozenset {
     ($vm:expr, $others:expr, $zelf:expr, $op:tt) => {{
         let mut res = $zelf.inner.copy();
@@ -549,7 +552,7 @@ macro_rules! multi_args_frozenset {
     }};
 }
 
-#[pyimpl(flags(BASETYPE), with(Hashable, Comparable))]
+#[pyimpl(flags(BASETYPE), with(Hashable, Comparable, Iterable))]
 impl PyFrozenSet {
     // used by ssl.rs windows
     #[allow(dead_code)]
@@ -567,9 +570,22 @@ impl PyFrozenSet {
     #[pyslot]
     fn tp_new(
         cls: PyTypeRef,
-        iterable: OptionalArg<PyIterable>,
+        iterable: OptionalArg<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult<PyRef<Self>> {
+        let iterable = if let Present(iterable) = iterable {
+            if cls.is(&vm.ctx.types.frozenset_type) {
+                match iterable.downcast_exact::<PyFrozenSet>(vm) {
+                    Ok(iter) => return Ok(iter),
+                    Err(iterable) => Present(PyIterable::try_from_object(vm, iterable)?),
+                }
+            } else {
+                Present(PyIterable::try_from_object(vm, iterable)?)
+            }
+        } else {
+            Missing
+        };
+
         Self {
             inner: PySetInner::from_arg(iterable, vm)?,
         }
@@ -677,11 +693,6 @@ impl PyFrozenSet {
         self.xor(other, vm)
     }
 
-    #[pymethod(name = "__iter__")]
-    fn iter(&self, vm: &VirtualMachine) -> PySetIterator {
-        self.inner.iter(vm)
-    }
-
     #[pymethod(name = "__repr__")]
     fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
         let inner = &zelf.inner;
@@ -715,6 +726,12 @@ impl Comparable for PyFrozenSet {
     }
 }
 
+impl Iterable for PyFrozenSet {
+    fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        Ok(zelf.inner.iter().into_object(vm))
+    }
+}
+
 struct SetIterable {
     iterable: Args<PyIterable>,
 }
@@ -745,7 +762,7 @@ struct SetSizeInfo {
 #[pyclass(module = false, name = "set_iterator")]
 pub(crate) struct PySetIterator {
     dict: PyRc<SetContentType>,
-    size_info: crossbeam_utils::atomic::AtomicCell<SetSizeInfo>,
+    size_info: AtomicCell<SetSizeInfo>,
 }
 
 impl fmt::Debug for PySetIterator {
@@ -755,34 +772,14 @@ impl fmt::Debug for PySetIterator {
     }
 }
 
-#[pyimpl]
+impl PyValue for PySetIterator {
+    fn class(vm: &VirtualMachine) -> &PyTypeRef {
+        &vm.ctx.types.set_iterator_type
+    }
+}
+
+#[pyimpl(with(PyIter))]
 impl PySetIterator {
-    #[pymethod(magic)]
-    fn next(&self, vm: &VirtualMachine) -> PyResult {
-        let mut size_info = self.size_info.take();
-
-        if let Some(set_size) = size_info.size {
-            if set_size == self.dict.len() {
-                let index = size_info.position;
-                let keys = self.dict.keys();
-                let item = keys.get(index).ok_or_else(|| vm.new_stop_iteration())?;
-                size_info.position += 1;
-                self.size_info.store(size_info);
-                return Ok(item.clone());
-            } else {
-                size_info.size = None;
-                self.size_info.store(size_info);
-            }
-        }
-
-        Err(vm.new_runtime_error("set changed size during iteration".into()))
-    }
-
-    #[pymethod(magic)]
-    fn iter(zelf: PyRef<Self>) -> PyRef<Self> {
-        zelf
-    }
-
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {
         let set_len = self.dict.len();
@@ -791,9 +788,25 @@ impl PySetIterator {
     }
 }
 
-impl PyValue for PySetIterator {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.set_iterator_type
+impl PyIter for PySetIterator {
+    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        let mut size_info = zelf.size_info.take();
+
+        if let Some(set_size) = size_info.size {
+            if set_size == zelf.dict.len() {
+                let index = size_info.position;
+                let keys = zelf.dict.keys();
+                let item = keys.get(index).ok_or_else(|| vm.new_stop_iteration())?;
+                size_info.position += 1;
+                zelf.size_info.store(size_info);
+                return Ok(item.clone());
+            } else {
+                size_info.size = None;
+                zelf.size_info.store(size_info);
+            }
+        }
+
+        Err(vm.new_runtime_error("set changed size during iteration".into()))
     }
 }
 

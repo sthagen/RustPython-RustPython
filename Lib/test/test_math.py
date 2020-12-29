@@ -260,7 +260,6 @@ class MathTests(unittest.TestCase):
         self.assertRaises(ValueError, math.acos, -1 - eps)
         self.assertTrue(math.isnan(math.acos(NAN)))
 
-    @unittest.skip('TODO: RUSTPYTHON')
     def testAcosh(self):
         self.assertRaises(TypeError, math.acosh)
         self.ftest('acosh(1)', math.acosh(1), 0)
@@ -300,7 +299,7 @@ class MathTests(unittest.TestCase):
         self.ftest('atan(-inf)', math.atan(NINF), -math.pi/2)
         self.assertTrue(math.isnan(math.atan(NAN)))
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    @unittest.expectedFailure # TODO: RUSTPYTHON
     def testAtanh(self):
         self.assertRaises(TypeError, math.atan)
         self.ftest('atanh(0)', math.atanh(0), 0)
@@ -373,7 +372,8 @@ class MathTests(unittest.TestCase):
         self.assertTrue(math.isnan(math.atan2(NAN, INF)))
         self.assertTrue(math.isnan(math.atan2(NAN, NAN)))
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testCeil(self):
         self.assertRaises(TypeError, math.ceil)
         self.assertEqual(int, type(math.ceil(0.5)))
@@ -473,7 +473,8 @@ class MathTests(unittest.TestCase):
         self.ftest('degrees(-pi/4)', math.degrees(-math.pi/4), -45.0)
         self.ftest('degrees(0)', math.degrees(0), 0)
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testExp(self):
         self.assertRaises(TypeError, math.exp)
         self.ftest('exp(-1)', math.exp(-1), 1/math.e)
@@ -500,7 +501,8 @@ class MathTests(unittest.TestCase):
         self.assertRaises(ValueError, math.factorial, -1)
         self.assertRaises(ValueError, math.factorial, -10**100)
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testFactorialNonIntegers(self):
         with self.assertWarns(DeprecationWarning):
             self.assertEqual(math.factorial(5.0), 120)
@@ -523,7 +525,8 @@ class MathTests(unittest.TestCase):
         with self.assertWarns(DeprecationWarning):
             self.assertRaises(OverflowError, math.factorial, 1e100)
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testFloor(self):
         self.assertRaises(TypeError, math.floor)
         self.assertEqual(int, type(math.floor(0.5)))
@@ -596,102 +599,101 @@ class MathTests(unittest.TestCase):
         self.assertTrue(math.isnan(math.frexp(NAN)[0]))
 
 
-    # TODO: RUSTPYTHON
-    # @requires_IEEE_754
-    # @unittest.skipIf(HAVE_DOUBLE_ROUNDING,
-    #                      "fsum is not exact on machines with double rounding")
-    # def testFsum(self):
-    #     # math.fsum relies on exact rounding for correct operation.
-    #     # There's a known problem with IA32 floating-point that causes
-    #     # inexact rounding in some situations, and will cause the
-    #     # math.fsum tests below to fail; see issue #2937.  On non IEEE
-    #     # 754 platforms, and on IEEE 754 platforms that exhibit the
-    #     # problem described in issue #2937, we simply skip the whole
-    #     # test.
+    @requires_IEEE_754
+    @unittest.skipIf(HAVE_DOUBLE_ROUNDING,
+                         "fsum is not exact on machines with double rounding")
+    def testFsum(self):
+        # math.fsum relies on exact rounding for correct operation.
+        # There's a known problem with IA32 floating-point that causes
+        # inexact rounding in some situations, and will cause the
+        # math.fsum tests below to fail; see issue #2937.  On non IEEE
+        # 754 platforms, and on IEEE 754 platforms that exhibit the
+        # problem described in issue #2937, we simply skip the whole
+        # test.
 
-    #     # Python version of math.fsum, for comparison.  Uses a
-    #     # different algorithm based on frexp, ldexp and integer
-    #     # arithmetic.
-    #     from sys import float_info
-    #     mant_dig = float_info.mant_dig
-    #     etiny = float_info.min_exp - mant_dig
+        # Python version of math.fsum, for comparison.  Uses a
+        # different algorithm based on frexp, ldexp and integer
+        # arithmetic.
+        from sys import float_info
+        mant_dig = float_info.mant_dig
+        etiny = float_info.min_exp - mant_dig
 
-    #     def msum(iterable):
-    #         """Full precision summation.  Compute sum(iterable) without any
-    #         intermediate accumulation of error.  Based on the 'lsum' function
-    #         at http://code.activestate.com/recipes/393090/
-    #         """
-    #         tmant, texp = 0, 0
-    #         for x in iterable:
-    #             mant, exp = math.frexp(x)
-    #             mant, exp = int(math.ldexp(mant, mant_dig)), exp - mant_dig
-    #             if texp > exp:
-    #                 tmant <<= texp-exp
-    #                 texp = exp
-    #             else:
-    #                 mant <<= exp-texp
-    #             tmant += mant
-    #         # Round tmant * 2**texp to a float.  The original recipe
-    #         # used float(str(tmant)) * 2.0**texp for this, but that's
-    #         # a little unsafe because str -> float conversion can't be
-    #         # relied upon to do correct rounding on all platforms.
-    #         tail = max(len(bin(abs(tmant)))-2 - mant_dig, etiny - texp)
-    #         if tail > 0:
-    #             h = 1 << (tail-1)
-    #             tmant = tmant // (2*h) + bool(tmant & h and tmant & 3*h-1)
-    #             texp += tail
-    #         return math.ldexp(tmant, texp)
+        def msum(iterable):
+            """Full precision summation.  Compute sum(iterable) without any
+            intermediate accumulation of error.  Based on the 'lsum' function
+            at http://code.activestate.com/recipes/393090/
+            """
+            tmant, texp = 0, 0
+            for x in iterable:
+                mant, exp = math.frexp(x)
+                mant, exp = int(math.ldexp(mant, mant_dig)), exp - mant_dig
+                if texp > exp:
+                    tmant <<= texp-exp
+                    texp = exp
+                else:
+                    mant <<= exp-texp
+                tmant += mant
+            # Round tmant * 2**texp to a float.  The original recipe
+            # used float(str(tmant)) * 2.0**texp for this, but that's
+            # a little unsafe because str -> float conversion can't be
+            # relied upon to do correct rounding on all platforms.
+            tail = max(len(bin(abs(tmant)))-2 - mant_dig, etiny - texp)
+            if tail > 0:
+                h = 1 << (tail-1)
+                tmant = tmant // (2*h) + bool(tmant & h and tmant & 3*h-1)
+                texp += tail
+            return math.ldexp(tmant, texp)
 
-    #     test_values = [
-    #         ([], 0.0),
-    #         ([0.0], 0.0),
-    #         ([1e100, 1.0, -1e100, 1e-100, 1e50, -1.0, -1e50], 1e-100),
-    #         ([2.0**53, -0.5, -2.0**-54], 2.0**53-1.0),
-    #         ([2.0**53, 1.0, 2.0**-100], 2.0**53+2.0),
-    #         ([2.0**53+10.0, 1.0, 2.0**-100], 2.0**53+12.0),
-    #         ([2.0**53-4.0, 0.5, 2.0**-54], 2.0**53-3.0),
-    #         ([1./n for n in range(1, 1001)],
-    #          float.fromhex('0x1.df11f45f4e61ap+2')),
-    #         ([(-1.)**n/n for n in range(1, 1001)],
-    #          float.fromhex('-0x1.62a2af1bd3624p-1')),
-    #         ([1e16, 1., 1e-16], 10000000000000002.0),
-    #         ([1e16-2., 1.-2.**-53, -(1e16-2.), -(1.-2.**-53)], 0.0),
-    #         # exercise code for resizing partials array
-    #         ([2.**n - 2.**(n+50) + 2.**(n+52) for n in range(-1074, 972, 2)] +
-    #          [-2.**1022],
-    #          float.fromhex('0x1.5555555555555p+970')),
-    #         ]
+        test_values = [
+            ([], 0.0),
+            ([0.0], 0.0),
+            ([1e100, 1.0, -1e100, 1e-100, 1e50, -1.0, -1e50], 1e-100),
+            ([2.0**53, -0.5, -2.0**-54], 2.0**53-1.0),
+            ([2.0**53, 1.0, 2.0**-100], 2.0**53+2.0),
+            ([2.0**53+10.0, 1.0, 2.0**-100], 2.0**53+12.0),
+            ([2.0**53-4.0, 0.5, 2.0**-54], 2.0**53-3.0),
+            ([1./n for n in range(1, 1001)],
+             float.fromhex('0x1.df11f45f4e61ap+2')),
+            ([(-1.)**n/n for n in range(1, 1001)],
+             float.fromhex('-0x1.62a2af1bd3624p-1')),
+            ([1e16, 1., 1e-16], 10000000000000002.0),
+            ([1e16-2., 1.-2.**-53, -(1e16-2.), -(1.-2.**-53)], 0.0),
+            # exercise code for resizing partials array
+            ([2.**n - 2.**(n+50) + 2.**(n+52) for n in range(-1074, 972, 2)] +
+             [-2.**1022],
+             float.fromhex('0x1.5555555555555p+970')),
+            ]
 
-    #     # Telescoping sum, with exact differences (due to Sterbenz)
-    #     terms = [1.7**i for i in range(1001)]
-    #     test_values.append((
-    #         [terms[i+1] - terms[i] for i in range(1000)] + [-terms[1000]],
-    #         -terms[0]
-    #     ))
+        # Telescoping sum, with exact differences (due to Sterbenz)
+        terms = [1.7**i for i in range(1001)]
+        test_values.append((
+            [terms[i+1] - terms[i] for i in range(1000)] + [-terms[1000]],
+            -terms[0]
+        ))
 
-    #     for i, (vals, expected) in enumerate(test_values):
-    #         try:
-    #             actual = math.fsum(vals)
-    #         except OverflowError:
-    #             self.fail("test %d failed: got OverflowError, expected %r "
-    #                       "for math.fsum(%.100r)" % (i, expected, vals))
-    #         except ValueError:
-    #             self.fail("test %d failed: got ValueError, expected %r "
-    #                       "for math.fsum(%.100r)" % (i, expected, vals))
-    #         self.assertEqual(actual, expected)
+        for i, (vals, expected) in enumerate(test_values):
+            try:
+                actual = math.fsum(vals)
+            except OverflowError:
+                self.fail("test %d failed: got OverflowError, expected %r "
+                          "for math.fsum(%.100r)" % (i, expected, vals))
+            except ValueError:
+                self.fail("test %d failed: got ValueError, expected %r "
+                          "for math.fsum(%.100r)" % (i, expected, vals))
+            self.assertEqual(actual, expected)
 
-    #     from random import random, gauss, shuffle
-    #     for j in range(1000):
-    #         vals = [7, 1e100, -7, -1e100, -9e-20, 8e-20] * 10
-    #         s = 0
-    #         for i in range(200):
-    #             v = gauss(0, random()) ** 7 - s
-    #             s += v
-    #             vals.append(v)
-    #         shuffle(vals)
+        from random import random, gauss, shuffle
+        for j in range(1000):
+            vals = [7, 1e100, -7, -1e100, -9e-20, 8e-20] * 10
+            s = 0
+            for i in range(200):
+                v = gauss(0, random()) ** 7 - s
+                s += v
+                vals.append(v)
+            shuffle(vals)
 
-    #         s = msum(vals)
-    #         self.assertEqual(msum(vals), math.fsum(vals))
+            s = msum(vals)
+            self.assertEqual(msum(vals), math.fsum(vals))
 
 
     # Python 3.9
@@ -737,7 +739,6 @@ class MathTests(unittest.TestCase):
         self.assertRaises(TypeError, gcd, 120, 1, 84.0)
         #self.assertEqual(gcd(MyIndexable(120), MyIndexable(84)), 12) # TODO: RUSTPYTHON
 
-    @unittest.skip('TODO: RUSTPYTHON float support')
     def testHypot(self):
         from decimal import Decimal
         from fractions import Fraction
@@ -812,7 +813,8 @@ class MathTests(unittest.TestCase):
             scale = FLOAT_MIN / 2.0 ** exp
             self.assertEqual(math.hypot(4*scale, 3*scale), 5*scale)
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testDist(self):
         from decimal import Decimal as D
         from fractions import Fraction as F
@@ -1024,7 +1026,8 @@ class MathTests(unittest.TestCase):
         self.assertRaises(TypeError, lcm, 120, 0, 84.0)
         # self.assertEqual(lcm(MyIndexable(120), MyIndexable(84)), 840) # TODO: RUSTPYTHON
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testLdexp(self):
         self.assertRaises(TypeError, math.ldexp)
         self.ftest('ldexp(0,1)', math.ldexp(0,1), 0)
@@ -1057,7 +1060,8 @@ class MathTests(unittest.TestCase):
             self.assertEqual(math.ldexp(NINF, n), NINF)
             self.assertTrue(math.isnan(math.ldexp(NAN, n)))
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testLog(self):
         self.assertRaises(TypeError, math.log)
         self.ftest('log(1/e)', math.log(1/math.e), -1)
@@ -1074,7 +1078,8 @@ class MathTests(unittest.TestCase):
         self.assertEqual(math.log(INF), INF)
         self.assertTrue(math.isnan(math.log(NAN)))
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testLog1p(self):
         self.assertRaises(TypeError, math.log1p)
         for n in [2, 2**90, 2**300]:
@@ -1142,7 +1147,8 @@ class MathTests(unittest.TestCase):
         self.assertTrue(math.isnan(modf_nan[0]))
         self.assertTrue(math.isnan(modf_nan[1]))
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testPow(self):
         self.assertRaises(TypeError, math.pow)
         self.ftest('pow(0,1)', math.pow(0,1), 0)
@@ -1551,20 +1557,20 @@ class MathTests(unittest.TestCase):
     # def test_nan_constant(self):
     #     self.assertTrue(math.isnan(math.nan))
 
-    # TODO: RUSTPYTHON
-    # @requires_IEEE_754
-    # def test_inf_constant(self):
-    #     self.assertTrue(math.isinf(math.inf))
-    #     self.assertGreater(math.inf, 0.0)
-    #     self.assertEqual(math.inf, float("inf"))
-    #     self.assertEqual(-math.inf, float("-inf"))
+    @requires_IEEE_754
+    def test_inf_constant(self):
+        self.assertTrue(math.isinf(math.inf))
+        self.assertGreater(math.inf, 0.0)
+        self.assertEqual(math.inf, float("inf"))
+        self.assertEqual(-math.inf, float("-inf"))
 
     # RED_FLAG 16-Oct-2000 Tim
     # While 2.0 is more consistent about exceptions than previous releases, it
     # still fails this part of the test on some platforms.  For now, we only
     # *run* test_exceptions() in verbose mode, so that this isn't normally
     # tested.
-    @unittest.skip('TODO: RUSTPYTHON')
+        # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     @unittest.skipUnless(verbose, 'requires verbose mode')
     def test_exceptions(self):
         try:
@@ -1723,7 +1729,8 @@ class MathTests(unittest.TestCase):
     #         self.fail('Failures in test_mtestfile:\n  ' +
     #                   '\n  '.join(failures))
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_prod(self):
         prod = math.prod
         self.assertEqual(prod([]), 1)
@@ -1810,7 +1817,8 @@ class MathTests(unittest.TestCase):
         self.assertEqual(type(prod([1, decimal.Decimal(2.0), 3, 4, 5, 6])),
                          decimal.Decimal)
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testPerm(self):
         perm = math.perm
         factorial = math.factorial
@@ -1875,7 +1883,8 @@ class MathTests(unittest.TestCase):
             self.assertIs(type(perm(IntSubclass(5), IntSubclass(k))), int)
             self.assertIs(type(perm(MyIndexable(5), MyIndexable(k))), int)
 
-    @unittest.skip('TODO: RUSTPYTHON')
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def testComb(self):
         comb = math.comb
         factorial = math.factorial
@@ -2015,7 +2024,6 @@ class MathTests(unittest.TestCase):
             with self.subTest(x=x):
                 self.assertEqual(math.ulp(-x), math.ulp(x))
 
-    @unittest.skip('TODO: RUSTPYTHON')
     def test_issue39871(self):
         # A SystemError should not be raised if the first arg to atan2(),
         # copysign(), or remainder() cannot be converted to a float.
@@ -2146,7 +2154,6 @@ class IsCloseTests(unittest.TestCase):
         self.assertAllClose(integer_examples, rel_tol=1e-8)
         self.assertAllNotClose(integer_examples, rel_tol=1e-9)
 
-    @unittest.skip('TODO: RUSTPYTHON')
     def test_decimals(self):
         # test with Decimal values
         from decimal import Decimal
@@ -2158,7 +2165,6 @@ class IsCloseTests(unittest.TestCase):
         self.assertAllClose(decimal_examples, rel_tol=1e-8)
         self.assertAllNotClose(decimal_examples, rel_tol=1e-9)
 
-    @unittest.skip('TODO: RUSTPYTHON')
     def test_fractions(self):
         # test with Fraction values
         from fractions import Fraction

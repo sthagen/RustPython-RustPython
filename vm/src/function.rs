@@ -8,6 +8,7 @@ use crate::pyobject::{
 };
 use crate::vm::VirtualMachine;
 use indexmap::IndexMap;
+use itertools::Itertools;
 use result_like::impl_option_like;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -34,6 +35,7 @@ macro_rules! into_func_args_from_tuple {
         where
             $($T: IntoPyObject,)*
         {
+            #[inline]
             fn into_args(self, vm: &VirtualMachine) -> FuncArgs {
                 let ($($n,)*) = self;
                 vec![$($n.into_pyobject(vm),)*].into()
@@ -97,24 +99,29 @@ impl FuncArgs {
         Self { args, kwargs }
     }
 
-    pub fn with_kwargs_names(mut args: Vec<PyObjectRef>, kwarg_names: Vec<String>) -> Self {
+    pub fn with_kwargs_names<A, KW>(mut args: A, kwarg_names: KW) -> Self
+    where
+        A: ExactSizeIterator<Item = PyObjectRef>,
+        KW: ExactSizeIterator<Item = String>,
+    {
         // last `kwarg_names.len()` elements of args in order of appearance in the call signature
-        let kwarg_values = args.drain((args.len() - kwarg_names.len())..);
+        let total_argc = args.len();
+        let kwargc = kwarg_names.len();
+        let posargc = total_argc - kwargc;
 
-        let mut kwargs = IndexMap::new();
-        for (name, value) in kwarg_names.iter().zip(kwarg_values) {
-            kwargs.insert(name.clone(), value);
+        let posargs = args.by_ref().take(posargc).collect();
+
+        let kwargs = kwarg_names.zip_eq(args).collect::<IndexMap<_, _>>();
+
+        FuncArgs {
+            args: posargs,
+            kwargs,
         }
-        FuncArgs { args, kwargs }
     }
 
-    pub fn insert(&self, item: PyObjectRef) -> FuncArgs {
-        let mut args = FuncArgs {
-            args: self.args.clone(),
-            kwargs: self.kwargs.clone(),
-        };
-        args.args.insert(0, item);
-        args
+    pub fn prepend_arg(&mut self, item: PyObjectRef) {
+        self.args.reserve_exact(1);
+        self.args.insert(0, item)
     }
 
     pub fn shift(&mut self) -> PyObjectRef {
@@ -187,25 +194,8 @@ impl FuncArgs {
     /// during the conversion will halt the binding and return the error.
     pub fn bind<T: FromArgs>(mut self, vm: &VirtualMachine) -> PyResult<T> {
         let given_args = self.args.len();
-        let bound = T::from_args(vm, &mut self).map_err(|e| match e {
-            ArgumentError::TooFewArgs => vm.new_type_error(format!(
-                "Expected at least {} arguments ({} given)",
-                T::arity().start(),
-                given_args,
-            )),
-            ArgumentError::TooManyArgs => vm.new_type_error(format!(
-                "Expected at most {} arguments ({} given)",
-                T::arity().end(),
-                given_args,
-            )),
-            ArgumentError::InvalidKeywordArgument(name) => {
-                vm.new_type_error(format!("{} is an invalid keyword argument", name))
-            }
-            ArgumentError::RequiredKeywordArgument(name) => {
-                vm.new_type_error(format!("Required keyqord only argument {}", name))
-            }
-            ArgumentError::Exception(ex) => ex,
-        })?;
+        let bound = T::from_args(vm, &mut self)
+            .map_err(|e| e.into_exception(T::arity(), given_args, vm))?;
 
         if !self.args.is_empty() {
             Err(vm.new_type_error(format!(
@@ -213,10 +203,18 @@ impl FuncArgs {
                 T::arity().end(),
                 given_args,
             )))
-        } else if let Some(k) = self.kwargs.keys().next() {
-            Err(vm.new_type_error(format!("Unexpected keyword argument {}", k)))
+        } else if let Some(err) = self.check_kwargs_empty(vm) {
+            Err(err)
         } else {
             Ok(bound)
+        }
+    }
+
+    pub fn check_kwargs_empty(&self, vm: &VirtualMachine) -> Option<PyBaseExceptionRef> {
+        if let Some(k) = self.kwargs.keys().next() {
+            Some(vm.new_type_error(format!("Unexpected keyword argument {}", k)))
+        } else {
+            None
         }
     }
 }
@@ -240,6 +238,35 @@ pub enum ArgumentError {
 impl From<PyBaseExceptionRef> for ArgumentError {
     fn from(ex: PyBaseExceptionRef) -> Self {
         ArgumentError::Exception(ex)
+    }
+}
+
+impl ArgumentError {
+    fn into_exception(
+        self,
+        arity: RangeInclusive<usize>,
+        num_given: usize,
+        vm: &VirtualMachine,
+    ) -> PyBaseExceptionRef {
+        match self {
+            ArgumentError::TooFewArgs => vm.new_type_error(format!(
+                "Expected at least {} arguments ({} given)",
+                arity.start(),
+                num_given
+            )),
+            ArgumentError::TooManyArgs => vm.new_type_error(format!(
+                "Expected at most {} arguments ({} given)",
+                arity.end(),
+                num_given
+            )),
+            ArgumentError::InvalidKeywordArgument(name) => {
+                vm.new_type_error(format!("{} is an invalid keyword argument", name))
+            }
+            ArgumentError::RequiredKeywordArgument(name) => {
+                vm.new_type_error(format!("Required keyqord only argument {}", name))
+            }
+            ArgumentError::Exception(ex) => ex,
+        }
     }
 }
 
@@ -439,7 +466,7 @@ impl OptionalArg<PyObjectRef> {
     }
 }
 
-pub type OptionalOption<T> = OptionalArg<Option<T>>;
+pub type OptionalOption<T = PyObjectRef> = OptionalArg<Option<T>>;
 
 impl<T> OptionalOption<T> {
     #[inline]
@@ -506,8 +533,8 @@ macro_rules! tuple_from_py_func_args {
     };
 }
 
-// Implement `FromArgs` for up to 5-tuples, allowing built-in functions to bind
-// up to 5 top-level parameters (note that `Args`, `KwArgs`, nested tuples, etc.
+// Implement `FromArgs` for up to 7-tuples, allowing built-in functions to bind
+// up to 7 top-level parameters (note that `Args`, `KwArgs`, nested tuples, etc.
 // count as 1, so this should actually be more than enough).
 tuple_from_py_func_args!(A);
 tuple_from_py_func_args!(A, B);
@@ -515,6 +542,8 @@ tuple_from_py_func_args!(A, B, C);
 tuple_from_py_func_args!(A, B, C, D);
 tuple_from_py_func_args!(A, B, C, D, E);
 tuple_from_py_func_args!(A, B, C, D, E, F);
+tuple_from_py_func_args!(A, B, C, D, E, F, G);
+tuple_from_py_func_args!(A, B, C, D, E, F, G, H);
 
 /// A built-in Python function.
 pub type PyNativeFunc = Box<py_dyn_fn!(dyn Fn(&VirtualMachine, FuncArgs) -> PyResult)>;
@@ -640,6 +669,16 @@ into_py_native_func_tuple!((v1, T1), (v2, T2));
 into_py_native_func_tuple!((v1, T1), (v2, T2), (v3, T3));
 into_py_native_func_tuple!((v1, T1), (v2, T2), (v3, T3), (v4, T4));
 into_py_native_func_tuple!((v1, T1), (v2, T2), (v3, T3), (v4, T4), (v5, T5));
+into_py_native_func_tuple!((v1, T1), (v2, T2), (v3, T3), (v4, T4), (v5, T5), (v6, T6));
+into_py_native_func_tuple!(
+    (v1, T1),
+    (v2, T2),
+    (v3, T3),
+    (v4, T4),
+    (v5, T5),
+    (v6, T6),
+    (v7, T7)
+);
 
 /// Tests that the predicate is True on a single value, or if the value is a tuple a tuple, then
 /// test that any of the values contained within the tuples satisfies the predicate. Type parameter

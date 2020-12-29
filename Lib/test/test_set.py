@@ -315,6 +315,7 @@ class TestJointOps:
             self.assertRaises(RuntimeError, s.discard, BadCmp())
             self.assertRaises(RuntimeError, s.remove, BadCmp())
 
+    @unittest.skip("TODO: RUSTPYTHON")
     def test_cyclical_repr(self):
         w = ReprWrapper()
         s = self.thetype([w])
@@ -676,7 +677,6 @@ class TestSet(TestJointOps, unittest.TestCase):
 class SetSubclass(set):
     pass
 
-@unittest.skip("TODO: RUSTPYTHON")
 class TestSetSubclass(TestSet):
     thetype = SetSubclass
     basetype = set
@@ -685,9 +685,9 @@ class SetSubclassWithKeywordArgs(set):
     def __init__(self, iterable=[], newarg=None):
         set.__init__(self, iterable)
 
-@unittest.skip("TODO: RUSTPYTHON")
 class TestSetSubclassWithKeywordArgs(TestSet):
-
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_keywords_in_subclass(self):
         'SF bug #1486663 -- this used to erroneously raise a TypeError'
         SetSubclassWithKeywordArgs(newarg=1)
@@ -701,7 +701,8 @@ class TestFrozenSet(TestJointOps, unittest.TestCase):
         s.__init__(self.otherword)
         self.assertEqual(s, set(self.word))
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_singleton_empty_frozenset(self):
         f = frozenset()
         efs = [frozenset(), frozenset([]), frozenset(()), frozenset(''),
@@ -711,8 +712,6 @@ class TestFrozenSet(TestJointOps, unittest.TestCase):
         # All of the empty frozensets should have just one id()
         self.assertEqual(len(set(map(id, efs))), 1)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_constructor_identity(self):
         s = self.thetype(range(3))
         t = self.thetype(s)
@@ -921,7 +920,6 @@ class TestBasicOps:
         setiter = iter(self.set)
         self.assertEqual(setiter.__length_hint__(), len(self.set))
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_pickling(self):
         for proto in range(pickle.HIGHEST_PROTOCOL + 1):
             p = pickle.dumps(self.set, proto)
@@ -1788,7 +1786,6 @@ class bad_dict_clear:
         return 0
 
 class TestWeirdBugs(unittest.TestCase):
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_8420_set_merge(self):
         # This used to segfault
         global be_bad, set2, dict2
@@ -1815,7 +1812,8 @@ class TestWeirdBugs(unittest.TestCase):
         s.update(range(100))
         list(si)
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_merge_and_mutate(self):
         class X:
             def __hash__(self):

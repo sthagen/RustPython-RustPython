@@ -12,32 +12,33 @@ mod decl {
     use crate::builtins::bytes::PyBytesRef;
     use crate::builtins::code::PyCodeRef;
     use crate::builtins::dict::PyDictRef;
-    use crate::builtins::function::PyFunctionRef;
+    use crate::builtins::function::{PyCellRef, PyFunctionRef};
     use crate::builtins::int::{self, PyIntRef};
     use crate::builtins::iter::{PyCallableIterator, PySequenceIterator};
     use crate::builtins::list::{PyList, SortOptions};
-    use crate::builtins::pybool::{self, IntoPyBool};
+    use crate::builtins::pybool::IntoPyBool;
     use crate::builtins::pystr::{PyStr, PyStrRef};
     use crate::builtins::pytype::PyTypeRef;
+    use crate::builtins::{PyByteArray, PyBytes};
     use crate::byteslike::PyBytesLike;
     use crate::common::{hash::PyHash, str::to_ascii};
+    #[cfg(feature = "rustpython-compiler")]
+    use crate::compile;
     use crate::exceptions::PyBaseExceptionRef;
-    use crate::function::{single_or_tuple_any, Args, FuncArgs, KwArgs, OptionalArg};
+    use crate::function::{
+        single_or_tuple_any, Args, FuncArgs, KwArgs, OptionalArg, OptionalOption,
+    };
     use crate::iterator;
     use crate::pyobject::{
-        BorrowValue, Either, IdProtocol, ItemProtocol, PyCallable, PyIterable, PyObjectRef,
-        PyResult, PyValue, TryFromObject, TypeProtocol,
+        BorrowValue, Either, IdProtocol, ItemProtocol, PyArithmaticValue, PyCallable, PyIterable,
+        PyObjectRef, PyResult, PyValue, TryFromObject, TypeProtocol,
     };
     use crate::readline::{Readline, ReadlineResult};
     use crate::scope::Scope;
-    use crate::sliceable;
     use crate::slots::PyComparisonOp;
     use crate::vm::VirtualMachine;
     use crate::{py_io, sysmodule};
-    use num_bigint::Sign;
     use num_traits::{Signed, ToPrimitive, Zero};
-    #[cfg(feature = "rustpython-compiler")]
-    use rustpython_compiler::compile;
 
     #[pyfunction]
     fn abs(x: PyObjectRef, vm: &VirtualMachine) -> PyResult {
@@ -168,7 +169,7 @@ mod decl {
     fn dir(obj: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyList> {
         let seq = match obj {
             OptionalArg::Present(obj) => vm.call_method(&obj, "__dir__", ())?,
-            OptionalArg::Missing => vm.call_method(&vm.get_locals().into_object(), "keys", ())?,
+            OptionalArg::Missing => vm.call_method(vm.current_locals()?.as_object(), "keys", ())?,
         };
         let sorted = sorted(seq, Default::default(), vm)?;
         Ok(sorted)
@@ -177,7 +178,7 @@ mod decl {
     #[pyfunction]
     fn divmod(a: PyObjectRef, b: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         vm.call_or_reflection(&a, &b, "__divmod__", "__rdivmod__", |vm, a, b| {
-            Err(vm.new_unsupported_operand_error(a, b, "divmod"))
+            Err(vm.new_unsupported_binop_error(a, b, "divmod"))
         })
     }
 
@@ -191,6 +192,33 @@ mod decl {
         locals: Option<PyDictRef>,
     }
 
+    #[cfg(feature = "rustpython-compiler")]
+    impl ScopeArgs {
+        fn make_scope(self, vm: &VirtualMachine) -> PyResult<Scope> {
+            let (globals, locals) = match self.globals {
+                Some(globals) => {
+                    if !globals.contains_key("__builtins__", vm) {
+                        let builtins_dict = vm.builtins.dict().unwrap().into_object();
+                        globals.set_item("__builtins__", builtins_dict, vm)?;
+                    }
+                    let locals = self.locals.unwrap_or_else(|| globals.clone());
+                    (globals, locals)
+                }
+                None => {
+                    let globals = vm.current_globals().clone();
+                    let locals = match self.locals {
+                        Some(l) => l,
+                        None => vm.current_locals()?,
+                    };
+                    (globals, locals)
+                }
+            };
+
+            let scope = Scope::with_builtins(Some(locals), globals, vm);
+            Ok(scope)
+        }
+    }
+
     /// Implements `eval`.
     /// See also: https://docs.python.org/3/library/functions.html#eval
     #[cfg(feature = "rustpython-compiler")]
@@ -200,7 +228,7 @@ mod decl {
         scope: ScopeArgs,
         vm: &VirtualMachine,
     ) -> PyResult {
-        run_code(vm, source, scope, compile::Mode::Eval)
+        run_code(vm, source, scope, compile::Mode::Eval, "eval")
     }
 
     /// Implements `exec`
@@ -212,7 +240,7 @@ mod decl {
         scope: ScopeArgs,
         vm: &VirtualMachine,
     ) -> PyResult {
-        run_code(vm, source, scope, compile::Mode::Exec)
+        run_code(vm, source, scope, compile::Mode::Exec, "exec")
     }
 
     #[cfg(feature = "rustpython-compiler")]
@@ -221,8 +249,9 @@ mod decl {
         source: Either<PyStrRef, PyCodeRef>,
         scope: ScopeArgs,
         mode: compile::Mode,
+        func: &str,
     ) -> PyResult {
-        let scope = make_scope(vm, scope)?;
+        let scope = scope.make_scope(vm)?;
 
         // Determine code object:
         let code_obj = match source {
@@ -232,37 +261,15 @@ mod decl {
             Either::B(code_obj) => code_obj,
         };
 
+        if !code_obj.freevars.is_empty() {
+            return Err(vm.new_type_error(format!(
+                "code object passed to {}() may not contain free variables",
+                func
+            )));
+        }
+
         // Run the code:
         vm.run_code_obj(code_obj, scope)
-    }
-
-    #[cfg(feature = "rustpython-compiler")]
-    fn make_scope(vm: &VirtualMachine, scope: ScopeArgs) -> PyResult<Scope> {
-        let globals = scope.globals;
-        let current_scope = vm.current_scope();
-        let locals = match scope.locals {
-            Some(dict) => Some(dict),
-            None => {
-                if globals.is_some() {
-                    None
-                } else {
-                    current_scope.get_only_locals()
-                }
-            }
-        };
-        let globals = match globals {
-            Some(dict) => {
-                if !dict.contains_key("__builtins__", vm) {
-                    let builtins_dict = vm.builtins.dict().unwrap().as_object().clone();
-                    dict.set_item("__builtins__", builtins_dict, vm).unwrap();
-                }
-                dict
-            }
-            None => current_scope.globals.clone(),
-        };
-
-        let scope = Scope::with_builtins(locals, globals, vm);
-        Ok(scope)
     }
 
     #[pyfunction]
@@ -314,7 +321,7 @@ mod decl {
 
     #[pyfunction]
     fn globals(vm: &VirtualMachine) -> PyResult<PyDictRef> {
-        Ok(vm.current_scope().globals.clone())
+        Ok(vm.current_globals().clone())
     }
 
     #[pyfunction]
@@ -334,15 +341,9 @@ mod decl {
     // builtin_help
 
     #[pyfunction]
-    fn hex(number: PyIntRef, vm: &VirtualMachine) -> PyResult {
+    fn hex(number: PyIntRef) -> String {
         let n = number.borrow_value();
-        let s = if n.is_negative() {
-            format!("-0x{:x}", -n)
-        } else {
-            format!("0x{:x}", n)
-        };
-
-        Ok(vm.ctx.new_str(s))
+        format!("{:#x}", n)
     }
 
     #[pyfunction]
@@ -434,44 +435,40 @@ mod decl {
                 .into_ref(vm)
                 .into_object())
         } else {
-            iterator::get_iter(vm, &iter_target)
+            iterator::get_iter(vm, iter_target)
         }
     }
 
     #[pyfunction]
     fn len(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
-        vm._len(&obj).unwrap_or_else(|| {
-            Err(vm.new_type_error(format!(
-                "object of type '{}' has no len()",
-                obj.class().name
-            )))
-        })
+        vm.obj_len(&obj)
     }
 
     #[pyfunction]
-    fn locals(vm: &VirtualMachine) -> PyDictRef {
-        let locals = vm.get_locals();
-        locals.copy().into_ref(vm)
+    fn locals(vm: &VirtualMachine) -> PyResult<PyDictRef> {
+        vm.current_locals()
     }
 
-    #[pyfunction]
-    fn max(mut args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn min_or_max(
+        mut args: FuncArgs,
+        vm: &VirtualMachine,
+        func_name: &str,
+        op: PyComparisonOp,
+    ) -> PyResult {
         let default = args.take_keyword("default");
         let key_func = args.take_keyword("key");
-        if !args.kwargs.is_empty() {
-            let invalid_keyword = args.kwargs.get_index(0).unwrap();
-            return Err(vm.new_type_error(format!(
-                "'{}' is an invalid keyword argument for max()",
-                invalid_keyword.0
-            )));
+
+        if let Some(err) = args.check_kwargs_empty(vm) {
+            return Err(err);
         }
+
         let candidates = match args.args.len().cmp(&1) {
             std::cmp::Ordering::Greater => {
                 if default.is_some() {
-                    return Err(vm.new_type_error(
-                        "Cannot specify a default for max() with multiple positional arguments"
-                            .to_owned(),
-                    ));
+                    return Err(vm.new_type_error(format!(
+                        "Cannot specify a default for {} with multiple positional arguments",
+                        func_name
+                    )));
                 }
                 args.args
             }
@@ -486,8 +483,9 @@ mod decl {
         let mut x = match candidates_iter.next() {
             Some(x) => x,
             None => {
-                return default
-                    .ok_or_else(|| vm.new_value_error("max() arg is an empty sequence".to_owned()))
+                return default.ok_or_else(|| {
+                    vm.new_value_error(format!("{} arg is an empty sequence", func_name))
+                })
             }
         };
 
@@ -496,14 +494,14 @@ mod decl {
             let mut x_key = vm.invoke(key_func, (x.clone(),))?;
             for y in candidates_iter {
                 let y_key = vm.invoke(key_func, (y.clone(),))?;
-                if vm.bool_cmp(&y_key, &x_key, PyComparisonOp::Gt)? {
+                if vm.bool_cmp(&y_key, &x_key, op)? {
                     x = y;
                     x_key = y_key;
                 }
             }
         } else {
             for y in candidates_iter {
-                if vm.bool_cmp(&y, &x, PyComparisonOp::Gt)? {
+                if vm.bool_cmp(&y, &x, op)? {
                     x = y;
                 }
             }
@@ -513,48 +511,13 @@ mod decl {
     }
 
     #[pyfunction]
+    fn max(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        min_or_max(args, vm, "max()", PyComparisonOp::Gt)
+    }
+
+    #[pyfunction]
     fn min(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        let candidates = match args.args.len().cmp(&1) {
-            std::cmp::Ordering::Greater => args.args.clone(),
-            std::cmp::Ordering::Equal => vm.extract_elements(&args.args[0])?,
-            std::cmp::Ordering::Less => {
-                // zero arguments means type error:
-                return Err(vm.new_type_error("Expected 1 or more arguments".to_owned()));
-            }
-        };
-
-        if candidates.is_empty() {
-            let default = args.get_optional_kwarg("default");
-            return default
-                .ok_or_else(|| vm.new_value_error("min() arg is an empty sequence".to_owned()));
-        }
-
-        let key_func = args.get_optional_kwarg("key");
-
-        let mut candidates_iter = candidates.into_iter();
-        let mut x = candidates_iter.next().unwrap();
-        // TODO: this key function looks pretty duplicate. Maybe we can create
-        // a local function?
-        let mut x_key = if let Some(ref f) = &key_func {
-            vm.invoke(f, (x.clone(),))?
-        } else {
-            x.clone()
-        };
-
-        for y in candidates_iter {
-            let y_key = if let Some(ref f) = &key_func {
-                vm.invoke(f, (y.clone(),))?
-            } else {
-                y.clone()
-            };
-
-            if vm.bool_cmp(&x_key, &y_key, PyComparisonOp::Gt)? {
-                x = y.clone();
-                x_key = y_key;
-            }
-        }
-
-        Ok(x)
+        min_or_max(args, vm, "min()", PyComparisonOp::Lt)
     }
 
     #[pyfunction]
@@ -563,19 +526,16 @@ mod decl {
         default_value: OptionalArg<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult {
-        match vm.call_method(&iterator, "__next__", ()) {
-            Ok(value) => Ok(value),
-            Err(value) => {
-                if value.isinstance(&vm.ctx.exceptions.stop_iteration) {
-                    match default_value {
-                        OptionalArg::Missing => Err(value),
-                        OptionalArg::Present(value) => Ok(value),
-                    }
-                } else {
-                    Err(value)
+        iterator::call_next(vm, &iterator).or_else(|err| {
+            if err.isinstance(&vm.ctx.exceptions.stop_iteration) {
+                match default_value {
+                    OptionalArg::Missing => Err(err),
+                    OptionalArg::Present(value) => Ok(value),
                 }
+            } else {
+                Err(err)
             }
-        }
+        })
     }
 
     #[pyfunction]
@@ -622,40 +582,53 @@ mod decl {
         }
     }
 
+    #[allow(clippy::suspicious_else_formatting)]
     #[pyfunction]
     fn pow(
         x: PyObjectRef,
         y: PyObjectRef,
-        mod_value: OptionalArg<PyIntRef>,
+        mod_value: OptionalOption<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult {
-        match mod_value {
-            OptionalArg::Missing => {
-                vm.call_or_reflection(&x, &y, "__pow__", "__rpow__", |vm, x, y| {
-                    Err(vm.new_unsupported_operand_error(x, y, "pow"))
-                })
-            }
-            OptionalArg::Present(m) => {
-                // Check if the 3rd argument is defined and perform modulus on the result
-                if !(x.isinstance(&vm.ctx.types.int_type) && y.isinstance(&vm.ctx.types.int_type)) {
-                    return Err(vm.new_type_error(
-                        "pow() 3rd argument not allowed unless all arguments are integers"
-                            .to_owned(),
-                    ));
+        match mod_value.flatten() {
+            None => vm.call_or_reflection(&x, &y, "__pow__", "__rpow__", |vm, x, y| {
+                Err(vm.new_unsupported_binop_error(x, y, "pow"))
+            }),
+            Some(z) => {
+                let try_pow_value = |obj: &PyObjectRef,
+                                     args: (PyObjectRef, PyObjectRef, PyObjectRef)|
+                 -> Option<PyResult> {
+                    if let Some(method) = obj.get_class_attr("__pow__") {
+                        let result = match vm.invoke(&method, args) {
+                            Ok(x) => x,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        if let PyArithmaticValue::Implemented(x) =
+                            PyArithmaticValue::from_object(vm, result)
+                        {
+                            return Some(Ok(x));
+                        }
+                    }
+                    None
+                };
+
+                if let Some(val) = try_pow_value(&x, (x.clone(), y.clone(), z.clone())) {
+                    return val;
                 }
-                let y = int::get_value(&y);
-                if y.sign() == Sign::Minus {
-                    return Err(vm.new_value_error(
-                        "pow() 2nd argument cannot be negative when 3rd argument specified"
-                            .to_owned(),
-                    ));
+
+                if !x.class().is(&y.class()) {
+                    if let Some(val) = try_pow_value(&y, (x.clone(), y.clone(), z.clone())) {
+                        return val;
+                    }
                 }
-                let m = m.borrow_value();
-                if m.is_zero() {
-                    return Err(vm.new_value_error("pow() 3rd argument cannot be 0".to_owned()));
+
+                if !x.class().is(&z.class()) && !y.class().is(&z.class()) {
+                    if let Some(val) = try_pow_value(&z, (x.clone(), y.clone(), z.clone())) {
+                        return val;
+                    }
                 }
-                let x = int::get_value(&x);
-                Ok(vm.ctx.new_int(x.modpow(&y, &m)))
+
+                Err(vm.new_unsupported_ternop_error(&x, &y, &z, "pow"))
             }
         }
     }
@@ -731,21 +704,22 @@ mod decl {
         }
     }
 
-    #[pyfunction]
-    fn round(
+    #[derive(FromArgs)]
+    pub struct RoundArgs {
+        #[pyarg(any)]
         number: PyObjectRef,
-        ndigits: OptionalArg<Option<PyIntRef>>,
-        vm: &VirtualMachine,
-    ) -> PyResult {
-        let rounded = match ndigits {
-            OptionalArg::Present(ndigits) => match ndigits {
-                Some(int) => {
-                    let ndigits = vm.call_method(int.as_object(), "__int__", ())?;
-                    vm.call_method(&number, "__round__", (ndigits,))?
-                }
-                None => vm.call_method(&number, "__round__", ())?,
-            },
-            OptionalArg::Missing => {
+        #[pyarg(any, optional)]
+        ndigits: OptionalOption<PyObjectRef>,
+    }
+
+    #[pyfunction]
+    fn round(RoundArgs { number, ndigits }: RoundArgs, vm: &VirtualMachine) -> PyResult {
+        let rounded = match ndigits.flatten() {
+            Some(obj) => {
+                let ndigits = vm.to_index(&obj)?;
+                vm.call_method(&number, "__round__", (ndigits,))?
+            }
+            None => {
                 // without a parameter, the result type is coerced to int
                 vm.call_method(&number, "__round__", ())?
             }
@@ -774,10 +748,35 @@ mod decl {
         Ok(lst)
     }
 
+    #[derive(FromArgs)]
+    pub struct SumArgs {
+        #[pyarg(positional)]
+        iterable: PyIterable,
+        #[pyarg(any, optional)]
+        start: OptionalArg<PyObjectRef>,
+    }
+
     #[pyfunction]
-    fn sum(iterable: PyIterable, start: OptionalArg, vm: &VirtualMachine) -> PyResult {
+    fn sum(SumArgs { iterable, start }: SumArgs, vm: &VirtualMachine) -> PyResult {
         // Start with zero and add at will:
         let mut sum = start.into_option().unwrap_or_else(|| vm.ctx.new_int(0));
+
+        match_class!(match sum {
+            PyStr =>
+                return Err(vm.new_type_error(
+                    "sum() can't sum strings [use ''.join(seq) instead]".to_owned()
+                )),
+            PyBytes =>
+                return Err(vm.new_type_error(
+                    "sum() can't sum bytes [use b''.join(seq) instead]".to_owned()
+                )),
+            PyByteArray =>
+                return Err(vm.new_type_error(
+                    "sum() can't sum bytearray [use b''.join(seq) instead]".to_owned()
+                )),
+            _ => (),
+        });
+
         for item in iterable.iter(vm)? {
             sum = vm._add(&sum, &item?)?;
         }
@@ -794,7 +793,7 @@ mod decl {
         if let OptionalArg::Present(obj) = obj {
             vm.get_attribute(obj, "__dict__")
         } else {
-            Ok(vm.get_locals().into_object())
+            Ok(vm.current_locals()?.into_object())
         }
     }
 
@@ -838,22 +837,20 @@ mod decl {
         let prepare = vm.get_attribute(metaclass.clone().into_object(), "__prepare__")?;
         let namespace = vm.invoke(&prepare, vec![name_obj.clone(), bases.clone()])?;
 
-        let namespace: PyDictRef = TryFromObject::try_from_object(vm, namespace)?;
+        let namespace = PyDictRef::try_from_object(vm, namespace)?;
 
-        let cells = vm.ctx.new_dict();
-
-        let scope = function
-            .scope()
-            .new_child_scope_with_locals(cells.clone())
-            .new_child_scope_with_locals(namespace.clone());
-
-        function.invoke_with_scope(().into(), &scope, vm)?;
+        let classcell = function.invoke_with_locals(().into(), Some(namespace.clone()), vm)?;
+        let classcell = <Option<PyCellRef>>::try_from_object(vm, classcell)?;
 
         let class = vm.invoke(
             metaclass.as_object(),
             FuncArgs::new(vec![name_obj, bases, namespace.into_object()], kwargs),
         )?;
-        cells.set_item("__class__", class.clone(), vm)?;
+
+        if let Some(ref classcell) = classcell {
+            classcell.set(Some(class.clone()));
+        }
+
         Ok(class)
     }
 }

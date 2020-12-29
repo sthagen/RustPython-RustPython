@@ -388,7 +388,8 @@ class GrammarTests(unittest.TestCase):
             XX: 'ANNOT'
         self.assertEqual(CC.__annotations__['xx'], 'ANNOT')
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_var_annot_module_semantics(self):
         with self.assertRaises(AttributeError):
             print(test.__annotations__)
@@ -398,7 +399,8 @@ class GrammarTests(unittest.TestCase):
                               {'123': 123, 'o': type})
         self.assertEqual(ann_module2.__annotations__, {})
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_var_annot_in_module(self):
         # check that functions fail the same way when executed
         # outside of module where they were defined
@@ -459,8 +461,7 @@ class GrammarTests(unittest.TestCase):
     #     exec('X: str', {}, CNS2())
     #     self.assertEqual(nonloc_ns['__annotations__']['x'], str)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
+
     def test_var_annot_rhs(self):
         ns = {}
         exec('x: tuple = 1, 2', ns)
@@ -1065,8 +1066,6 @@ class GrammarTests(unittest.TestCase):
         self.assertEqual(g2(False), 0)
         self.assertEqual(g2(True), ('end', 1))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_yield(self):
         # Allowed as standalone statement
         def g(): yield 1
@@ -1187,7 +1186,8 @@ class GrammarTests(unittest.TestCase):
             self.fail("'assert True, msg' should not have "
                       "raised an AssertionError")
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     # these tests fail if python is run with -O, so check __debug__
     @unittest.skipUnless(__debug__, "Won't work if __debug__ is False")
     def testAssert2(self):

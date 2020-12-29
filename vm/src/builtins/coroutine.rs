@@ -4,7 +4,8 @@ use super::pytype::PyTypeRef;
 use crate::coroutine::{Coro, Variant};
 use crate::frame::FrameRef;
 use crate::function::OptionalArg;
-use crate::pyobject::{PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue};
+use crate::pyobject::{IdProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue};
+use crate::slots::PyIter;
 use crate::vm::VirtualMachine;
 
 type PyCoroutineRef = PyRef<PyCoroutine>;
@@ -21,23 +22,31 @@ impl PyValue for PyCoroutine {
     }
 }
 
-#[pyimpl]
+#[pyimpl(with(PyIter))]
 impl PyCoroutine {
     pub fn as_coro(&self) -> &Coro {
         &self.inner
     }
 
-    pub fn new(frame: FrameRef, vm: &VirtualMachine) -> PyRef<Self> {
+    pub fn new(frame: FrameRef, name: PyStrRef) -> Self {
         PyCoroutine {
-            inner: Coro::new(frame, Variant::Coroutine),
+            inner: Coro::new(frame, Variant::Coroutine, name),
         }
-        .into_ref(vm)
     }
 
-    // TODO: fix function names situation
     #[pyproperty(magic)]
-    fn name(&self, vm: &VirtualMachine) -> PyObjectRef {
-        vm.ctx.none()
+    fn name(&self) -> PyStrRef {
+        self.inner.name()
+    }
+
+    #[pyproperty(magic, setter)]
+    fn set_name(&self, name: PyStrRef) {
+        self.inner.set_name(name)
+    }
+
+    #[pymethod(magic)]
+    fn repr(zelf: PyRef<Self>) -> String {
+        zelf.inner.repr(zelf.get_id())
     }
 
     #[pymethod]
@@ -95,6 +104,12 @@ impl PyCoroutine {
     }
 }
 
+impl PyIter for PyCoroutine {
+    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        zelf.send(vm.ctx.none(), vm)
+    }
+}
+
 #[pyclass(module = false, name = "coroutine_wrapper")]
 #[derive(Debug)]
 pub struct PyCoroutineWrapper {
@@ -109,16 +124,6 @@ impl PyValue for PyCoroutineWrapper {
 
 #[pyimpl]
 impl PyCoroutineWrapper {
-    #[pymethod(name = "__iter__")]
-    fn iter(zelf: PyRef<Self>) -> PyRef<Self> {
-        zelf
-    }
-
-    #[pymethod(name = "__next__")]
-    fn next(&self, vm: &VirtualMachine) -> PyResult {
-        self.coro.send(vm.ctx.none(), vm)
-    }
-
     #[pymethod]
     fn send(&self, val: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         self.coro.send(val, vm)

@@ -9,11 +9,10 @@ license = "MIT"
 include = ["LICENSE", "Cargo.toml", "src/**/*.rs"]
 
 [workspace]
-members = [".", "derive", "vm", "wasm/lib", "parser", "compiler", "bytecode", "vm/pylib-crate", "common", "jit"]
-
-[[bench]]
-name = "bench"
-path = "./benchmarks/bench.rs"
+members = [
+    ".", "ast", "bytecode", "common", "compiler", "compiler/porcelain",
+    "derive", "jit", "parser", "vm", "vm/pylib-crate", "wasm/lib",
+]
 
 [features]
 default = ["threading", "pylib"]
@@ -28,7 +27,7 @@ ssl = ["rustpython-vm/ssl"]
 log = "0.4"
 env_logger = "0.7"
 clap = "2.33"
-rustpython-compiler = { path = "compiler", version = "0.1.1" }
+rustpython-compiler = { path = "compiler/porcelain", version = "0.1.1" }
 rustpython-parser = { path = "parser", version = "0.1.1" }
 rustpython-vm = { path = "vm", version = "0.1.1", default-features = false, features = ["compile-parse"] }
 pylib = { package = "rustpython-pylib", path = "vm/pylib-crate", version = "0.1.0", default-features = false, optional = true }
@@ -45,6 +44,15 @@ rustyline = "6.0"
 
 [dev-dependencies]
 cpython = "0.5.0"
+criterion = "0.3"
+
+[[bench]]
+name = "execution"
+harness = false
+
+[[bench]]
+name = "microbenchmarks"
+harness = false
 
 [[bin]]
 name = "rustpython"
@@ -53,10 +61,14 @@ path = "src/main.rs"
 [profile.dev.package."*"]
 opt-level = 3
 
+[profile.bench]
+lto = true
+codegen-units = 1
+opt-level = 3
+
 [patch.crates-io]
 # REDOX START, Uncommment when you want to compile/check with redoxer
 # # following patches are just waiting on a new version to be released to crates.io
-# nix = { git = "https://github.com/nix-rust/nix" }
-# crossbeam-utils = { git = "https://github.com/crossbeam-rs/crossbeam" }
-# socket2 = { git = "https://github.com/alexcrichton/socket2-rs" }
+# socket2 = { git = "https://github.com/alexcrichton/socket2-rs", branch = "v0.3.x" }
 # REDOX END
+

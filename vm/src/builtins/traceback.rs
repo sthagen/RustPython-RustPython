@@ -1,6 +1,6 @@
 use crate::builtins::pytype::PyTypeRef;
 use crate::frame::FrameRef;
-use crate::pyobject::{PyClassImpl, PyContext, PyRef, PyValue};
+use crate::pyobject::{BorrowValue, PyClassImpl, PyContext, PyRef, PyValue};
 use crate::vm::VirtualMachine;
 
 #[pyclass(module = false, name = "traceback")]
@@ -8,7 +8,7 @@ use crate::vm::VirtualMachine;
 pub struct PyTraceback {
     pub next: Option<PyTracebackRef>, // TODO: Make mutable
     pub frame: FrameRef,
-    pub lasti: usize,
+    pub lasti: u32,
     pub lineno: usize,
 }
 
@@ -22,7 +22,7 @@ impl PyValue for PyTraceback {
 
 #[pyimpl]
 impl PyTraceback {
-    pub fn new(next: Option<PyRef<Self>>, frame: FrameRef, lasti: usize, lineno: usize) -> Self {
+    pub fn new(next: Option<PyRef<Self>>, frame: FrameRef, lasti: u32, lineno: usize) -> Self {
         PyTraceback {
             next,
             frame,
@@ -37,7 +37,7 @@ impl PyTraceback {
     }
 
     #[pyproperty(name = "tb_lasti")]
-    fn lasti(&self) -> usize {
+    fn lasti(&self) -> u32 {
         self.lasti
     }
 
@@ -67,9 +67,9 @@ impl serde::Serialize for PyTraceback {
         use serde::ser::SerializeStruct;
 
         let mut struc = s.serialize_struct("PyTraceback", 3)?;
-        struc.serialize_field("name", &self.frame.code.obj_name)?;
+        struc.serialize_field("name", self.frame.code.obj_name.borrow_value())?;
         struc.serialize_field("lineno", &self.lineno)?;
-        struc.serialize_field("filename", &self.frame.code.source_path)?;
+        struc.serialize_field("filename", self.frame.code.source_path.borrow_value())?;
         struc.end()
     }
 }

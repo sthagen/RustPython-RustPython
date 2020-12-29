@@ -3,16 +3,16 @@
  */
 use rand::Rng;
 
+use crate::builtins::code::CodeObject;
 use crate::builtins::traceback::{PyTraceback, PyTracebackRef};
 use crate::builtins::{code, list};
-use crate::bytecode::CodeObject;
+#[cfg(feature = "rustpython-compiler")]
+use crate::compile;
 use crate::exceptions::PyBaseExceptionRef;
-use crate::pyobject::{ItemProtocol, PyResult, PyValue, TryFromObject, TypeProtocol};
+use crate::pyobject::{BorrowValue, ItemProtocol, PyResult, PyValue, TryFromObject, TypeProtocol};
 use crate::scope::Scope;
 use crate::version::get_git_revision;
 use crate::vm::{InitParameter, VirtualMachine};
-#[cfg(feature = "rustpython-compiler")]
-use rustpython_compiler::compile;
 
 pub(crate) fn init_importlib(
     vm: &mut VirtualMachine,
@@ -36,7 +36,7 @@ pub(crate) fn init_importlib(
             let install_external = vm.get_attribute(importlib, "_install_external_importers")?;
             vm.invoke(&install_external, ())?;
             // Set pyc magic number to commit hash. Should be changed when bytecode will be more stable.
-            let importlib_external = vm.import("_frozen_importlib_external", &[], 0)?;
+            let importlib_external = vm.import("_frozen_importlib_external", None, 0)?;
             let mut magic = get_git_revision().into_bytes();
             magic.truncate(4);
             if magic.len() != 4 {
@@ -44,7 +44,7 @@ pub(crate) fn init_importlib(
             }
             vm.set_attr(&importlib_external, "MAGIC_NUMBER", vm.ctx.new_bytes(magic))?;
             let zipimport_res = (|| -> PyResult<()> {
-                let zipimport = vm.import("zipimport", &[], 0)?;
+                let zipimport = vm.import("zipimport", None, 0)?;
                 let zipimporter = vm.get_attribute(zipimport, "zipimporter")?;
                 let path_hooks = vm.get_attribute(vm.sys_module.clone(), "path_hooks")?;
                 let path_hooks = list::PyListRef::try_from_object(vm, path_hooks)?;
@@ -100,7 +100,7 @@ pub fn import_file(
 ) -> PyResult {
     let code_obj = compile::compile(&content, compile::Mode::Exec, file_path, vm.compile_opts())
         .map_err(|err| vm.new_syntax_error(&err))?;
-    import_codeobj(vm, module_name, code_obj, true)
+    import_codeobj(vm, module_name, vm.map_codeobj(code_obj), true)
 }
 
 pub fn import_codeobj(
@@ -139,12 +139,12 @@ fn remove_importlib_frames_inner(
         return (None, false);
     };
 
-    let file_name = &traceback.frame.code.source_path;
+    let file_name = traceback.frame.code.source_path.borrow_value();
 
     let (inner_tb, mut now_in_importlib) =
         remove_importlib_frames_inner(vm, traceback.next.clone(), always_trim);
     if file_name == "_frozen_importlib" || file_name == "_frozen_importlib_external" {
-        if traceback.frame.code.obj_name == "_call_with_frames_removed" {
+        if traceback.frame.code.obj_name.borrow_value() == "_call_with_frames_removed" {
             now_in_importlib = true;
         }
         if always_trim || now_in_importlib {

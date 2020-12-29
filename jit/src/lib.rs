@@ -1,10 +1,10 @@
 use std::fmt;
 
 use cranelift::prelude::*;
-use cranelift_module::{Backend, FuncId, Linkage, Module, ModuleError};
-use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
+use cranelift_module::{FuncId, Linkage, Module, ModuleError};
+use cranelift_simplejit::{SimpleJITBuilder, SimpleJITModule, SimpleJITProduct};
 
-use rustpython_bytecode::bytecode;
+use rustpython_bytecode as bytecode;
 
 mod instructions;
 
@@ -32,13 +32,13 @@ pub enum JitArgumentError {
 struct Jit {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
-    module: Module<SimpleJITBackend>,
+    module: SimpleJITModule,
 }
 
 impl Jit {
     fn new() -> Self {
         let builder = SimpleJITBuilder::new(cranelift_module::default_libcall_names());
-        let module = Module::new(builder);
+        let module = SimpleJITModule::new(builder);
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
@@ -46,9 +46,9 @@ impl Jit {
         }
     }
 
-    fn build_function(
+    fn build_function<C: bytecode::Constant>(
         &mut self,
-        bytecode: &bytecode::CodeObject,
+        bytecode: &bytecode::CodeObject<C>,
         args: &[JitType],
     ) -> Result<(FuncId, JitSig), JitCompileError> {
         for arg in args {
@@ -65,9 +65,8 @@ impl Jit {
         builder.switch_to_block(entry_block);
 
         let sig = {
-            let mut arg_names = bytecode.arg_names.clone();
-            arg_names.extend(bytecode.kwonlyarg_names.iter().cloned());
-            let mut compiler = FunctionCompiler::new(&mut builder, &arg_names, args, entry_block);
+            let mut compiler =
+                FunctionCompiler::new(&mut builder, bytecode.varnames.len(), args, entry_block);
 
             compiler.compile(bytecode)?;
 
@@ -78,7 +77,7 @@ impl Jit {
         builder.finalize();
 
         let id = self.module.declare_function(
-            &format!("jit_{}", bytecode.obj_name),
+            &format!("jit_{}", bytecode.obj_name.as_ref()),
             Linkage::Export,
             &self.ctx.func.signature,
         )?;
@@ -92,8 +91,8 @@ impl Jit {
     }
 }
 
-pub fn compile(
-    bytecode: &bytecode::CodeObject,
+pub fn compile<C: bytecode::Constant>(
+    bytecode: &bytecode::CodeObject<C>,
     args: &[JitType],
 ) -> Result<CompiledCode, JitCompileError> {
     let mut jit = Jit::new();
@@ -113,7 +112,7 @@ pub fn compile(
 pub struct CompiledCode {
     sig: JitSig,
     code: *const u8,
-    memory: <SimpleJITBackend as Backend>::Product,
+    memory: SimpleJITProduct,
 }
 
 impl CompiledCode {
@@ -162,7 +161,7 @@ impl JitSig {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JitType {
     Int,
     Float,

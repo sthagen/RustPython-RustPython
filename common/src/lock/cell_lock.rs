@@ -1,14 +1,16 @@
 use lock_api::{
-    RawMutex, RawRwLock, RawRwLockDowngrade, RawRwLockRecursive, RawRwLockUpgrade,
+    GetThreadId, RawMutex, RawRwLock, RawRwLockDowngrade, RawRwLockRecursive, RawRwLockUpgrade,
     RawRwLockUpgradeDowngrade,
 };
 use std::cell::Cell;
+use std::num::NonZeroUsize;
 
 pub struct RawCellMutex {
     locked: Cell<bool>,
 }
 
 unsafe impl RawMutex for RawCellMutex {
+    #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = RawCellMutex {
         locked: Cell::new(false),
     };
@@ -58,7 +60,8 @@ impl RawCellRwLock {
 }
 
 unsafe impl RawRwLock for RawCellRwLock {
-    const INIT: Self = Self {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: Self = RawCellRwLock {
         state: Cell::new(0),
     };
 
@@ -92,7 +95,7 @@ unsafe impl RawRwLock for RawCellRwLock {
     #[inline]
     fn lock_exclusive(&self) {
         if !self.try_lock_exclusive() {
-            deadlock("exclusively", "RwLock")
+            deadlock("exclusively ", "RwLock")
         }
         self.state.set(WRITER_BIT)
     }
@@ -125,7 +128,7 @@ unsafe impl RawRwLockDowngrade for RawCellRwLock {
 unsafe impl RawRwLockUpgrade for RawCellRwLock {
     #[inline]
     fn lock_upgradable(&self) {
-        if self.try_lock_upgradable() {
+        if !self.try_lock_upgradable() {
             deadlock("upgradably+sharedly ", "RwLock")
         }
     }
@@ -175,7 +178,7 @@ unsafe impl RawRwLockRecursive for RawCellRwLock {
     #[inline]
     fn lock_shared_recursive(&self) {
         if !self.try_lock_shared_recursive() {
-            deadlock("recursively+sharedly", "RwLock")
+            deadlock("recursively+sharedly ", "RwLock")
         }
     }
 
@@ -196,4 +199,12 @@ unsafe impl RawRwLockRecursive for RawCellRwLock {
 #[inline(never)]
 fn deadlock(lockkind: &str, ty: &str) -> ! {
     panic!("deadlock: tried to {}lock a Cell{} twice", lockkind, ty)
+}
+
+pub struct SingleThreadId(());
+unsafe impl GetThreadId for SingleThreadId {
+    const INIT: Self = SingleThreadId(());
+    fn nonzero_thread_id(&self) -> NonZeroUsize {
+        NonZeroUsize::new(1).unwrap()
+    }
 }

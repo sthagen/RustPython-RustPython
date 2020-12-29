@@ -4,7 +4,6 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use rustpython_vm::builtins::{PyDictRef, PyStrRef, PyTypeRef};
-use rustpython_vm::common::rc::PyRc;
 use rustpython_vm::function::OptionalArg;
 use rustpython_vm::import::import_file;
 use rustpython_vm::pyobject::{
@@ -265,22 +264,17 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let element = Element::make_class(ctx);
 
     py_module!(vm, "_browser", {
-        "fetch" => ctx.new_function(browser_fetch),
-        "request_animation_frame" => ctx.new_function(browser_request_animation_frame),
-        "cancel_animation_frame" => ctx.new_function(browser_cancel_animation_frame),
+        "fetch" => named_function!(ctx, browser, fetch),
+        "request_animation_frame" => named_function!(ctx, browser, request_animation_frame),
+        "cancel_animation_frame" => named_function!(ctx, browser, cancel_animation_frame),
         "Document" => document_class,
         "document" => document,
         "Element" => element,
-        "load_module" => ctx.new_function(browser_load_module),
+        "load_module" => named_function!(ctx, browser, load_module),
     })
 }
 
 pub fn setup_browser_module(vm: &mut VirtualMachine) {
-    let state = PyRc::get_mut(&mut vm.state).unwrap();
-    state
-        .stdlib_inits
-        .insert("_browser".to_owned(), Box::new(make_module));
-    state
-        .frozen
-        .extend(py_freeze!(file = "src/browser.py", module_name = "browser",));
+    vm.add_native_module("_browser".to_owned(), Box::new(make_module));
+    vm.add_frozen(py_freeze!(file = "src/browser.py", module_name = "browser"));
 }

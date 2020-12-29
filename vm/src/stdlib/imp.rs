@@ -1,10 +1,9 @@
 use crate::builtins::bytes::PyBytesRef;
 use crate::builtins::code::PyCode;
 use crate::builtins::module::PyModuleRef;
-use crate::builtins::pystr;
-use crate::builtins::pystr::PyStrRef;
+use crate::builtins::pystr::{self, PyStr, PyStrRef};
 use crate::import;
-use crate::pyobject::{BorrowValue, ItemProtocol, PyObjectRef, PyResult};
+use crate::pyobject::{BorrowValue, ItemProtocol, PyObjectRef, PyResult, PyValue};
 use crate::vm::VirtualMachine;
 
 #[cfg(feature = "threading")]
@@ -77,13 +76,12 @@ fn _imp_exec_builtin(_mod: PyModuleRef) -> i32 {
 }
 
 fn _imp_get_frozen_object(name: PyStrRef, vm: &VirtualMachine) -> PyResult<PyCode> {
-    let name = name.borrow_value();
     vm.state
         .frozen
-        .get(name)
+        .get(name.borrow_value())
         .map(|frozen| {
             let mut frozen = frozen.code.clone();
-            frozen.source_path = format!("frozen {}", name);
+            frozen.source_path = PyStr::from(format!("frozen {}", name)).into_ref(vm);
             PyCode::new(frozen)
         })
         .ok_or_else(|| vm.new_import_error(format!("No such frozen object named {}", name), name))
@@ -94,10 +92,9 @@ fn _imp_init_frozen(name: PyStrRef, vm: &VirtualMachine) -> PyResult {
 }
 
 fn _imp_is_frozen_package(name: PyStrRef, vm: &VirtualMachine) -> PyResult<bool> {
-    let name = name.borrow_value();
     vm.state
         .frozen
-        .get(name)
+        .get(name.borrow_value())
         .map(|frozen| frozen.package)
         .ok_or_else(|| vm.new_import_error(format!("No such frozen object named {}", name), name))
 }

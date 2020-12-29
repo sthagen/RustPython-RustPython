@@ -2,7 +2,7 @@
 //! The goal is to provide a matching and a safe error API, maksing errors from LALR
 use lalrpop_util::ParseError as LalrpopError;
 
-use crate::location::Location;
+use crate::ast::Location;
 use crate::token::Tok;
 
 use std::error::Error;
@@ -22,6 +22,7 @@ pub enum LexicalErrorType {
     NestingError,
     IndentationError,
     TabError,
+    TabsAfterSpaces,
     DefaultArgumentError,
     PositionalArgumentError,
     DuplicateKeywordArgumentError,
@@ -44,6 +45,9 @@ impl fmt::Display for LexicalErrorType {
             }
             LexicalErrorType::TabError => {
                 write!(f, "inconsistent use of tabs and spaces in indentation")
+            }
+            LexicalErrorType::TabsAfterSpaces => {
+                write!(f, "Tabs not allowed as part of indentation after spaces")
             }
             LexicalErrorType::DefaultArgumentError => {
                 write!(f, "non-default argument follows default argument")
@@ -197,6 +201,34 @@ impl fmt::Display for ParseErrorType {
             }
             ParseErrorType::Lexical(ref error) => write!(f, "{}", error),
         }
+    }
+}
+
+impl Error for ParseErrorType {}
+
+impl ParseErrorType {
+    pub fn is_indentation_error(&self) -> bool {
+        match self {
+            ParseErrorType::Lexical(LexicalErrorType::IndentationError) => true,
+            ParseErrorType::UnrecognizedToken(token, expected) => {
+                *token == Tok::Indent || expected.clone() == Some("Indent".to_owned())
+            }
+            _ => false,
+        }
+    }
+    pub fn is_tab_error(&self) -> bool {
+        matches!(
+            self,
+            ParseErrorType::Lexical(LexicalErrorType::TabError)
+                | ParseErrorType::Lexical(LexicalErrorType::TabsAfterSpaces)
+        )
+    }
+}
+
+impl std::ops::Deref for ParseError {
+    type Target = ParseErrorType;
+    fn deref(&self) -> &Self::Target {
+        &self.error
     }
 }
 

@@ -1,8 +1,8 @@
 use cranelift::prelude::*;
 use num_traits::cast::ToPrimitive;
-use rustpython_bytecode::bytecode::{
-    BinaryOperator, CodeObject, ComparisonOperator, Constant, Instruction, Label, NameScope,
-    UnaryOperator,
+use rustpython_bytecode::{
+    self as bytecode, BinaryOperator, BorrowedConstant, CodeObject, ComparisonOperator,
+    Instruction, Label, UnaryOperator,
 };
 use std::collections::HashMap;
 
@@ -14,6 +14,7 @@ struct Local {
     ty: JitType,
 }
 
+#[derive(Debug)]
 struct JitValue {
     val: Value,
     ty: JitType,
@@ -28,7 +29,7 @@ impl JitValue {
 pub struct FunctionCompiler<'a, 'b> {
     builder: &'a mut FunctionBuilder<'b>,
     stack: Vec<JitValue>,
-    variables: HashMap<String, Local>,
+    variables: Box<[Option<Local>]>,
     label_to_block: HashMap<Label, Block>,
     pub(crate) sig: JitSig,
 }
@@ -36,14 +37,14 @@ pub struct FunctionCompiler<'a, 'b> {
 impl<'a, 'b> FunctionCompiler<'a, 'b> {
     pub fn new(
         builder: &'a mut FunctionBuilder<'b>,
-        arg_names: &[String],
+        num_variables: usize,
         arg_types: &[JitType],
         entry_block: Block,
     ) -> FunctionCompiler<'a, 'b> {
         let mut compiler = FunctionCompiler {
             builder,
             stack: Vec::new(),
-            variables: HashMap::new(),
+            variables: vec![None; num_variables].into_boxed_slice(),
             label_to_block: HashMap::new(),
             sig: JitSig {
                 args: arg_types.to_vec(),
@@ -51,21 +52,22 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             },
         };
         let params = compiler.builder.func.dfg.block_params(entry_block).to_vec();
-        debug_assert_eq!(arg_names.len(), arg_types.len());
-        debug_assert_eq!(arg_names.len(), params.len());
-        for ((name, ty), val) in arg_names.iter().zip(arg_types).zip(params) {
+        for (i, (ty, val)) in arg_types.iter().zip(params).enumerate() {
             compiler
-                .store_variable(name.clone(), JitValue::new(val, ty.clone()))
+                .store_variable(i as u32, JitValue::new(val, ty.clone()))
                 .unwrap();
         }
         compiler
     }
 
-    fn store_variable(&mut self, name: String, val: JitValue) -> Result<(), JitCompileError> {
-        let len = self.variables.len();
+    fn store_variable(
+        &mut self,
+        idx: bytecode::NameIdx,
+        val: JitValue,
+    ) -> Result<(), JitCompileError> {
         let builder = &mut self.builder;
-        let local = self.variables.entry(name).or_insert_with(|| {
-            let var = Variable::new(len);
+        let local = self.variables[idx as usize].get_or_insert_with(|| {
+            let var = Variable::new(idx as usize);
             let local = Local {
                 var,
                 ty: val.ty.clone(),
@@ -97,20 +99,28 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         }
     }
 
-    fn get_or_create_block(&mut self, label: &Label) -> Block {
+    fn get_or_create_block(&mut self, label: Label) -> Block {
         let builder = &mut self.builder;
         *self
             .label_to_block
-            .entry(*label)
+            .entry(label)
             .or_insert_with(|| builder.create_block())
     }
 
-    pub fn compile(&mut self, bytecode: &CodeObject) -> Result<(), JitCompileError> {
-        let offset_to_label: HashMap<&usize, &Label> =
-            bytecode.label_map.iter().map(|(k, v)| (v, k)).collect();
+    pub fn compile<C: bytecode::Constant>(
+        &mut self,
+        bytecode: &CodeObject<C>,
+    ) -> Result<(), JitCompileError> {
+        // TODO: figure out if this is sufficient -- previously individual labels were associated
+        // pretty much per-bytecode that uses them, or at least per "type" of block -- in theory an
+        // if block and a with block might jump to the same place. Now it's all "flattened", so
+        // there might be less distinction between different types of blocks going off
+        // label_targets alone
+        let label_targets = bytecode.label_targets();
 
         for (offset, instruction) in bytecode.instructions.iter().enumerate() {
-            if let Some(&label) = offset_to_label.get(&offset) {
+            let label = Label(offset as u32);
+            if label_targets.contains(&label) {
                 let block = self.get_or_create_block(label);
 
                 // If the current block is not terminated/filled just jump
@@ -128,15 +138,18 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 continue;
             }
 
-            self.add_instruction(&instruction)?;
+            self.add_instruction(&instruction, &bytecode.constants)?;
         }
 
         Ok(())
     }
 
-    fn load_const(&mut self, constant: &Constant) -> Result<(), JitCompileError> {
+    fn load_const<C: bytecode::Constant>(
+        &mut self,
+        constant: BorrowedConstant<C>,
+    ) -> Result<(), JitCompileError> {
         match constant {
-            Constant::Integer { value } => {
+            BorrowedConstant::Integer { value } => {
                 let val = self.builder.ins().iconst(
                     types::I64,
                     value.to_i64().ok_or(JitCompileError::NotSupported)?,
@@ -147,16 +160,16 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 });
                 Ok(())
             }
-            Constant::Float { value } => {
-                let val = self.builder.ins().f64const(*value);
+            BorrowedConstant::Float { value } => {
+                let val = self.builder.ins().f64const(value);
                 self.stack.push(JitValue {
                     val,
                     ty: JitType::Float,
                 });
                 Ok(())
             }
-            Constant::Boolean { value } => {
-                let val = self.builder.ins().iconst(types::I8, *value as i64);
+            BorrowedConstant::Boolean { value } => {
+                let val = self.builder.ins().iconst(types::I8, value as i64);
                 self.stack.push(JitValue {
                     val,
                     ty: JitType::Bool,
@@ -167,13 +180,17 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         }
     }
 
-    fn add_instruction(&mut self, instruction: &Instruction) -> Result<(), JitCompileError> {
+    pub fn add_instruction<C: bytecode::Constant>(
+        &mut self,
+        instruction: &Instruction,
+        constants: &[C],
+    ) -> Result<(), JitCompileError> {
         match instruction {
             Instruction::JumpIfFalse { target } => {
                 let cond = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
 
                 let val = self.boolean_val(cond)?;
-                let then_block = self.get_or_create_block(target);
+                let then_block = self.get_or_create_block(*target);
                 self.builder.ins().brz(val, then_block, &[]);
 
                 let block = self.builder.create_block();
@@ -186,7 +203,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 let cond = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
 
                 let val = self.boolean_val(cond)?;
-                let then_block = self.get_or_create_block(target);
+                let then_block = self.get_or_create_block(*target);
                 self.builder.ins().brnz(val, then_block, &[]);
 
                 let block = self.builder.create_block();
@@ -196,18 +213,14 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 Ok(())
             }
             Instruction::Jump { target } => {
-                let target_block = self.get_or_create_block(target);
+                let target_block = self.get_or_create_block(*target);
                 self.builder.ins().jump(target_block, &[]);
 
                 Ok(())
             }
-            Instruction::LoadName {
-                name,
-                scope: NameScope::Local,
-            } => {
-                let local = self
-                    .variables
-                    .get(name)
+            Instruction::LoadFast(idx) => {
+                let local = self.variables[*idx as usize]
+                    .as_ref()
                     .ok_or(JitCompileError::BadBytecode)?;
                 self.stack.push(JitValue {
                     val: self.builder.use_var(local.var),
@@ -215,14 +228,13 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 });
                 Ok(())
             }
-            Instruction::StoreName {
-                name,
-                scope: NameScope::Local,
-            } => {
+            Instruction::StoreFast(idx) => {
                 let val = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
-                self.store_variable(name.clone(), val)
+                self.store_variable(*idx, val)
             }
-            Instruction::LoadConst { value } => self.load_const(value),
+            Instruction::LoadConst { idx } => {
+                self.load_const(constants[*idx as usize].borrow_constant())
+            }
             Instruction::ReturnValue => {
                 let val = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
                 if let Some(ref ty) = self.sig.ret {
@@ -310,7 +322,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     _ => Err(JitCompileError::NotSupported),
                 }
             }
-            Instruction::BinaryOperation { op, .. } => {
+            Instruction::BinaryOperation { op } | Instruction::BinaryOperationInplace { op } => {
                 // the rhs is popped off first
                 let b = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
                 let a = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;

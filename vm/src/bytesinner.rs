@@ -11,10 +11,11 @@ use crate::builtins::pystr::{self, PyStr, PyStrRef};
 use crate::builtins::singletons::PyNoneRef;
 use crate::builtins::PyTypeRef;
 use crate::byteslike::try_bytes_like;
+use crate::cformat::CFormatBytes;
 use crate::function::{OptionalArg, OptionalOption};
 use crate::pyobject::{
-    BorrowValue, Either, IdProtocol, PyComparisonValue, PyIterable, PyObjectRef, PyRef, PyResult,
-    PyValue, TryFromObject, TypeProtocol,
+    BorrowValue, Either, IdProtocol, PyComparisonValue, PyIterable, PyObjectRef, PyResult, PyValue,
+    TryFromObject, TypeProtocol,
 };
 use crate::sliceable::PySliceableSequence;
 use crate::slots::PyComparisonOp;
@@ -90,10 +91,10 @@ impl ByteInnerNewOptions {
 
     pub fn get_bytes(mut self, cls: PyTypeRef, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
         let inner = if let OptionalArg::Present(source) = self.source.take() {
-            if source.class().is(&PyBytes::class(vm)) && cls.is(&PyBytes::class(vm)) {
-                return self
-                    .check_args(vm)
-                    .map(|_| unsafe { PyRef::from_obj_unchecked(source) });
+            if cls.is(&PyBytes::class(vm)) {
+                if let Ok(source) = source.clone().downcast_exact(vm) {
+                    return self.check_args(vm).map(|()| source);
+                }
             }
 
             match_class!(match source {
@@ -894,8 +895,10 @@ impl PyBytesInner {
         res
     }
 
-    pub fn cformat(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<String> {
-        self.elements.py_cformat(values, vm)
+    pub fn cformat(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        CFormatBytes::parse_from_bytes(self.elements.as_slice())
+            .map_err(|err| vm.new_value_error(err.to_string()))?
+            .format(vm, values)
     }
 
     pub fn repeat(&self, n: isize) -> Vec<u8> {
@@ -1189,15 +1192,7 @@ pub fn bytes_from_object(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<Vec
 }
 
 pub fn value_from_object(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<u8> {
-    let value = vm.to_index(obj).ok_or_else(|| {
-        vm.new_type_error(format!(
-            "'{}' object cannot be interpreted as an integer",
-            obj.class().name
-        ))
-    })?;
-    // __index__ returned non-int type
-    let value = value?;
-    value
+    vm.to_index(obj)?
         .borrow_value()
         .to_u8()
         .ok_or_else(|| vm.new_value_error("byte must be in range(0, 256)".to_owned()))

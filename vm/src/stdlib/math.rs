@@ -11,12 +11,9 @@ use statrs::function::gamma::{gamma, ln_gamma};
 use crate::builtins::float::{self, IntoPyFloat, PyFloatRef};
 use crate::builtins::int::{self, PyInt, PyIntRef};
 use crate::function::{Args, OptionalArg};
-use crate::pyobject::{BorrowValue, Either, PyObjectRef, PyResult, TypeProtocol};
+use crate::pyobject::{BorrowValue, Either, PyIterable, PyObjectRef, PyResult, TypeProtocol};
 use crate::vm::VirtualMachine;
 use rustpython_common::float_ops;
-
-#[cfg(not(target_arch = "wasm32"))]
-use libc::c_double;
 
 use std::cmp::Ordering;
 
@@ -134,15 +131,8 @@ fn math_sqrt(value: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
 }
 
 fn math_isqrt(x: PyObjectRef, vm: &VirtualMachine) -> PyResult<BigInt> {
-    let index = vm.to_index(&x).ok_or_else(|| {
-        vm.new_type_error(format!(
-            "'{}' object cannot be interpreted as an integer",
-            x.class().name
-        ))
-    })?;
-    // __index__ may have returned non-int type
-    let python_value = index?;
-    let value = python_value.borrow_value();
+    let index = vm.to_index(&x)?;
+    let value = index.borrow_value();
 
     if value.is_negative() {
         return Err(vm.new_value_error("isqrt() argument must be nonnegative".to_owned()));
@@ -177,8 +167,43 @@ fn math_atan2(y: IntoPyFloat, x: IntoPyFloat) -> f64 {
 
 make_math_func!(math_cos, cos);
 
-fn math_hypot(x: IntoPyFloat, y: IntoPyFloat) -> f64 {
-    x.to_f64().hypot(y.to_f64())
+fn math_hypot(coordinates: Args<IntoPyFloat>) -> f64 {
+    let mut coordinates = IntoPyFloat::vec_into_f64(coordinates.into_vec());
+    let mut max = 0.0;
+    let mut has_nan = false;
+    for f in &mut coordinates {
+        *f = f.abs();
+        if f.is_nan() {
+            has_nan = true;
+        } else if *f > max {
+            max = *f
+        }
+    }
+    // inf takes precedence over nan
+    if max.is_infinite() {
+        return max;
+    }
+    if has_nan {
+        return f64::NAN;
+    }
+    vector_norm(&coordinates, max)
+}
+
+fn vector_norm(v: &[f64], max: f64) -> f64 {
+    if max == 0.0 || v.len() <= 1 {
+        return max;
+    }
+    let mut csum = 1.0;
+    let mut frac = 0.0;
+    for &f in v {
+        let f = f / max;
+        let f = f * f;
+        let old = csum;
+        csum += f;
+        // this seemingly redundant operation is to reduce float rounding errors/inaccuracy
+        frac += (old - csum) + f;
+    }
+    max * f64::sqrt(csum - 1.0 + frac)
 }
 
 make_math_func!(math_sin, sin);
@@ -193,7 +218,15 @@ fn math_radians(x: IntoPyFloat) -> f64 {
 }
 
 // Hyperbolic functions:
-make_math_func!(math_acosh, acosh);
+fn math_acosh(x: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+    let x = x.to_f64();
+    if x.is_sign_negative() || x.is_zero() {
+        Err(vm.new_value_error("math domain error".to_owned()))
+    } else {
+        Ok(x.acosh())
+    }
+}
+
 make_math_func!(math_asinh, asinh);
 make_math_func!(math_atanh, atanh);
 make_math_func!(math_cosh, cosh);
@@ -305,9 +338,9 @@ fn math_ldexp(
 ) -> PyResult<f64> {
     let value = match value {
         Either::A(f) => f.to_f64(),
-        Either::B(z) => int::try_float(z.borrow_value(), vm)?,
+        Either::B(z) => int::to_float(z.borrow_value(), vm)?,
     };
-    Ok(value * (2_f64).powf(int::try_float(i.borrow_value(), vm)?))
+    Ok(value * (2_f64).powf(int::to_float(i.borrow_value(), vm)?))
 }
 
 fn math_perf_arb_len_int_op<F>(args: Args<PyIntRef>, op: F, default: BigInt) -> BigInt
@@ -339,6 +372,104 @@ fn math_lcm(args: Args<PyIntRef>) -> BigInt {
     math_perf_arb_len_int_op(args, |x, y| x.lcm(y.borrow_value()), BigInt::one())
 }
 
+fn math_fsum(iter: PyIterable<IntoPyFloat>, vm: &VirtualMachine) -> PyResult<f64> {
+    let mut partials = vec![];
+    let mut special_sum = 0.0;
+    let mut inf_sum = 0.0;
+
+    for obj in iter.iter(vm)? {
+        let mut x = obj?.to_f64();
+
+        let xsave = x;
+        let mut j = 0;
+        // This inner loop applies `hi`/`lo` summation to each
+        // partial so that the list of partial sums remains exact.
+        for i in 0..partials.len() {
+            let mut y: f64 = partials[i];
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            // Rounded `x+y` is stored in `hi` with round-off stored in
+            // `lo`. Together `hi+lo` are exactly equal to `x+y`.
+            let hi = x + y;
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                partials[j] = lo;
+                j += 1;
+            }
+            x = hi;
+        }
+
+        if !x.is_finite() {
+            // a nonfinite x could arise either as
+            // a result of intermediate overflow, or
+            // as a result of a nan or inf in the
+            // summands
+            if xsave.is_finite() {
+                return Err(vm.new_overflow_error("intermediate overflow in fsum".to_owned()));
+            }
+            if xsave.is_infinite() {
+                inf_sum += xsave;
+            }
+            special_sum += xsave;
+            // reset partials
+            partials.clear();
+        }
+
+        if j >= partials.len() {
+            partials.push(x);
+        } else {
+            partials[j] = x;
+            partials.truncate(j + 1);
+        }
+    }
+    if special_sum != 0.0 {
+        return if inf_sum.is_nan() {
+            Err(vm.new_overflow_error("-inf + inf in fsum".to_owned()))
+        } else {
+            Ok(special_sum)
+        };
+    }
+
+    let mut n = partials.len();
+    if n > 0 {
+        n -= 1;
+        let mut hi = partials[n];
+
+        let mut lo = 0.0;
+        while n > 0 {
+            let x = hi;
+
+            n -= 1;
+            let y = partials[n];
+
+            hi = x + y;
+            lo = y - (hi - x);
+            if lo != 0.0 {
+                break;
+            }
+        }
+        if n > 0 && ((lo < 0.0 && partials[n - 1] < 0.0) || (lo > 0.0 && partials[n - 1] > 0.0)) {
+            let y = lo + lo;
+            let x = hi + y;
+
+            // Make half-even rounding work across multiple partials.
+            // Needed so that sum([1e-16, 1, 1e16]) will round-up the last
+            // digit to two instead of down to zero (the 1e-16 makes the 1
+            // slightly closer to two).  With a potential 1 ULP rounding
+            // error fixed-up, math.fsum() can guarantee commutativity.
+            #[allow(clippy::float_cmp)]
+            if y == x - hi {
+                hi = x;
+            }
+        }
+
+        Ok(hi)
+    } else {
+        Ok(0.0)
+    }
+}
+
 fn math_factorial(value: PyIntRef, vm: &VirtualMachine) -> PyResult<BigInt> {
     let value = value.borrow_value();
     if value.is_negative() {
@@ -363,47 +494,12 @@ fn math_modf(x: IntoPyFloat) -> (f64, f64) {
     (x.fract(), x.trunc())
 }
 
-#[inline]
-#[cfg(not(target_arch = "wasm32"))]
-fn libc_nextafter(x: f64, y: f64) -> f64 {
-    extern "C" {
-        fn nextafter(x: c_double, y: c_double) -> c_double;
-    }
-    unsafe { nextafter(x, y) }
+fn math_nextafter(x: IntoPyFloat, y: IntoPyFloat) -> f64 {
+    float_ops::nextafter(x.to_f64(), y.to_f64())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn math_nextafter(x: IntoPyFloat, y: IntoPyFloat) -> PyResult<f64> {
-    let x = x.to_f64();
-    let y = y.to_f64();
-    Ok(libc_nextafter(x, y))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn math_nextafter(_x: IntoPyFloat, _y: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
-    Err(vm.new_not_implemented_error("not implemented for this platform".to_owned()))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn math_ulp(x: IntoPyFloat) -> PyResult<f64> {
-    let mut x = x.to_f64();
-    if x.is_nan() {
-        return Ok(x);
-    }
-    x = x.abs();
-    let mut x2 = libc_nextafter(x, f64::INFINITY);
-    Ok(if x2.is_infinite() {
-        // special case: x is the largest positive representable float
-        x2 = libc_nextafter(x, f64::NEG_INFINITY);
-        x - x2
-    } else {
-        x2 - x
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn math_ulp(_x: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
-    Err(vm.new_not_implemented_error("not implemented for this platform".to_owned()))
+fn math_ulp(x: IntoPyFloat) -> f64 {
+    float_ops::ulp(x.to_f64())
 }
 
 fn fmod(x: f64, y: f64) -> f64 {
@@ -518,6 +614,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         "ldexp" => named_function!(ctx, math, ldexp),
         "modf" => named_function!(ctx, math, modf),
         "fmod" => named_function!(ctx, math, fmod),
+        "fsum" => named_function!(ctx, math, fsum),
         "remainder" => named_function!(ctx, math, remainder),
 
         // Rounding functions:

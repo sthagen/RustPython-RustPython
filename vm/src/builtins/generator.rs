@@ -3,11 +3,13 @@
  */
 
 use super::code::PyCodeRef;
+use super::pystr::PyStrRef;
 use super::pytype::PyTypeRef;
 use crate::coroutine::{Coro, Variant};
 use crate::frame::FrameRef;
 use crate::function::OptionalArg;
-use crate::pyobject::{PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue};
+use crate::pyobject::{IdProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue};
+use crate::slots::PyIter;
 use crate::vm::VirtualMachine;
 
 #[pyclass(module = false, name = "generator")]
@@ -22,33 +24,31 @@ impl PyValue for PyGenerator {
     }
 }
 
-#[pyimpl]
+#[pyimpl(with(PyIter))]
 impl PyGenerator {
     pub fn as_coro(&self) -> &Coro {
         &self.inner
     }
 
-    pub fn new(frame: FrameRef, vm: &VirtualMachine) -> PyRef<Self> {
+    pub fn new(frame: FrameRef, name: PyStrRef) -> Self {
         PyGenerator {
-            inner: Coro::new(frame, Variant::Gen),
+            inner: Coro::new(frame, Variant::Gen, name),
         }
-        .into_ref(vm)
     }
 
-    // TODO: fix function names situation
     #[pyproperty(magic)]
-    fn name(&self, vm: &VirtualMachine) -> PyObjectRef {
-        vm.ctx.none()
+    fn name(&self) -> PyStrRef {
+        self.inner.name()
     }
 
-    #[pymethod(name = "__iter__")]
-    fn iter(zelf: PyRef<Self>) -> PyRef<Self> {
-        zelf
+    #[pyproperty(magic, setter)]
+    fn set_name(&self, name: PyStrRef) {
+        self.inner.set_name(name)
     }
 
-    #[pymethod(name = "__next__")]
-    fn next(&self, vm: &VirtualMachine) -> PyResult {
-        self.send(vm.ctx.none(), vm)
+    #[pymethod(magic)]
+    fn repr(zelf: PyRef<Self>) -> String {
+        zelf.inner.repr(zelf.get_id())
     }
 
     #[pymethod]
@@ -92,6 +92,12 @@ impl PyGenerator {
     #[pyproperty]
     fn gi_yieldfrom(&self, _vm: &VirtualMachine) -> Option<PyObjectRef> {
         self.inner.frame().yield_from_target()
+    }
+}
+
+impl PyIter for PyGenerator {
+    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        zelf.send(vm.ctx.none(), vm)
     }
 }
 

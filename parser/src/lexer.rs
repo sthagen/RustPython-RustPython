@@ -3,8 +3,8 @@
 //! This means source code is translated into separate tokens.
 
 pub use super::token::Tok;
+use crate::ast::Location;
 use crate::error::{LexicalError, LexicalErrorType};
-use crate::location::Location;
 use num_bigint::BigInt;
 use num_traits::identities::Zero;
 use num_traits::Num;
@@ -457,7 +457,8 @@ where
                 break;
             }
         }
-        u8::from_str_radix(&octet_content, 8).unwrap() as char
+        let value = u32::from_str_radix(&octet_content, 8).unwrap();
+        char::from_u32(value).unwrap()
     }
 
     fn parse_unicode_name(&mut self) -> Result<char, LexicalError> {
@@ -677,9 +678,7 @@ where
                         // This is technically stricter than python3 but spaces before
                         // tabs is even more insane than mixing spaces and tabs.
                         return Err(LexicalError {
-                            error: LexicalErrorType::OtherError(
-                                "Tabs not allowed as part of indentation after spaces".to_owned(),
-                            ),
+                            error: LexicalErrorType::TabsAfterSpaces,
                             location: self.get_pos(),
                         });
                     }
@@ -1596,7 +1595,7 @@ mod tests {
 
     #[test]
     fn test_string() {
-        let source = r#""double" 'single' 'can\'t' "\\\"" '\t\r\n' '\g' r'raw\'' '\200\0a'"#;
+        let source = r#""double" 'single' 'can\'t' "\\\"" '\t\r\n' '\g' r'raw\'' '\420' '\200\0a'"#;
         let tokens = lex_source(source);
         assert_eq!(
             tokens,
@@ -1627,6 +1626,10 @@ mod tests {
                 },
                 Tok::String {
                     value: String::from("raw\\'"),
+                    is_fstring: false,
+                },
+                Tok::String {
+                    value: String::from("Đ"),
                     is_fstring: false,
                 },
                 Tok::String {

@@ -1,14 +1,12 @@
 use num_traits::ToPrimitive;
 use std::{env, mem, path};
 
-use crate::builtins::pystr::PyStrRef;
-use crate::builtins::pytype::PyTypeRef;
+use crate::builtins::{PyStr, PyStrRef, PyTypeRef};
 use crate::common::hash::{PyHash, PyUHash};
 use crate::frame::FrameRef;
 use crate::function::{Args, FuncArgs, OptionalArg};
 use crate::pyobject::{
-    IntoPyObject, ItemProtocol, PyClassImpl, PyContext, PyObjectRc, PyObjectRef, PyResult,
-    PyStructSequence,
+    ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRefExact, PyResult, PyStructSequence,
 };
 use crate::vm::{PySettings, VirtualMachine};
 use crate::{builtins, exceptions, py_io, version};
@@ -16,6 +14,8 @@ use crate::{builtins, exceptions, py_io, version};
 /*
  * The magic sys module.
  */
+const MAXSIZE: usize = std::isize::MAX as usize;
+const MAXUNICODE: u32 = std::char::MAX as u32;
 
 fn argv(vm: &VirtualMachine) -> PyObjectRef {
     vm.ctx.new_list(
@@ -136,7 +136,7 @@ impl SysFlags {
 }
 
 fn sys_getrefcount(obj: PyObjectRef) -> usize {
-    PyObjectRc::strong_count(&obj)
+    PyObjectRef::strong_count(&obj)
 }
 
 fn sys_getsizeof(obj: PyObjectRef) -> usize {
@@ -212,9 +212,8 @@ fn sys_setrecursionlimit(recursion_limit: i32, vm: &VirtualMachine) -> PyResult<
     }
 }
 
-// TODO implement string interning, this will be key for performance
-fn sys_intern(value: PyStrRef) -> PyStrRef {
-    value
+fn sys_intern(s: PyRefExact<PyStr>, vm: &VirtualMachine) -> PyStrRef {
+    vm.intern_string(s)
 }
 
 fn sys_exc_info(vm: &VirtualMachine) -> (PyObjectRef, PyObjectRef, PyObjectRef) {
@@ -401,7 +400,7 @@ const ABIFLAGS: &str = "";
 // https://github.com/python/cpython/blob/3.8/configure.ac#L725
 const MULTIARCH: &str = env!("RUSTPYTHON_TARGET_TRIPLE");
 
-pub fn sysconfigdata_name() -> String {
+pub(crate) fn sysconfigdata_name() -> String {
     format!("_sysconfigdata_{}_{}_{}", ABIFLAGS, PLATFORM, MULTIARCH)
 }
 
@@ -482,7 +481,7 @@ impl PyIntInfo {
     };
 }
 
-pub fn make_module(vm: &VirtualMachine, module: PyObjectRef, builtins: PyObjectRef) {
+pub(crate) fn make_module(vm: &VirtualMachine, module: PyObjectRef, builtins: PyObjectRef) {
     let ctx = &vm.ctx;
 
     let _flags_type = SysFlags::make_class(ctx);
@@ -628,7 +627,7 @@ settrace() -- set the global debug tracing function
     module_names.push("builtins".to_owned());
     module_names.sort();
     let builtin_module_names =
-        ctx.new_tuple(module_names.iter().map(|v| v.into_pyobject(vm)).collect());
+        ctx.new_tuple(module_names.into_iter().map(|n| ctx.new_str(n)).collect());
     let modules = ctx.new_dict();
 
     let prefix = option_env!("RUSTPYTHON_PREFIX").unwrap_or("/usr/local");
@@ -656,8 +655,8 @@ settrace() -- set the global debug tracing function
       "gettrace" => named_function!(ctx, sys, gettrace),
       "hash_info" => hash_info,
       "intern" => named_function!(ctx, sys, intern),
-      "maxunicode" => ctx.new_int(std::char::MAX as u32),
-      "maxsize" => ctx.new_int(std::isize::MAX),
+      "maxunicode" => ctx.new_int(MAXUNICODE),
+      "maxsize" => ctx.new_int(MAXSIZE),
       "path" => path,
       "ps1" => ctx.new_str(">>>>> "),
       "ps2" => ctx.new_str("..... "),
@@ -701,7 +700,7 @@ settrace() -- set the global debug tracing function
 
     #[cfg(windows)]
     {
-        let getwindowsversion = WindowsVersion::make_class(ctx);
+        WindowsVersion::make_class(ctx);
         extend_module!(vm, module, {
             "getwindowsversion" => named_function!(ctx, sys, getwindowsversion),
         })

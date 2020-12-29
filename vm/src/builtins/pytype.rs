@@ -1,4 +1,7 @@
-use crate::common::lock::PyRwLock;
+use crate::common::lock::{
+    PyMappedRwLockReadGuard, PyRwLock, PyRwLockReadGuard, PyRwLockUpgradableReadGuard,
+    PyRwLockWriteGuard,
+};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -12,10 +15,11 @@ use super::pystr::PyStrRef;
 use super::staticmethod::PyStaticMethod;
 use super::tuple::PyTuple;
 use super::weakref::PyWeak;
+use crate::builtins::tuple::PyTupleTyped;
 use crate::function::{FuncArgs, KwArgs};
 use crate::pyobject::{
-    BorrowValue, Either, IdProtocol, PyAttributes, PyClassImpl, PyContext, PyIterable, PyLease,
-    PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
+    BorrowValue, Either, IdProtocol, PyAttributes, PyClassImpl, PyContext, PyLease, PyObjectRef,
+    PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
 };
 use crate::slots::{self, Callable, PyTpFlags, PyTypeSlots, SlotGetattro};
 use crate::vm::VirtualMachine;
@@ -57,21 +61,23 @@ impl PyValue for PyType {
 }
 
 impl PyType {
-    fn tp_name(&self, vm: &VirtualMachine) -> String {
-        let opt_name = self.slots.name.read().clone();
-        opt_name.unwrap_or_else(|| {
+    pub fn tp_name(&self) -> PyMappedRwLockReadGuard<str> {
+        let opt_name = self.slots.name.upgradable_read();
+        let read_guard = if opt_name.is_some() {
+            PyRwLockUpgradableReadGuard::downgrade(opt_name)
+        } else {
+            let mut opt_name = PyRwLockUpgradableReadGuard::upgrade(opt_name);
             let module = self.attributes.read().get("__module__").cloned();
+            let module: Option<PyStrRef> = module.and_then(|m| m.downcast().ok());
             let new_name = if let Some(module) = module {
-                // FIXME: "unknown" case is a bug.
-                let module_str = PyStrRef::try_from_object(vm, module)
-                    .map_or("<unknown>".to_owned(), |m| m.borrow_value().to_owned());
-                format!("{}.{}", module_str, &self.name)
+                format!("{}.{}", module, &self.name)
             } else {
                 self.name.clone()
             };
-            *self.slots.name.write() = Some(new_name.clone());
-            new_name
-        })
+            *opt_name = Some(new_name);
+            PyRwLockWriteGuard::downgrade(opt_name)
+        };
+        PyRwLockReadGuard::map(read_guard, |opt| opt.as_deref().unwrap())
     }
 
     pub fn iter_mro(&self) -> impl Iterator<Item = &PyType> + DoubleEndedIterator {
@@ -138,8 +144,13 @@ impl PyType {
         attributes
     }
 
-    pub(crate) fn update_slot(&self, name: &str) {
+    pub(crate) fn update_slot(&self, name: &str, add: bool) {
         // self is the resolved class in get_class_magic
+        macro_rules! update_slot {
+            ($name:ident, $func:expr) => {{
+                self.slots.$name.store(if add { Some($func) } else { None });
+            }};
+        }
         match name {
             "__call__" => {
                 let func: slots::GenericMethod = |zelf, args, vm| {
@@ -147,14 +158,14 @@ impl PyType {
                     let magic = vm.call_if_get_descriptor(magic, zelf.clone())?;
                     vm.invoke(&magic, args)
                 } as _;
-                self.slots.call.store(Some(func))
+                update_slot!(call, func);
             }
             "__get__" => {
                 let func: slots::DescrGetFunc = |zelf, obj, cls, vm| {
                     let magic = get_class_magic(&zelf, "__get__");
                     vm.invoke(&magic, (zelf, obj, cls))
                 } as _;
-                self.slots.descr_get.store(Some(func))
+                update_slot!(descr_get, func);
             }
             "__hash__" => {
                 let func: slots::HashFunc = |zelf, vm| {
@@ -168,7 +179,7 @@ impl PyType {
                             .new_type_error("__hash__ method should return an integer".to_owned())),
                     }
                 } as _;
-                self.slots.hash.store(Some(func));
+                update_slot!(hash, func);
             }
             "__del__" => {
                 let func: slots::DelFunc = |zelf, vm| {
@@ -176,22 +187,37 @@ impl PyType {
                     let _ = vm.invoke(&magic, vec![zelf.clone()])?;
                     Ok(())
                 } as _;
-                self.slots.del.store(Some(func));
+                update_slot!(del, func);
             }
             "__eq__" | "__ne__" | "__le__" | "__lt__" | "__ge__" | "__gt__" => {
                 let func: slots::CmpFunc = |zelf, other, op, vm| {
+                    // TODO: differentiate between op types; get_class_magic would panic
                     let magic = get_class_magic(&zelf, op.method_name());
                     vm.invoke(&magic, vec![zelf.clone(), other.clone()])
                         .map(Either::A)
                 } as _;
-                self.slots.cmp.store(Some(func))
+                update_slot!(cmp, func);
             }
             "__getattribute__" => {
                 let func: slots::GetattroFunc = |zelf, name, vm| {
                     let magic = get_class_magic(&zelf, "__getattribute__");
                     vm.invoke(&magic, (zelf, name))
                 };
-                self.slots.getattro.store(Some(func))
+                update_slot!(getattro, func);
+            }
+            "__iter__" => {
+                let func: slots::IterFunc = |zelf, vm| {
+                    let magic = get_class_magic(&zelf, "__iter__");
+                    vm.invoke(&magic, (zelf,))
+                };
+                update_slot!(iter, func);
+            }
+            "__next__" => {
+                let func: slots::IterNextFunc = |zelf, vm| {
+                    let magic = get_class_magic(zelf, "__next__");
+                    vm.invoke(&magic, (zelf.clone(),))
+                };
+                update_slot!(iternext, func);
             }
             _ => {}
         }
@@ -272,8 +298,8 @@ impl PyType {
     }
 
     #[pymethod(magic)]
-    fn repr(&self, vm: &VirtualMachine) -> String {
-        format!("<class '{}'>", self.tp_name(vm))
+    fn repr(&self) -> String {
+        format!("<class '{}'>", self.tp_name())
     }
 
     #[pyproperty(magic)]
@@ -322,10 +348,11 @@ impl PyType {
             }
         }
         let attr_name = attr_name.borrow_value();
+        let mut attributes = zelf.attributes.write();
+        attributes.insert(attr_name.to_owned(), value);
         if attr_name.starts_with("__") && attr_name.ends_with("__") {
-            zelf.update_slot(attr_name);
+            zelf.update_slot(attr_name, true);
         }
-        zelf.attributes.write().insert(attr_name.to_owned(), value);
         Ok(())
     }
 
@@ -337,9 +364,17 @@ impl PyType {
             }
         }
 
-        zelf.get_attr(attr_name.borrow_value())
-            .ok_or_else(|| vm.new_attribute_error(attr_name.borrow_value().to_owned()))?;
-        zelf.attributes.write().remove(attr_name.borrow_value());
+        let mut attributes = zelf.attributes.write();
+        if attributes.remove(attr_name.borrow_value()).is_none() {
+            return Err(vm.new_exception(
+                vm.ctx.exceptions.attribute_error.clone(),
+                vec![attr_name.into_object()],
+            ));
+        };
+        let attr_name = attr_name.borrow_value();
+        if attr_name.starts_with("__") && attr_name.ends_with("__") {
+            zelf.update_slot(attr_name, false);
+        }
         Ok(())
     }
 
@@ -364,7 +399,7 @@ impl PyType {
         )
     }
     #[pyslot]
-    fn tp_new(metatype: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn tp_new(metatype: PyTypeRef, mut args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         vm_trace!("type.__new__ {:?}", args);
 
         let is_type_type = metatype.is(&vm.ctx.types.type_type);
@@ -383,10 +418,10 @@ impl PyType {
             }));
         }
 
-        let (name, bases, dict, kwargs): (PyStrRef, PyIterable<PyTypeRef>, PyDictRef, KwArgs) =
+        let (name, bases, dict, kwargs): (PyStrRef, PyTupleTyped<PyTypeRef>, PyDictRef, KwArgs) =
             args.clone().bind(vm)?;
 
-        let bases: Vec<PyTypeRef> = bases.iter(vm)?.collect::<Result<Vec<_>, _>>()?;
+        let bases = bases.borrow_value().to_vec();
         let (metatype, base, bases) = if bases.is_empty() {
             let base = vm.ctx.types.object_type.clone();
             (metatype, base.clone(), vec![base])
@@ -405,8 +440,8 @@ impl PyType {
                 #[allow(clippy::redundant_clone)] // false positive
                 if let Some(ref tp_new) = winner.clone().slots.new {
                     // Pass it to the winner
-
-                    return tp_new(vm, args.insert(winner.into_object()));
+                    args.prepend_arg(winner.into_object());
+                    return tp_new(vm, args);
                 }
                 winner
             } else {
@@ -660,18 +695,20 @@ impl<T: DerefToPyType> DerefToPyType for &'_ T {
 fn call_tp_new(
     typ: PyTypeRef,
     subtype: PyTypeRef,
-    args: FuncArgs,
+    mut args: FuncArgs,
     vm: &VirtualMachine,
 ) -> PyResult {
     for cls in typ.deref().iter_mro() {
         if let Some(new_meth) = cls.get_attr("__new__") {
             if !vm.ctx.is_tp_new_wrapper(&new_meth) {
                 let new_meth = vm.call_if_get_descriptor(new_meth, typ.clone().into_object())?;
-                return vm.invoke(&new_meth, args.insert(typ.clone().into_object()));
+                args.prepend_arg(typ.clone().into_object());
+                return vm.invoke(&new_meth, args);
             }
         }
         if let Some(tp_new) = cls.slots.new.as_ref() {
-            return tp_new(vm, args.insert(subtype.into_object()));
+            args.prepend_arg(subtype.into_object());
+            return tp_new(vm, args);
         }
     }
     unreachable!("Should be able to find a new slot somewhere in the mro")
@@ -693,24 +730,22 @@ pub fn tp_new_wrapper(
     call_tp_new(zelf, cls, args, vm)
 }
 
-fn take_next_base(mut bases: Vec<Vec<PyTypeRef>>) -> (Option<PyTypeRef>, Vec<Vec<PyTypeRef>>) {
-    bases = bases.into_iter().filter(|x| !x.is_empty()).collect();
-
-    for base in &bases {
+fn take_next_base(bases: &mut Vec<Vec<PyTypeRef>>) -> Option<PyTypeRef> {
+    for base in bases.iter() {
         let head = base[0].clone();
-        if !(&bases).iter().any(|x| x[1..].iter().any(|x| x.is(&head))) {
+        if !bases.iter().any(|x| x[1..].iter().any(|x| x.is(&head))) {
             // Remove from other heads.
-            for item in &mut bases {
+            for item in bases.iter_mut() {
                 if item[0].is(&head) {
                     item.remove(0);
                 }
             }
 
-            return (Some(head), bases);
+            return Some(head);
         }
     }
 
-    (None, bases)
+    None
 }
 
 fn linearise_mro(mut bases: Vec<Vec<PyTypeRef>>) -> Result<Vec<PyTypeRef>, String> {
@@ -734,22 +769,19 @@ fn linearise_mro(mut bases: Vec<Vec<PyTypeRef>>) -> Result<Vec<PyTypeRef>, Strin
     }
 
     let mut result = vec![];
-    loop {
-        if (&bases).iter().all(Vec::is_empty) {
-            break;
-        }
-        let (head, new_bases) = take_next_base(bases);
-        let head = head.ok_or_else(|| {
+    while !bases.is_empty() {
+        let head = take_next_base(&mut bases).ok_or_else(|| {
             // Take the head class of each class here. Now that we have reached the problematic bases.
             // Because this failed, we assume the lists cannot be empty.
             format!(
                 "Cannot create a consistent method resolution order (MRO) for bases {}",
-                new_bases.iter().map(|x| x.first().unwrap()).join(", ")
+                bases.iter().map(|x| x.first().unwrap()).format(", ")
             )
-        });
+        })?;
 
-        result.push(head.unwrap());
-        bases = new_bases;
+        result.push(head);
+
+        bases.retain(|x| !x.is_empty());
     }
     Ok(result)
 }
@@ -795,7 +827,7 @@ pub fn new(
 
     for attr_name in new_type.attributes.read().keys() {
         if attr_name.starts_with("__") && attr_name.ends_with("__") {
-            new_type.update_slot(attr_name);
+            new_type.update_slot(attr_name, true);
         }
     }
     for base in &new_type.bases {

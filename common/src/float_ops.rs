@@ -83,6 +83,96 @@ pub fn is_integer(v: f64) -> bool {
     (v - v.round()).abs() < std::f64::EPSILON
 }
 
+#[derive(Debug)]
+pub enum Case {
+    Lower,
+    Upper,
+}
+
+fn format_nan(case: Case) -> String {
+    let nan = match case {
+        Case::Lower => "nan",
+        Case::Upper => "NAN",
+    };
+
+    nan.to_string()
+}
+
+fn format_inf(case: Case) -> String {
+    let inf = match case {
+        Case::Lower => "inf",
+        Case::Upper => "INF",
+    };
+
+    inf.to_string()
+}
+
+pub fn format_fixed(precision: usize, magnitude: f64, case: Case) -> String {
+    match magnitude {
+        magnitude if magnitude.is_finite() => format!("{:.*}", precision, magnitude),
+        magnitude if magnitude.is_nan() => format_nan(case),
+        magnitude if magnitude.is_infinite() => format_inf(case),
+        _ => "".to_string(),
+    }
+}
+
+// Formats floats into Python style exponent notation, by first formatting in Rust style
+// exponent notation (`1.0000e0`), then convert to Python style (`1.0000e+00`).
+pub fn format_exponent(precision: usize, magnitude: f64, case: Case) -> String {
+    match magnitude {
+        magnitude if magnitude.is_finite() => {
+            let r_exp = format!("{:.*e}", precision, magnitude);
+            let mut parts = r_exp.splitn(2, 'e');
+            let base = parts.next().unwrap();
+            let exponent = parts.next().unwrap().parse::<i64>().unwrap();
+            let e = match case {
+                Case::Lower => 'e',
+                Case::Upper => 'E',
+            };
+            format!("{}{}{:+#03}", base, e, exponent)
+        }
+        magnitude if magnitude.is_nan() => format_nan(case),
+        magnitude if magnitude.is_infinite() => format_inf(case),
+        _ => "".to_string(),
+    }
+}
+
+fn remove_trailing_zeros(s: String) -> String {
+    let mut s = s;
+    while s.ends_with('0') || s.ends_with('.') {
+        s.truncate(s.len() - 1);
+    }
+
+    s
+}
+
+pub fn format_general(precision: usize, magnitude: f64, case: Case) -> String {
+    match magnitude {
+        magnitude if magnitude.is_finite() => {
+            let r_exp = format!("{:.*e}", precision.saturating_sub(1), magnitude);
+            let mut parts = r_exp.splitn(2, 'e');
+            let base = parts.next().unwrap();
+            let exponent = parts.next().unwrap().parse::<i64>().unwrap();
+            if exponent < -4 || exponent >= (precision as i64) {
+                let e = match case {
+                    Case::Lower => 'e',
+                    Case::Upper => 'E',
+                };
+
+                let base = remove_trailing_zeros(format!("{:.*}", precision + 1, base));
+                format!("{}{}{:+#03}", base, e, exponent)
+            } else {
+                let precision = (precision as i64) - 1 - exponent;
+                let precision = precision as usize;
+                remove_trailing_zeros(format!("{:.*}", precision, magnitude))
+            }
+        }
+        magnitude if magnitude.is_nan() => format_nan(case),
+        magnitude if magnitude.is_infinite() => format_inf(case),
+        _ => "".to_string(),
+    }
+}
+
 pub fn to_string(value: f64) -> String {
     let lit = format!("{:e}", value);
     if let Some(position) = lit.find('e') {
@@ -108,15 +198,9 @@ pub fn from_hex(s: &str) -> Option<f64> {
         return Some(f);
     }
     match s.to_ascii_lowercase().as_str() {
-        "nan" => Some(f64::NAN),
-        "+nan" => Some(f64::NAN),
-        "-nan" => Some(f64::NAN),
-        "inf" => Some(f64::INFINITY),
-        "infinity" => Some(f64::INFINITY),
-        "+inf" => Some(f64::INFINITY),
-        "+infinity" => Some(f64::INFINITY),
-        "-inf" => Some(f64::NEG_INFINITY),
-        "-infinity" => Some(f64::NEG_INFINITY),
+        "nan" | "+nan" | "-nan" => Some(f64::NAN),
+        "inf" | "infinity" | "+inf" | "+infinity" => Some(f64::INFINITY),
+        "-inf" | "-infinity" => Some(f64::NEG_INFINITY),
         value => {
             let mut hex = String::with_capacity(value.len());
             let has_0x = value.contains("0x");
@@ -168,7 +252,7 @@ pub fn to_hex(value: f64) -> String {
             const BITS: i16 = 52;
             const FRACT_MASK: u64 = 0xf_ffff_ffff_ffff;
             format!(
-                "{}0x{:x}.{:013x}p{:+}",
+                "{}{:#x}.{:013x}p{:+}",
                 sign_fmt,
                 mantissa >> BITS,
                 mantissa & FRACT_MASK,
@@ -188,7 +272,11 @@ pub fn div(v1: f64, v2: f64) -> Option<f64> {
 
 pub fn mod_(v1: f64, v2: f64) -> Option<f64> {
     if v2 != 0.0 {
-        Some(v1 % v2)
+        let mut val = v1 % v2;
+        if (val < 0.0) != (v2 < 0.0) {
+            val += v2;
+        }
+        Some(val)
     } else {
         None
     }
@@ -213,6 +301,48 @@ pub fn divmod(v1: f64, v2: f64) -> Option<(f64, f64)> {
         Some((d, m))
     } else {
         None
+    }
+}
+
+// nextafter algorithm based off of https://gitlab.com/bronsonbdevost/next_afterf
+#[allow(clippy::float_cmp)]
+pub fn nextafter(x: f64, y: f64) -> f64 {
+    if x == y {
+        y
+    } else if x.is_nan() || y.is_nan() {
+        f64::NAN
+    } else if x >= f64::INFINITY {
+        f64::MAX
+    } else if x <= f64::NEG_INFINITY {
+        f64::MIN
+    } else if x == 0.0 {
+        f64::from_bits(1).copysign(y)
+    } else {
+        // next x after 0 if y is farther from 0 than x, otherwise next towards 0
+        // the sign is a separate bit in floats, so bits+1 moves away from 0 no matter the float
+        let b = x.to_bits();
+        let bits = if (y > x) == (x > 0.0) { b + 1 } else { b - 1 };
+        let ret = f64::from_bits(bits);
+        if ret == 0.0 {
+            ret.copysign(x)
+        } else {
+            ret
+        }
+    }
+}
+
+pub fn ulp(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let x = x.abs();
+    let x2 = nextafter(x, f64::INFINITY);
+    if x2.is_infinite() {
+        // special case: x is the largest positive representable float
+        let x2 = nextafter(x, f64::NEG_INFINITY);
+        x - x2
+    } else {
+        x2 - x
     }
 }
 

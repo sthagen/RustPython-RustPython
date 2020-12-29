@@ -17,8 +17,8 @@ use crate::{extract_spans, Diagnostic};
 use once_cell::sync::Lazy;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
-use rustpython_bytecode::bytecode::{CodeObject, FrozenModule};
-use rustpython_compiler::compile;
+use rustpython_bytecode::{CodeObject, FrozenModule};
+use rustpython_compiler as compile;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -50,12 +50,14 @@ impl CompilationSource {
         module_name: String,
         origin: F,
     ) -> Result<CodeObject, Diagnostic> {
-        compile::compile(source, mode, module_name, Default::default()).map_err(|err| {
-            Diagnostic::spans_error(
-                self.span,
-                format!("Python compile error from {}: {}", origin(), err),
-            )
-        })
+        compile::compile(source, mode, module_name, compile::CompileOpts::default()).map_err(
+            |err| {
+                Diagnostic::spans_error(
+                    self.span,
+                    format!("Python compile error from {}: {}", origin(), err),
+                )
+            },
+        )
     }
 
     fn compile(
@@ -240,7 +242,7 @@ impl PyCompileInput {
                     });
                 } else if ident == "crate_name" {
                     let name = match &name_value.lit {
-                        Lit::Str(s) => syn::Ident::new(&s.value(), s.span()),
+                        Lit::Str(s) => s.parse()?,
                         _ => bail_span!(name_value.lit, "source must be a string"),
                     };
                     crate_name = Some(name);
@@ -259,7 +261,7 @@ impl PyCompileInput {
             source,
             mode: mode.unwrap_or(compile::Mode::Exec),
             module_name: module_name.unwrap_or_else(|| "frozen".to_owned()),
-            crate_name: crate_name.unwrap_or_else(|| syn::parse_quote!(rustpython_vm)),
+            crate_name: crate_name.unwrap_or_else(|| syn::parse_quote!(::rustpython_vm::bytecode)),
         })
     }
 }
@@ -300,7 +302,7 @@ struct PyCompileArgs {
     source: CompilationSource,
     mode: compile::Mode,
     module_name: String,
-    crate_name: syn::Ident,
+    crate_name: syn::Path,
 }
 
 pub fn impl_py_compile(input: TokenStream2) -> Result<TokenStream2, Diagnostic> {
@@ -314,7 +316,7 @@ pub fn impl_py_compile(input: TokenStream2) -> Result<TokenStream2, Diagnostic> 
     let bytes = LitByteStr::new(&bytes, Span::call_site());
 
     let output = quote! {
-        ::#crate_name::bytecode::CodeObject::from_bytes(#bytes)
+        #crate_name::CodeObject::from_bytes(#bytes)
             .expect("Deserializing CodeObject failed")
     };
 
@@ -337,8 +339,8 @@ pub fn impl_py_freeze(input: TokenStream2) -> Result<TokenStream2, Diagnostic> {
             let bytes = code.to_bytes();
             let bytes = LitByteStr::new(&bytes, Span::call_site());
             quote! {
-                m.insert(#module_name.into(), ::#crate_name::bytecode::FrozenModule {
-                    code: ::#crate_name::bytecode::CodeObject::from_bytes(
+                m.insert(#module_name.into(), #crate_name::FrozenModule {
+                    code: #crate_name::CodeObject::from_bytes(
                         #bytes
                     ).expect("Deserializing CodeObject failed"),
                     package: #package,

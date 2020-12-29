@@ -10,7 +10,7 @@ use super::pytype::PyTypeRef;
 use crate::format::FormatSpec;
 use crate::function::{OptionalArg, OptionalOption};
 use crate::pyobject::{
-    BorrowValue, IntoPyObject,
+    BorrowValue, IdProtocol, IntoPyObject,
     PyArithmaticValue::{self, *},
     PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
     TryFromObject, TypeProtocol,
@@ -55,11 +55,32 @@ impl From<f64> for PyFloat {
     }
 }
 
-pub fn try_float(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<f64>> {
+pub(crate) fn try_float(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<f64>> {
+    if let Some(float) = obj.payload_if_exact::<PyFloat>(vm) {
+        return Ok(Some(float.value));
+    }
+    if let Some(method) = vm.get_method(obj.clone(), "__float__") {
+        let result = vm.invoke(&method?, ())?;
+        // TODO: returning strict subclasses of float in __float__ is deprecated
+        return match result.payload::<PyFloat>() {
+            Some(float_obj) => Ok(Some(float_obj.value)),
+            None => Err(vm.new_type_error(format!(
+                "__float__ returned non-float (type '{}')",
+                result.class().name
+            ))),
+        };
+    }
+    if let Some(r) = vm.to_index_opt(obj.clone()).transpose()? {
+        return Ok(Some(int::to_float(r.borrow_value(), vm)?));
+    }
+    Ok(None)
+}
+
+pub(crate) fn to_op_float(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<f64>> {
     let v = if let Some(float) = obj.payload_if_subclass::<PyFloat>(vm) {
         Some(float.value)
     } else if let Some(int) = obj.payload_if_subclass::<PyInt>(vm) {
-        Some(int::try_float(int.borrow_value(), vm)?)
+        Some(int::to_float(int.borrow_value(), vm)?)
     } else {
         None
     };
@@ -120,7 +141,7 @@ fn inner_divmod(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult<(f64, f64)> {
 }
 
 pub fn float_pow(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult {
-    if v1.is_zero() {
+    if v1.is_zero() && v2.is_sign_negative() {
         let msg = format!("{} cannot be raised to a negative power", v1);
         Err(vm.new_zero_division_error(msg))
     } else if v1.is_sign_negative() && (v2.floor() - v2).abs() > f64::EPSILON {
@@ -142,10 +163,41 @@ impl PyFloat {
         vm: &VirtualMachine,
     ) -> PyResult<PyRef<Self>> {
         let float_val = match arg {
-            OptionalArg::Present(val) => to_float(vm, &val),
-            OptionalArg::Missing => Ok(0f64),
+            OptionalArg::Missing => 0.0,
+            OptionalArg::Present(val) => {
+                let val = if cls.is(&vm.ctx.types.float_type) {
+                    match val.downcast_exact::<PyFloat>(vm) {
+                        Ok(f) => {
+                            return Ok(f);
+                        }
+                        Err(val) => val,
+                    }
+                } else {
+                    val
+                };
+
+                if let Some(f) = try_float(&val, vm)? {
+                    f
+                } else if let Some(s) = val.payload_if_subclass::<PyStr>(vm) {
+                    float_ops::parse_str(s.borrow_value().trim()).ok_or_else(|| {
+                        vm.new_value_error(format!("could not convert string to float: '{}'", s))
+                    })?
+                } else if let Some(bytes) = val.payload_if_subclass::<PyBytes>(vm) {
+                    lexical_core::parse(bytes.borrow_value()).map_err(|_| {
+                        vm.new_value_error(format!(
+                            "could not convert string to float: '{}'",
+                            bytes.repr()
+                        ))
+                    })?
+                } else {
+                    return Err(vm.new_type_error(format!(
+                        "float() argument must be a string or a number, not '{}'",
+                        val.class().name
+                    )));
+                }
+            }
         };
-        PyFloat::from(float_val?).into_ref_with_type(vm, cls)
+        PyFloat::from(float_val).into_ref_with_type(vm, cls)
     }
 
     #[pymethod(name = "__format__")]
@@ -173,7 +225,7 @@ impl PyFloat {
     where
         F: Fn(f64, f64) -> PyResult<f64>,
     {
-        try_float(&other, vm)?.map_or_else(
+        to_op_float(&other, vm)?.map_or_else(
             || Ok(NotImplemented),
             |other| Ok(Implemented(op(self.value, other)?)),
         )
@@ -184,7 +236,7 @@ impl PyFloat {
     where
         F: Fn(f64, f64) -> PyResult,
     {
-        try_float(&other, vm)?.map_or_else(
+        to_op_float(&other, vm)?.map_or_else(
             || Ok(vm.ctx.not_implemented()),
             |other| op(self.value, other),
         )
@@ -200,7 +252,7 @@ impl PyFloat {
     where
         F: Fn(f64, f64) -> PyResult<(f64, f64)>,
     {
-        try_float(&other, vm)?.map_or_else(
+        to_op_float(&other, vm)?.map_or_else(
             || Ok(NotImplemented),
             |other| Ok(Implemented(op(self.value, other)?)),
         )
@@ -274,8 +326,17 @@ impl PyFloat {
     }
 
     #[pymethod(name = "__pow__")]
-    fn pow(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        self.complex_op(other, |a, b| float_pow(a, b, vm), vm)
+    fn pow(
+        &self,
+        other: PyObjectRef,
+        mod_val: OptionalOption<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        if mod_val.flatten().is_some() {
+            Err(vm.new_type_error("floating point pow() does not accept a 3rd argument".to_owned()))
+        } else {
+            self.complex_op(other, |a, b| float_pow(a, b, vm), vm)
+        }
     }
 
     #[pymethod(name = "__rpow__")]
@@ -491,35 +552,6 @@ impl Hashable for PyFloat {
     }
 }
 
-fn to_float(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<f64> {
-    let value = if let Some(float) = obj.payload_if_subclass::<PyFloat>(vm) {
-        float.value
-    } else if let Some(int) = obj.payload_if_subclass::<PyInt>(vm) {
-        int::try_float(int.borrow_value(), vm)?
-    } else if let Some(s) = obj.payload_if_subclass::<PyStr>(vm) {
-        float_ops::parse_str(s.borrow_value().trim()).ok_or_else(|| {
-            vm.new_value_error(format!("could not convert string to float: '{}'", s))
-        })?
-    } else if let Some(bytes) = obj.payload_if_subclass::<PyBytes>(vm) {
-        lexical_core::parse(bytes.borrow_value()).map_err(|_| {
-            vm.new_value_error(format!(
-                "could not convert string to float: '{}'",
-                bytes.repr()
-            ))
-        })?
-    } else {
-        let method = vm.get_method_or_type_error(obj.clone(), "__float__", || {
-            format!(
-                "float() argument must be a string or a number, not '{}'",
-                obj.class().name
-            )
-        })?;
-        let result = vm.invoke(&method, ())?;
-        PyFloatRef::try_from_object(vm, result)?.to_f64()
-    };
-    Ok(value)
-}
-
 pub type PyFloatRef = PyRef<PyFloat>;
 
 // Retrieve inner float value:
@@ -528,6 +560,7 @@ pub fn get_value(obj: &PyObjectRef) -> f64 {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
+#[repr(transparent)]
 pub struct IntoPyFloat {
     value: f64,
 }
@@ -536,13 +569,22 @@ impl IntoPyFloat {
     pub fn to_f64(self) -> f64 {
         self.value
     }
+
+    pub fn vec_into_f64(v: Vec<Self>) -> Vec<f64> {
+        // TODO: Vec::into_raw_parts once stabilized
+        let mut v = std::mem::ManuallyDrop::new(v);
+        let (p, l, c) = (v.as_mut_ptr(), v.len(), v.capacity());
+        // SAFETY: IntoPyFloat is repr(transparent) over f64
+        unsafe { Vec::from_raw_parts(p.cast(), l, c) }
+    }
 }
 
 impl TryFromObject for IntoPyFloat {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-        Ok(IntoPyFloat {
-            value: to_float(vm, &obj)?,
-        })
+        let value = try_float(&obj, vm)?.ok_or_else(|| {
+            vm.new_type_error(format!("must be real number, not {}", obj.class().name))
+        })?;
+        Ok(IntoPyFloat { value })
     }
 }
 

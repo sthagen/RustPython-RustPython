@@ -168,7 +168,7 @@ impl PyBaseObject {
 
     #[pymethod(magic)]
     fn repr(zelf: PyObjectRef) -> String {
-        format!("<{} object at 0x{:x}>", zelf.class().name, zelf.get_id())
+        format!("<{} object at {:#x}>", zelf.class().name, zelf.get_id())
     }
 
     #[pyclassmethod(magic)]
@@ -217,10 +217,10 @@ impl PyBaseObject {
     #[pyproperty(name = "__class__", setter)]
     fn set_class(instance: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         if instance.payload_is::<PyBaseObject>() {
-            match value.downcast_generic::<PyType>() {
+            match value.downcast::<PyType>() {
                 Ok(cls) => {
                     // FIXME(#1979) cls instances might have a payload
-                    *instance.typ.write() = cls;
+                    *instance.class_lock().write() = cls;
                     Ok(())
                 }
                 Err(value) => {
@@ -314,11 +314,11 @@ pub fn init(context: &PyContext) {
 
 fn common_reduce(obj: PyObjectRef, proto: usize, vm: &VirtualMachine) -> PyResult {
     if proto >= 2 {
-        let reducelib = vm.import("__reducelib", &[], 0)?;
+        let reducelib = vm.import("__reducelib", None, 0)?;
         let reduce_2 = vm.get_attribute(reducelib, "reduce_2")?;
         vm.invoke(&reduce_2, (obj,))
     } else {
-        let copyreg = vm.import("copyreg", &[], 0)?;
+        let copyreg = vm.import("copyreg", None, 0)?;
         let reduce_ex = vm.get_attribute(copyreg, "_reduce_ex")?;
         vm.invoke(&reduce_ex, (obj, proto))
     }

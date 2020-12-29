@@ -7,25 +7,94 @@
 
 use crate::error::{CompileError, CompileErrorType};
 pub use crate::mode::Mode;
-use crate::output_stream::{CodeObjectStream, OutputStream};
-use crate::peephole::PeepholeOptimizer;
-use crate::symboltable::{
-    make_symbol_table, statements_to_symbol_table, Symbol, SymbolScope, SymbolTable,
-};
+use crate::symboltable::{make_symbol_table, statements_to_symbol_table, SymbolScope, SymbolTable};
+use indexmap::IndexSet;
 use itertools::Itertools;
 use num_complex::Complex64;
-use rustpython_bytecode::bytecode::{self, CallType, CodeObject, Instruction, Label};
-use rustpython_parser::{ast, parser};
-
-type BasicOutputStream = PeepholeOptimizer<CodeObjectStream>;
+use num_traits::ToPrimitive;
+use rustpython_ast as ast;
+use rustpython_bytecode::{self as bytecode, CodeObject, ConstantData, Instruction, Label};
 
 type CompileResult<T> = Result<T, CompileError>;
 
+struct CodeInfo {
+    code: CodeObject,
+    instructions: Vec<Instruction>,
+    locations: Vec<bytecode::Location>,
+    constants: Vec<ConstantData>,
+    name_cache: IndexSet<String>,
+    varname_cache: IndexSet<String>,
+    cellvar_cache: IndexSet<String>,
+    freevar_cache: IndexSet<String>,
+    label_map: Vec<Label>,
+}
+impl CodeInfo {
+    fn finalize_code(self) -> CodeObject {
+        let CodeInfo {
+            mut code,
+            instructions,
+            locations,
+            constants,
+            name_cache,
+            varname_cache,
+            cellvar_cache,
+            freevar_cache,
+            label_map,
+        } = self;
+
+        code.instructions = instructions.into();
+        code.locations = locations.into();
+        code.constants = constants.into();
+        code.names = name_cache.into_iter().collect();
+        code.varnames = varname_cache.into_iter().collect();
+        code.cellvars = cellvar_cache.into_iter().collect();
+        code.freevars = freevar_cache.into_iter().collect();
+
+        if !code.cellvars.is_empty() {
+            let total_args = code.arg_count
+                + code.kwonlyarg_count
+                + code.flags.contains(bytecode::CodeFlags::HAS_VARARGS) as usize
+                + code.flags.contains(bytecode::CodeFlags::HAS_VARKEYWORDS) as usize;
+            let all_args = &code.varnames[..total_args];
+            let mut found_cellarg = false;
+            let cell2arg = code
+                .cellvars
+                .iter()
+                .map(|var| {
+                    all_args.iter().position(|arg| var == arg).map_or(-1, |i| {
+                        found_cellarg = true;
+                        i as isize
+                    })
+                })
+                .collect::<Box<[_]>>();
+            if found_cellarg {
+                code.cell2arg = Some(cell2arg);
+            }
+        }
+
+        for instruction in &mut *code.instructions {
+            // this is a little bit hacky, as until now the data stored inside Labels in
+            // Instructions is just bookkeeping, but I think it's the best way to do this
+            if let Some(l) = instruction.label_arg_mut() {
+                let real_label = label_map[l.0 as usize];
+                debug_assert!(real_label.0 != u32::MAX, "label wasn't set");
+                *l = real_label;
+            }
+        }
+        code
+    }
+}
+
+enum NameUsage {
+    Load,
+    Store,
+    Delete,
+}
+
 /// Main structure holding the state of compilation.
-struct Compiler<O: OutputStream = BasicOutputStream> {
-    output_stack: Vec<O>,
+struct Compiler {
+    code_stack: Vec<CodeInfo>,
     symbol_table_stack: Vec<SymbolTable>,
-    nxt_label: usize,
     source_path: String,
     current_source_location: ast::Location,
     current_qualified_path: Option<String>,
@@ -46,13 +115,14 @@ impl Default for CompileOpts {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct CompileContext {
-    in_loop: bool,
+    loop_data: Option<(Label, Label)>,
+    in_class: bool,
     func: FunctionContext,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum FunctionContext {
     NoFunction,
     Function,
@@ -60,33 +130,11 @@ enum FunctionContext {
 }
 
 impl CompileContext {
-    fn in_func(self) -> bool {
-        !matches!(self.func, FunctionContext::NoFunction)
+    fn in_loop(self) -> bool {
+        self.loop_data.is_some()
     }
-}
-
-/// Compile a given sourcecode into a bytecode object.
-pub fn compile(
-    source: &str,
-    mode: Mode,
-    source_path: String,
-    opts: CompileOpts,
-) -> CompileResult<CodeObject> {
-    let to_compile_error =
-        |parse_error| CompileError::from_parse_error(parse_error, source_path.clone());
-    match mode {
-        Mode::Exec => {
-            let ast = parser::parse_program(source).map_err(to_compile_error)?;
-            compile_program(ast, source_path, opts)
-        }
-        Mode::Eval => {
-            let statement = parser::parse_statement(source).map_err(to_compile_error)?;
-            compile_statement_eval(statement, source_path, opts)
-        }
-        Mode::Single => {
-            let ast = parser::parse_program(source).map_err(to_compile_error)?;
-            compile_program_single(ast, source_path, opts)
-        }
+    fn in_func(self) -> bool {
+        self.func != FunctionContext::NoFunction
     }
 }
 
@@ -96,8 +144,7 @@ fn with_compiler(
     opts: CompileOpts,
     f: impl FnOnce(&mut Compiler) -> CompileResult<()>,
 ) -> CompileResult<CodeObject> {
-    let mut compiler = Compiler::new(opts, source_path);
-    compiler.push_new_code_object("<module>".to_owned());
+    let mut compiler = Compiler::new(opts, source_path, "<module>".to_owned());
     f(&mut compiler)?;
     let code = compiler.pop_code_object();
     trace!("Compilation completed: {:?}", code);
@@ -110,8 +157,10 @@ pub fn compile_program(
     source_path: String,
     opts: CompileOpts,
 ) -> CompileResult<CodeObject> {
-    let symbol_table = make_symbol_table(&ast)
-        .map_err(|e| CompileError::from_symbol_table_error(e, source_path.clone()))?;
+    let symbol_table = match make_symbol_table(&ast) {
+        Ok(x) => x,
+        Err(e) => return Err(e.into_compile_error(source_path)),
+    };
     with_compiler(source_path, opts, |compiler| {
         compiler.compile_program(&ast, symbol_table)
     })
@@ -123,8 +172,10 @@ pub fn compile_statement_eval(
     source_path: String,
     opts: CompileOpts,
 ) -> CompileResult<CodeObject> {
-    let symbol_table = statements_to_symbol_table(&statement)
-        .map_err(|e| CompileError::from_symbol_table_error(e, source_path.clone()))?;
+    let symbol_table = match statements_to_symbol_table(&statement) {
+        Ok(x) => x,
+        Err(e) => return Err(e.into_compile_error(source_path)),
+    };
     with_compiler(source_path, opts, |compiler| {
         compiler.compile_statement_eval(&statement, symbol_table)
     })
@@ -136,25 +187,46 @@ pub fn compile_program_single(
     source_path: String,
     opts: CompileOpts,
 ) -> CompileResult<CodeObject> {
-    let symbol_table = make_symbol_table(&ast)
-        .map_err(|e| CompileError::from_symbol_table_error(e, source_path.clone()))?;
+    let symbol_table = match make_symbol_table(&ast) {
+        Ok(x) => x,
+        Err(e) => return Err(e.into_compile_error(source_path)),
+    };
     with_compiler(source_path, opts, |compiler| {
         compiler.compile_program_single(&ast, symbol_table)
     })
 }
 
-impl<O: OutputStream> Compiler<O> {
-    fn new(opts: CompileOpts, source_path: String) -> Self {
+impl Compiler {
+    fn new(opts: CompileOpts, source_path: String, code_name: String) -> Self {
+        let module_code = CodeInfo {
+            code: CodeObject::new(
+                bytecode::CodeFlags::NEW_LOCALS,
+                0,
+                0,
+                0,
+                source_path.clone(),
+                0,
+                code_name,
+            ),
+            instructions: Vec::new(),
+            locations: Vec::new(),
+            constants: Vec::new(),
+            name_cache: IndexSet::new(),
+            varname_cache: IndexSet::new(),
+            cellvar_cache: IndexSet::new(),
+            freevar_cache: IndexSet::new(),
+            label_map: Vec::new(),
+        };
         Compiler {
-            output_stack: Vec::new(),
+            code_stack: vec![module_code],
             symbol_table_stack: Vec::new(),
-            nxt_label: 0,
             source_path,
             current_source_location: ast::Location::default(),
             current_qualified_path: None,
             done_with_future_stmts: false,
             ctx: CompileContext {
-                in_loop: false,
+                loop_data: None,
+                in_class: false,
                 func: FunctionContext::NoFunction,
             },
             opts,
@@ -169,31 +241,69 @@ impl<O: OutputStream> Compiler<O> {
             error,
             location,
             source_path: self.source_path.clone(),
-            statement: None,
         }
     }
 
     fn push_output(&mut self, code: CodeObject) {
-        self.output_stack.push(code.into());
-    }
+        let table = self
+            .symbol_table_stack
+            .last_mut()
+            .unwrap()
+            .sub_tables
+            .remove(0);
 
-    fn push_new_code_object(&mut self, obj_name: String) {
-        let line_number = self.get_source_line_number();
-        self.push_output(CodeObject::new(
-            Default::default(),
-            0,
-            Vec::new(),
-            None,
-            Vec::new(),
-            None,
-            self.source_path.clone(),
-            line_number,
-            obj_name,
-        ));
+        let cellvar_cache = table
+            .symbols
+            .iter()
+            .filter(|(_, s)| s.scope == SymbolScope::Cell)
+            .map(|(var, _)| var.clone())
+            .collect();
+        let freevar_cache = table
+            .symbols
+            .iter()
+            .filter(|(_, s)| s.scope == SymbolScope::Free || s.is_free_class)
+            .map(|(var, _)| var.clone())
+            .collect();
+
+        self.symbol_table_stack.push(table);
+
+        let info = CodeInfo {
+            code,
+            instructions: Vec::new(),
+            locations: Vec::new(),
+            constants: Vec::new(),
+            name_cache: IndexSet::new(),
+            varname_cache: IndexSet::new(),
+            cellvar_cache,
+            freevar_cache,
+            label_map: Vec::new(),
+        };
+        self.code_stack.push(info);
     }
 
     fn pop_code_object(&mut self) -> CodeObject {
-        self.output_stack.pop().unwrap().into()
+        let table = self.symbol_table_stack.pop().unwrap();
+        assert!(table.sub_tables.is_empty());
+        self.code_stack.pop().unwrap().finalize_code()
+    }
+
+    // could take impl Into<Cow<str>>, but everything is borrowed from ast structs; we never
+    // actually have a `String` to pass
+    fn name(&mut self, name: &str) -> bytecode::NameIdx {
+        self._name_inner(name, |i| &mut i.name_cache)
+    }
+    fn varname(&mut self, name: &str) -> bytecode::NameIdx {
+        self._name_inner(name, |i| &mut i.varname_cache)
+    }
+    fn _name_inner(
+        &mut self,
+        name: &str,
+        cache: impl FnOnce(&mut CodeInfo) -> &mut IndexSet<String>,
+    ) -> bytecode::NameIdx {
+        let cache = cache(self.current_codeinfo());
+        cache
+            .get_index_of(name)
+            .unwrap_or_else(|| cache.insert_full(name.to_owned()).0) as u32
     }
 
     fn compile_program(
@@ -201,27 +311,26 @@ impl<O: OutputStream> Compiler<O> {
         program: &ast::Program,
         symbol_table: SymbolTable,
     ) -> CompileResult<()> {
-        let size_before = self.output_stack.len();
+        let size_before = self.code_stack.len();
         self.symbol_table_stack.push(symbol_table);
 
         let (statements, doc) = get_doc(&program.statements);
         if let Some(value) = doc {
-            self.emit(Instruction::LoadConst {
-                value: bytecode::Constant::String { value },
-            });
-            self.emit(Instruction::StoreName {
-                name: "__doc__".to_owned(),
-                scope: bytecode::NameScope::Global,
-            });
+            self.emit_constant(ConstantData::Str { value });
+            let doc = self.name("__doc__");
+            self.emit(Instruction::StoreGlobal(doc))
         }
+
+        if self.find_ann(statements) {
+            self.emit(Instruction::SetupAnnotation);
+        }
+
         self.compile_statements(statements)?;
 
-        assert_eq!(self.output_stack.len(), size_before);
+        assert_eq!(self.code_stack.len(), size_before);
 
         // Emit None at end:
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::None,
-        });
+        self.emit_constant(ConstantData::None);
         self.emit(Instruction::ReturnValue);
         Ok(())
     }
@@ -255,9 +364,7 @@ impl<O: OutputStream> Compiler<O> {
         }
 
         if !emitted_return {
-            self.emit(Instruction::LoadConst {
-                value: bytecode::Constant::None,
-            });
+            self.emit_constant(ConstantData::None);
             self.emit(Instruction::ReturnValue);
         }
 
@@ -289,38 +396,81 @@ impl<O: OutputStream> Compiler<O> {
         Ok(())
     }
 
-    fn scope_for_name(&self, name: &str) -> bytecode::NameScope {
-        let symbol = self.lookup_name(name);
-        match symbol.scope {
-            SymbolScope::Global => bytecode::NameScope::Global,
-            SymbolScope::Nonlocal => bytecode::NameScope::NonLocal,
-            SymbolScope::Unknown => bytecode::NameScope::Free,
-            SymbolScope::Local => {
-                // Only in function block, we use load local
-                // https://github.com/python/cpython/blob/master/Python/compile.c#L3582
-                if self.ctx.in_func() {
-                    bytecode::NameScope::Local
-                } else {
-                    bytecode::NameScope::Free
-                }
-            }
-        }
-    }
-
     fn load_name(&mut self, name: &str) {
-        let scope = self.scope_for_name(name);
-        self.emit(Instruction::LoadName {
-            name: name.to_owned(),
-            scope,
-        });
+        self.compile_name(name, NameUsage::Load)
     }
 
     fn store_name(&mut self, name: &str) {
-        let scope = self.scope_for_name(name);
-        self.emit(Instruction::StoreName {
-            name: name.to_owned(),
-            scope,
-        });
+        self.compile_name(name, NameUsage::Store)
+    }
+
+    fn compile_name(&mut self, name: &str, usage: NameUsage) {
+        let symbol_table = self.symbol_table_stack.last().unwrap();
+        let symbol = symbol_table.lookup(name).expect(
+            "The symbol must be present in the symbol table, even when it is undefined in python.",
+        );
+        let info = self.code_stack.last_mut().unwrap();
+        let mut cache = &mut info.name_cache;
+        enum NameOpType {
+            Fast,
+            Global,
+            Deref,
+            Local,
+        }
+        let op_typ = match symbol.scope {
+            SymbolScope::Local if self.ctx.in_func() => {
+                cache = &mut info.varname_cache;
+                NameOpType::Fast
+            }
+            SymbolScope::GlobalExplicit => NameOpType::Global,
+            SymbolScope::GlobalImplicit | SymbolScope::Unknown if self.ctx.in_func() => {
+                NameOpType::Global
+            }
+            SymbolScope::GlobalImplicit | SymbolScope::Unknown => NameOpType::Local,
+            SymbolScope::Local => NameOpType::Local,
+            SymbolScope::Free => {
+                cache = &mut info.freevar_cache;
+                NameOpType::Deref
+            }
+            SymbolScope::Cell => {
+                cache = &mut info.cellvar_cache;
+                NameOpType::Deref
+            }
+            // // TODO: is this right?
+            // SymbolScope::Unknown => NameOpType::Global,
+        };
+        let mut idx = cache
+            .get_index_of(name)
+            .unwrap_or_else(|| cache.insert_full(name.to_owned()).0);
+        if let SymbolScope::Free = symbol.scope {
+            idx += info.cellvar_cache.len();
+        }
+        let op = match op_typ {
+            NameOpType::Fast => match usage {
+                NameUsage::Load => Instruction::LoadFast,
+                NameUsage::Store => Instruction::StoreFast,
+                NameUsage::Delete => Instruction::DeleteFast,
+            },
+            NameOpType::Global => match usage {
+                NameUsage::Load => Instruction::LoadGlobal,
+                NameUsage::Store => Instruction::StoreGlobal,
+                NameUsage::Delete => Instruction::DeleteGlobal,
+            },
+            NameOpType::Deref => match usage {
+                NameUsage::Load if !self.ctx.in_func() && self.ctx.in_class => {
+                    Instruction::LoadClassDeref
+                }
+                NameUsage::Load => Instruction::LoadDeref,
+                NameUsage::Store => Instruction::StoreDeref,
+                NameUsage::Delete => Instruction::DeleteDeref,
+            },
+            NameOpType::Local => match usage {
+                NameUsage::Load => Instruction::LoadNameAny,
+                NameUsage::Store => Instruction::StoreLocal,
+                NameUsage::Delete => Instruction::DeleteLocal,
+            },
+        };
+        self.emit(op(idx as u32));
     }
 
     fn compile_statement(&mut self, statement: &ast::Statement) -> CompileResult<()> {
@@ -342,16 +492,16 @@ impl<O: OutputStream> Compiler<O> {
             Import { names } => {
                 // import a, b, c as d
                 for name in names {
-                    self.emit(Instruction::Import {
-                        name: Some(name.symbol.clone()),
-                        symbols: vec![],
-                        level: 0,
+                    self.emit_constant(ConstantData::Integer {
+                        value: num_traits::Zero::zero(),
                     });
+                    self.emit_constant(ConstantData::None);
+                    let idx = self.name(&name.symbol);
+                    self.emit(Instruction::ImportName { idx });
                     if let Some(alias) = &name.alias {
                         for part in name.symbol.split('.').skip(1) {
-                            self.emit(Instruction::LoadAttr {
-                                name: part.to_owned(),
-                            });
+                            let idx = self.name(part);
+                            self.emit(Instruction::LoadAttr { idx });
                         }
                         self.store_name(alias);
                     } else {
@@ -366,31 +516,48 @@ impl<O: OutputStream> Compiler<O> {
             } => {
                 let import_star = names.iter().any(|n| n.symbol == "*");
 
+                let from_list = if import_star {
+                    if self.ctx.in_func() {
+                        return Err(self
+                            .error_loc(CompileErrorType::FunctionImportStar, statement.location));
+                    }
+                    vec![ConstantData::Str {
+                        value: "*".to_owned(),
+                    }]
+                } else {
+                    names
+                        .iter()
+                        .map(|n| ConstantData::Str {
+                            value: n.symbol.to_owned(),
+                        })
+                        .collect()
+                };
+
+                let module_idx = module.as_ref().map(|s| self.name(s));
+
+                // from .... import (*fromlist)
+                self.emit_constant(ConstantData::Integer {
+                    value: (*level).into(),
+                });
+                self.emit_constant(ConstantData::Tuple {
+                    elements: from_list,
+                });
+                if let Some(idx) = module_idx {
+                    self.emit(Instruction::ImportName { idx });
+                } else {
+                    self.emit(Instruction::ImportNameless);
+                }
+
                 if import_star {
                     // from .... import *
-                    self.emit(Instruction::Import {
-                        name: module.clone(),
-                        symbols: vec!["*".to_owned()],
-                        level: *level,
-                    });
                     self.emit(Instruction::ImportStar);
                 } else {
                     // from mod import a, b as c
-                    // First, determine the fromlist (for import lib):
-                    let from_list = names.iter().map(|n| n.symbol.clone()).collect();
-
-                    // Load module once:
-                    self.emit(Instruction::Import {
-                        name: module.clone(),
-                        symbols: from_list,
-                        level: *level,
-                    });
 
                     for name in names {
+                        let idx = self.name(&name.symbol);
                         // import symbol from module:
-                        self.emit(Instruction::ImportFrom {
-                            name: name.symbol.to_owned(),
-                        });
+                        self.emit(Instruction::ImportFrom { idx });
 
                         // Store module under proper name:
                         if let Some(alias) = &name.alias {
@@ -453,9 +620,7 @@ impl<O: OutputStream> Compiler<O> {
                         if is_async {
                             self.emit(Instruction::BeforeAsyncWith);
                             self.emit(Instruction::GetAwaitable);
-                            self.emit(Instruction::LoadConst {
-                                value: bytecode::Constant::None,
-                            });
+                            self.emit_constant(ConstantData::None);
                             self.emit(Instruction::YieldFrom);
                             self.emit(Instruction::SetupAsyncWith { end: end_label });
                         } else {
@@ -486,9 +651,7 @@ impl<O: OutputStream> Compiler<O> {
 
                     if is_async {
                         self.emit(Instruction::GetAwaitable);
-                        self.emit(Instruction::LoadConst {
-                            value: bytecode::Constant::None,
-                        });
+                        self.emit_constant(ConstantData::None);
                         self.emit(Instruction::YieldFrom);
                     }
 
@@ -502,23 +665,22 @@ impl<O: OutputStream> Compiler<O> {
                 body,
                 orelse,
             } => self.compile_for(target, iter, body, orelse, *is_async)?,
-            Raise { exception, cause } => match exception {
-                Some(value) => {
-                    self.compile_expression(value)?;
-                    match cause {
-                        Some(cause) => {
-                            self.compile_expression(cause)?;
-                            self.emit(Instruction::Raise { argc: 2 });
-                        }
-                        None => {
-                            self.emit(Instruction::Raise { argc: 1 });
+            Raise { exception, cause } => {
+                let kind = match exception {
+                    Some(value) => {
+                        self.compile_expression(value)?;
+                        match cause {
+                            Some(cause) => {
+                                self.compile_expression(cause)?;
+                                bytecode::RaiseKind::RaiseCause
+                            }
+                            None => bytecode::RaiseKind::Raise,
                         }
                     }
-                }
-                None => {
-                    self.emit(Instruction::Raise { argc: 0 });
-                }
-            },
+                    None => bytecode::RaiseKind::Reraise,
+                };
+                self.emit(Instruction::Raise { kind });
+            }
             Try {
                 body,
                 handlers,
@@ -547,41 +709,39 @@ impl<O: OutputStream> Compiler<O> {
                 if self.opts.optimize == 0 {
                     let end_label = self.new_label();
                     self.compile_jump_if(test, true, end_label)?;
-                    self.emit(Instruction::LoadName {
-                        name: String::from("AssertionError"),
-                        scope: bytecode::NameScope::Global,
-                    });
+                    let assertion_error = self.name("AssertionError");
+                    self.emit(Instruction::LoadGlobal(assertion_error));
                     match msg {
                         Some(e) => {
                             self.compile_expression(e)?;
-                            self.emit(Instruction::CallFunction {
-                                typ: CallType::Positional(1),
-                            });
+                            self.emit(Instruction::CallFunctionPositional { nargs: 1 });
                         }
                         None => {
-                            self.emit(Instruction::CallFunction {
-                                typ: CallType::Positional(0),
-                            });
+                            self.emit(Instruction::CallFunctionPositional { nargs: 0 });
                         }
                     }
-                    self.emit(Instruction::Raise { argc: 1 });
+                    self.emit(Instruction::Raise {
+                        kind: bytecode::RaiseKind::Raise,
+                    });
                     self.set_label(end_label);
                 }
             }
             Break => {
-                if !self.ctx.in_loop {
+                if !self.ctx.in_loop() {
                     return Err(self.error_loc(CompileErrorType::InvalidBreak, statement.location));
                 }
                 self.emit(Instruction::Break);
             }
-            Continue => {
-                if !self.ctx.in_loop {
+            Continue => match self.ctx.loop_data {
+                Some((start, _)) => {
+                    self.emit(Instruction::Continue { target: start });
+                }
+                None => {
                     return Err(
                         self.error_loc(CompileErrorType::InvalidContinue, statement.location)
                     );
                 }
-                self.emit(Instruction::Continue);
-            }
+            },
             Return { value } => {
                 if !self.ctx.in_func() {
                     return Err(self.error_loc(CompileErrorType::InvalidReturn, statement.location));
@@ -589,7 +749,10 @@ impl<O: OutputStream> Compiler<O> {
                 match value {
                     Some(v) => {
                         if self.ctx.func == FunctionContext::AsyncFunction
-                            && self.current_output().is_generator()
+                            && self
+                                .current_code()
+                                .flags
+                                .contains(bytecode::CodeFlags::IS_GENERATOR)
                         {
                             return Err(self.error_loc(
                                 CompileErrorType::AsyncReturnValue,
@@ -599,9 +762,7 @@ impl<O: OutputStream> Compiler<O> {
                         self.compile_expression(v)?;
                     }
                     None => {
-                        self.emit(Instruction::LoadConst {
-                            value: bytecode::Constant::None,
-                        });
+                        self.emit_constant(ConstantData::None);
                     }
                 }
 
@@ -645,15 +806,12 @@ impl<O: OutputStream> Compiler<O> {
     fn compile_delete(&mut self, expression: &ast::Expression) -> CompileResult<()> {
         match &expression.node {
             ast::ExpressionType::Identifier { name } => {
-                self.emit(Instruction::DeleteName {
-                    name: name.to_owned(),
-                });
+                self.compile_name(name, NameUsage::Delete);
             }
             ast::ExpressionType::Attribute { value, name } => {
                 self.compile_expression(value)?;
-                self.emit(Instruction::DeleteAttr {
-                    name: name.to_owned(),
-                });
+                let idx = self.name(name);
+                self.emit(Instruction::DeleteAttr { idx });
             }
             ast::ExpressionType::Subscript { a, b } => {
                 self.compile_expression(a)?;
@@ -670,11 +828,15 @@ impl<O: OutputStream> Compiler<O> {
         Ok(())
     }
 
-    fn enter_function(&mut self, name: &str, args: &ast::Parameters) -> CompileResult<()> {
+    fn enter_function(
+        &mut self,
+        name: &str,
+        args: &ast::Parameters,
+    ) -> CompileResult<bytecode::MakeFunctionFlags> {
         let have_defaults = !args.defaults.is_empty();
         if have_defaults {
             // Construct a tuple:
-            let size = args.defaults.len();
+            let size = args.defaults.len() as u32;
             for element in &args.defaults {
                 self.compile_expression(element)?;
             }
@@ -687,10 +849,8 @@ impl<O: OutputStream> Compiler<O> {
         let mut num_kw_only_defaults = 0;
         for (kw, default) in args.kwonlyargs.iter().zip(&args.kw_defaults) {
             if let Some(default) = default {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::String {
-                        value: kw.arg.clone(),
-                    },
+                self.emit_constant(ConstantData::Str {
+                    value: kw.arg.clone(),
                 });
                 self.compile_expression(default)?;
                 num_kw_only_defaults += 1;
@@ -704,44 +864,44 @@ impl<O: OutputStream> Compiler<O> {
             });
         }
 
-        let mut flags = bytecode::CodeFlags::default();
+        let mut funcflags = bytecode::MakeFunctionFlags::empty();
         if have_defaults {
-            flags |= bytecode::CodeFlags::HAS_DEFAULTS;
+            funcflags |= bytecode::MakeFunctionFlags::DEFAULTS;
         }
         if num_kw_only_defaults > 0 {
-            flags |= bytecode::CodeFlags::HAS_KW_ONLY_DEFAULTS;
+            funcflags |= bytecode::MakeFunctionFlags::KW_ONLY_DEFAULTS;
         }
-
-        let mut compile_varargs = |va: &ast::Varargs, flag| match va {
-            ast::Varargs::None => None,
-            ast::Varargs::Unnamed => {
-                flags |= flag;
-                None
-            }
-            ast::Varargs::Named(name) => {
-                flags |= flag;
-                Some(name.arg.clone())
-            }
-        };
-
-        let varargs_name = compile_varargs(&args.vararg, bytecode::CodeFlags::HAS_VARARGS);
-        let varkeywords_name = compile_varargs(&args.kwarg, bytecode::CodeFlags::HAS_VARKEYWORDS);
 
         let line_number = self.get_source_line_number();
         self.push_output(CodeObject::new(
-            flags,
+            bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED,
             args.posonlyargs_count,
-            args.args.iter().map(|a| a.arg.clone()).collect(),
-            varargs_name,
-            args.kwonlyargs.iter().map(|a| a.arg.clone()).collect(),
-            varkeywords_name,
+            args.args.len(),
+            args.kwonlyargs.len(),
             self.source_path.clone(),
             line_number,
             name.to_owned(),
         ));
-        self.enter_scope();
 
-        Ok(())
+        for name in &args.args {
+            self.varname(&name.arg);
+        }
+        for name in &args.kwonlyargs {
+            self.varname(&name.arg);
+        }
+
+        let mut compile_varargs = |va: &ast::Varargs, flag| match va {
+            ast::Varargs::None | ast::Varargs::Unnamed => {}
+            ast::Varargs::Named(name) => {
+                self.current_code().flags |= flag;
+                self.varname(&name.arg);
+            }
+        };
+
+        compile_varargs(&args.vararg, bytecode::CodeFlags::HAS_VARARGS);
+        compile_varargs(&args.kwarg, bytecode::CodeFlags::HAS_VARKEYWORDS);
+
+        Ok(funcflags)
     }
 
     fn prepare_decorators(&mut self, decorator_list: &[ast::Expression]) -> CompileResult<()> {
@@ -754,9 +914,7 @@ impl<O: OutputStream> Compiler<O> {
     fn apply_decorators(&mut self, decorator_list: &[ast::Expression]) {
         // Apply decorators:
         for _ in decorator_list {
-            self.emit(Instruction::CallFunction {
-                typ: CallType::Positional(1),
-            });
+            self.emit(Instruction::CallFunctionPositional { nargs: 1 });
         }
     }
 
@@ -846,7 +1004,9 @@ impl<O: OutputStream> Compiler<O> {
         self.set_label(handler_label);
         // If code flows here, we have an unhandled exception,
         // raise the exception again!
-        self.emit(Instruction::Raise { argc: 0 });
+        self.emit(Instruction::Raise {
+            kind: bytecode::RaiseKind::Reraise,
+        });
 
         // We successfully ran the try block:
         // else:
@@ -882,11 +1042,16 @@ impl<O: OutputStream> Compiler<O> {
         is_async: bool,
     ) -> CompileResult<()> {
         // Create bytecode for this function:
+
+        self.prepare_decorators(decorator_list)?;
+        let mut funcflags = self.enter_function(name, args)?;
+
         // remember to restore self.ctx.in_loop to the original after the function is compiled
         let prev_ctx = self.ctx;
 
         self.ctx = CompileContext {
-            in_loop: false,
+            loop_data: None,
+            in_class: prev_ctx.in_class,
             func: if is_async {
                 FunctionContext::AsyncFunction
             } else {
@@ -898,10 +1063,6 @@ impl<O: OutputStream> Compiler<O> {
         let old_qualified_path = self.current_qualified_path.take();
         self.current_qualified_path = Some(self.create_qualified_name(name, ".<locals>"));
 
-        self.prepare_decorators(decorator_list)?;
-
-        self.enter_function(name, args)?;
-
         let (body, doc_str) = get_doc(body);
 
         self.compile_statements(body)?;
@@ -912,15 +1073,14 @@ impl<O: OutputStream> Compiler<O> {
                 // the last instruction is a ReturnValue already, we don't need to emit it
             }
             _ => {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::None,
-                });
+                self.emit_constant(ConstantData::None);
                 self.emit(Instruction::ReturnValue);
             }
         }
 
         let mut code = self.pop_code_object();
-        self.leave_scope();
+        self.current_qualified_path = old_qualified_path;
+        self.ctx = prev_ctx;
 
         // Prepare type annotations:
         let mut num_annotations = 0;
@@ -928,10 +1088,8 @@ impl<O: OutputStream> Compiler<O> {
         // Return annotation:
         if let Some(annotation) = returns {
             // key:
-            self.emit(Instruction::LoadConst {
-                value: bytecode::Constant::String {
-                    value: "return".to_owned(),
-                },
+            self.emit_constant(ConstantData::Str {
+                value: "return".to_owned(),
             });
             // value:
             self.compile_expression(annotation)?;
@@ -940,10 +1098,8 @@ impl<O: OutputStream> Compiler<O> {
 
         let mut visit_arg_annotation = |arg: &ast::Parameter| -> CompileResult<()> {
             if let Some(annotation) = &arg.annotation {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::String {
-                        value: arg.arg.to_owned(),
-                    },
+                self.emit_constant(ConstantData::Str {
+                    value: arg.arg.to_owned(),
                 });
                 self.compile_expression(&annotation)?;
                 num_annotations += 1;
@@ -964,7 +1120,7 @@ impl<O: OutputStream> Compiler<O> {
         }
 
         if num_annotations > 0 {
-            code.flags |= bytecode::CodeFlags::HAS_ANNOTATIONS;
+            funcflags |= bytecode::MakeFunctionFlags::ANNOTATIONS;
             self.emit(Instruction::BuildMap {
                 size: num_annotations,
                 unpack: false,
@@ -976,33 +1132,61 @@ impl<O: OutputStream> Compiler<O> {
             code.flags |= bytecode::CodeFlags::IS_COROUTINE;
         }
 
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::Code {
-                code: Box::new(code),
-            },
+        if self.build_closure(&code) {
+            funcflags |= bytecode::MakeFunctionFlags::CLOSURE;
+        }
+
+        self.emit_constant(ConstantData::Code {
+            code: Box::new(code),
         });
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::String {
-                value: qualified_name,
-            },
+        self.emit_constant(ConstantData::Str {
+            value: qualified_name,
         });
 
         // Turn code object into function object:
-        self.emit(Instruction::MakeFunction);
+        self.emit(Instruction::MakeFunction(funcflags));
 
         self.emit(Instruction::Duplicate);
         self.load_docstring(doc_str);
         self.emit(Instruction::Rotate { amount: 2 });
-        self.emit(Instruction::StoreAttr {
-            name: "__doc__".to_owned(),
-        });
+        let doc = self.name("__doc__");
+        self.emit(Instruction::StoreAttr { idx: doc });
+
         self.apply_decorators(decorator_list);
 
         self.store_name(name);
 
-        self.current_qualified_path = old_qualified_path;
-        self.ctx = prev_ctx;
         Ok(())
+    }
+
+    fn build_closure(&mut self, code: &CodeObject) -> bool {
+        if code.freevars.is_empty() {
+            return false;
+        }
+        for var in &*code.freevars {
+            let table = self.symbol_table_stack.last().unwrap();
+            let symbol = table.lookup(var).unwrap();
+            let parent_code = self.code_stack.last().unwrap();
+            let vars = match symbol.scope {
+                SymbolScope::Free => &parent_code.freevar_cache,
+                SymbolScope::Cell => &parent_code.cellvar_cache,
+                _ if symbol.is_free_class => &parent_code.freevar_cache,
+                x => unreachable!(
+                    "var {} in a {:?} should be free or cell but it's {:?}",
+                    var, table.typ, x
+                ),
+            };
+            let mut idx = vars.get_index_of(var).unwrap();
+            if let SymbolScope::Free = symbol.scope {
+                idx += parent_code.cellvar_cache.len();
+            }
+            self.emit(Instruction::LoadClosure(idx as u32))
+        }
+        self.emit(Instruction::BuildTuple {
+            size: code.freevars.len() as u32,
+            unpack: false,
+        });
+        true
     }
 
     fn find_ann(&self, body: &[ast::Statement]) -> bool {
@@ -1070,88 +1254,93 @@ impl<O: OutputStream> Compiler<O> {
         keywords: &[ast::Keyword],
         decorator_list: &[ast::Expression],
     ) -> CompileResult<()> {
+        self.prepare_decorators(decorator_list)?;
+
         let prev_ctx = self.ctx;
         self.ctx = CompileContext {
             func: FunctionContext::NoFunction,
-            in_loop: false,
+            in_class: true,
+            loop_data: None,
         };
 
         let qualified_name = self.create_qualified_name(name, "");
         let old_qualified_path = self.current_qualified_path.take();
         self.current_qualified_path = Some(qualified_name.clone());
 
-        self.prepare_decorators(decorator_list)?;
         self.emit(Instruction::LoadBuildClass);
         let line_number = self.get_source_line_number();
         self.push_output(CodeObject::new(
-            Default::default(),
+            bytecode::CodeFlags::empty(),
             0,
-            vec![],
-            None,
-            vec![],
-            None,
+            0,
+            0,
             self.source_path.clone(),
             line_number,
             name.to_owned(),
         ));
-        self.enter_scope();
 
         let (new_body, doc_str) = get_doc(body);
 
-        self.emit(Instruction::LoadName {
-            name: "__name__".to_owned(),
-            scope: bytecode::NameScope::Global,
+        let dunder_name = self.name("__name__");
+        self.emit(Instruction::LoadGlobal(dunder_name));
+        let dunder_module = self.name("__module__");
+        self.emit(Instruction::StoreLocal(dunder_module));
+        self.emit_constant(ConstantData::Str {
+            value: qualified_name.clone(),
         });
-        self.emit(Instruction::StoreName {
-            name: "__module__".to_owned(),
-            scope: bytecode::NameScope::Free,
-        });
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::String {
-                value: qualified_name.clone(),
-            },
-        });
-        self.emit(Instruction::StoreName {
-            name: "__qualname__".to_owned(),
-            scope: bytecode::NameScope::Free,
-        });
+        let qualname = self.name("__qualname__");
+        self.emit(Instruction::StoreLocal(qualname));
         self.load_docstring(doc_str);
-        self.emit(Instruction::StoreName {
-            name: "__doc__".to_owned(),
-            scope: bytecode::NameScope::Free,
-        });
+        let doc = self.name("__doc__");
+        self.emit(Instruction::StoreLocal(doc));
         // setup annotations
         if self.find_ann(body) {
             self.emit(Instruction::SetupAnnotation);
         }
         self.compile_statements(new_body)?;
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::None,
-        });
+
+        let classcell_idx = self
+            .code_stack
+            .last_mut()
+            .unwrap()
+            .cellvar_cache
+            .iter()
+            .position(|var| *var == "__class__");
+
+        if let Some(classcell_idx) = classcell_idx {
+            self.emit(Instruction::LoadClosure(classcell_idx as u32));
+            self.emit(Instruction::Duplicate);
+            let classcell = self.name("__classcell__");
+            self.emit(Instruction::StoreLocal(classcell));
+        } else {
+            self.emit_constant(ConstantData::None);
+        }
+
         self.emit(Instruction::ReturnValue);
 
-        let mut code = self.pop_code_object();
-        code.flags &= !bytecode::CodeFlags::NEW_LOCALS;
-        self.leave_scope();
+        let code = self.pop_code_object();
 
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::Code {
-                code: Box::new(code),
-            },
+        self.current_qualified_path = old_qualified_path;
+        self.ctx = prev_ctx;
+
+        let mut funcflags = bytecode::MakeFunctionFlags::empty();
+
+        if self.build_closure(&code) {
+            funcflags |= bytecode::MakeFunctionFlags::CLOSURE;
+        }
+
+        self.emit_constant(ConstantData::Code {
+            code: Box::new(code),
         });
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::String {
-                value: name.to_owned(),
-            },
+        self.emit_constant(ConstantData::Str {
+            value: name.to_owned(),
         });
 
         // Turn code object into function object:
-        self.emit(Instruction::MakeFunction);
+        self.emit(Instruction::MakeFunction(funcflags));
 
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::String {
-                value: qualified_name,
-            },
+        self.emit_constant(ConstantData::Str {
+            value: qualified_name,
         });
 
         for base in bases {
@@ -1162,7 +1351,7 @@ impl<O: OutputStream> Compiler<O> {
             let mut kwarg_names = vec![];
             for keyword in keywords {
                 if let Some(name) = &keyword.name {
-                    kwarg_names.push(bytecode::Constant::String {
+                    kwarg_names.push(ConstantData::Str {
                         value: name.to_owned(),
                     });
                 } else {
@@ -1172,25 +1361,21 @@ impl<O: OutputStream> Compiler<O> {
                 self.compile_expression(&keyword.value)?;
             }
 
-            self.emit(Instruction::LoadConst {
-                value: bytecode::Constant::Tuple {
-                    elements: kwarg_names,
-                },
+            self.emit_constant(ConstantData::Tuple {
+                elements: kwarg_names,
             });
-            self.emit(Instruction::CallFunction {
-                typ: CallType::Keyword(2 + keywords.len() + bases.len()),
+            self.emit(Instruction::CallFunctionKeyword {
+                nargs: (2 + keywords.len() + bases.len()) as u32,
             });
         } else {
-            self.emit(Instruction::CallFunction {
-                typ: CallType::Positional(2 + bases.len()),
+            self.emit(Instruction::CallFunctionPositional {
+                nargs: (2 + bases.len()) as u32,
             });
         }
 
         self.apply_decorators(decorator_list);
 
         self.store_name(name);
-        self.current_qualified_path = old_qualified_path;
-        self.ctx = prev_ctx;
         Ok(())
     }
 
@@ -1199,11 +1384,9 @@ impl<O: OutputStream> Compiler<O> {
         // Duplicate top of stack (the function or class object)
 
         // Doc string value:
-        self.emit(Instruction::LoadConst {
-            value: match doc_str {
-                Some(doc) => bytecode::Constant::String { value: doc },
-                None => bytecode::Constant::None, // set docstring None if not declared
-            },
+        self.emit_constant(match doc_str {
+            Some(doc) => ConstantData::Str { value: doc },
+            None => ConstantData::None, // set docstring None if not declared
         });
     }
 
@@ -1216,19 +1399,16 @@ impl<O: OutputStream> Compiler<O> {
         let start_label = self.new_label();
         let else_label = self.new_label();
         let end_label = self.new_label();
-        self.emit(Instruction::SetupLoop {
-            start: start_label,
-            end: end_label,
-        });
 
+        self.emit(Instruction::SetupLoop { end: end_label });
         self.set_label(start_label);
 
         self.compile_jump_if(test, false, else_label)?;
 
-        let was_in_loop = self.ctx.in_loop;
-        self.ctx.in_loop = true;
+        let was_in_loop = self.ctx.loop_data;
+        self.ctx.loop_data = Some((start_label, end_label));
         self.compile_statements(body)?;
-        self.ctx.in_loop = was_in_loop;
+        self.ctx.loop_data = was_in_loop;
         self.emit(Instruction::Jump {
             target: start_label,
         });
@@ -1254,10 +1434,7 @@ impl<O: OutputStream> Compiler<O> {
         let else_label = self.new_label();
         let end_label = self.new_label();
 
-        self.emit(Instruction::SetupLoop {
-            start: start_label,
-            end: end_label,
-        });
+        self.emit(Instruction::SetupLoop { end: end_label });
 
         // The thing iterated:
         self.compile_expression(iter)?;
@@ -1273,9 +1450,7 @@ impl<O: OutputStream> Compiler<O> {
                 handler: check_asynciter_label,
             });
             self.emit(Instruction::GetANext);
-            self.emit(Instruction::LoadConst {
-                value: bytecode::Constant::None,
-            });
+            self.emit_constant(ConstantData::None);
             self.emit(Instruction::YieldFrom);
             self.compile_store(target)?;
             self.emit(Instruction::PopBlock);
@@ -1283,21 +1458,21 @@ impl<O: OutputStream> Compiler<O> {
 
             self.set_label(check_asynciter_label);
             self.emit(Instruction::Duplicate);
-            self.emit(Instruction::LoadName {
-                name: "StopAsyncIteration".to_owned(),
-                scope: bytecode::NameScope::Global,
-            });
+            let stopasynciter = self.name("StopAsyncIteration");
+            self.emit(Instruction::LoadGlobal(stopasynciter));
             self.emit(Instruction::CompareOperation {
                 op: bytecode::ComparisonOperator::ExceptionMatch,
             });
             self.emit(Instruction::JumpIfTrue { target: else_label });
-            self.emit(Instruction::Raise { argc: 0 });
+            self.emit(Instruction::Raise {
+                kind: bytecode::RaiseKind::Reraise,
+            });
 
-            let was_in_loop = self.ctx.in_loop;
-            self.ctx.in_loop = true;
+            let was_in_loop = self.ctx.loop_data;
+            self.ctx.loop_data = Some((start_label, end_label));
             self.set_label(body_label);
             self.compile_statements(body)?;
-            self.ctx.in_loop = was_in_loop;
+            self.ctx.loop_data = was_in_loop;
         } else {
             // Retrieve Iterator
             self.emit(Instruction::GetIter);
@@ -1308,10 +1483,10 @@ impl<O: OutputStream> Compiler<O> {
             // Start of loop iteration, set targets:
             self.compile_store(target)?;
 
-            let was_in_loop = self.ctx.in_loop;
-            self.ctx.in_loop = true;
+            let was_in_loop = self.ctx.loop_data;
+            self.ctx.loop_data = Some((start_label, end_label));
             self.compile_statements(body)?;
-            self.ctx.in_loop = was_in_loop;
+            self.ctx.loop_data = was_in_loop;
         }
 
         self.emit(Instruction::Jump {
@@ -1424,20 +1599,17 @@ impl<O: OutputStream> Compiler<O> {
 
         if let ast::ExpressionType::Identifier { name } = &target.node {
             // Store as dict entry in __annotations__ dict:
-            self.emit(Instruction::LoadName {
-                name: String::from("__annotations__"),
-                scope: bytecode::NameScope::Local,
-            });
-            self.emit(Instruction::LoadConst {
-                value: bytecode::Constant::String {
-                    value: name.to_owned(),
-                },
+            let annotations = self.name("__annotations__");
+            self.emit(Instruction::LoadNameAny(annotations));
+            self.emit_constant(ConstantData::Str {
+                value: name.to_owned(),
             });
             self.emit(Instruction::StoreSubscript);
         } else {
             // Drop annotation if not assigned to simple identifier.
             self.emit(Instruction::Pop);
         }
+
         Ok(())
     }
 
@@ -1453,9 +1625,8 @@ impl<O: OutputStream> Compiler<O> {
             }
             ast::ExpressionType::Attribute { value, name } => {
                 self.compile_expression(value)?;
-                self.emit(Instruction::StoreAttr {
-                    name: name.to_owned(),
-                });
+                let idx = self.name(name);
+                self.emit(Instruction::StoreAttr { idx });
             }
             ast::ExpressionType::List { elements } | ast::ExpressionType::Tuple { elements } => {
                 let mut seen_star = false;
@@ -1467,17 +1638,23 @@ impl<O: OutputStream> Compiler<O> {
                             return Err(self.error(CompileErrorType::MultipleStarArgs));
                         } else {
                             seen_star = true;
-                            self.emit(Instruction::UnpackEx {
-                                before: i,
-                                after: elements.len() - i - 1,
-                            });
+                            let before = i;
+                            let after = elements.len() - i - 1;
+                            let (before, after) = (|| Some((before.to_u8()?, after.to_u8()?)))()
+                                .ok_or_else(|| {
+                                    self.error_loc(
+                                        CompileErrorType::TooManyStarUnpack,
+                                        target.location,
+                                    )
+                                })?;
+                            self.emit(Instruction::UnpackEx { before, after });
                         }
                     }
                 }
 
                 if !seen_star {
                     self.emit(Instruction::UnpackSequence {
-                        size: elements.len(),
+                        size: elements.len() as u32,
                     });
                 }
 
@@ -1503,7 +1680,7 @@ impl<O: OutputStream> Compiler<O> {
     }
 
     fn compile_op(&mut self, op: &ast::Operator, inplace: bool) {
-        let i = match op {
+        let op = match op {
             ast::Operator::Add => bytecode::BinaryOperator::Add,
             ast::Operator::Sub => bytecode::BinaryOperator::Subtract,
             ast::Operator::Mult => bytecode::BinaryOperator::Multiply,
@@ -1518,7 +1695,12 @@ impl<O: OutputStream> Compiler<O> {
             ast::Operator::BitXor => bytecode::BinaryOperator::Xor,
             ast::Operator::BitAnd => bytecode::BinaryOperator::And,
         };
-        self.emit(Instruction::BinaryOperation { op: i, inplace });
+        let ins = if inplace {
+            Instruction::BinaryOperationInplace { op }
+        } else {
+            Instruction::BinaryOperation { op }
+        };
+        self.emit(ins);
     }
 
     /// Implement boolean short circuit evaluation logic.
@@ -1721,27 +1903,26 @@ impl<O: OutputStream> Compiler<O> {
             }
             Attribute { value, name } => {
                 self.compile_expression(value)?;
-                self.emit(Instruction::LoadAttr {
-                    name: name.to_owned(),
-                });
+                let idx = self.name(name);
+                self.emit(Instruction::LoadAttr { idx });
             }
             Compare { vals, ops } => {
                 self.compile_chained_comparison(vals, ops)?;
             }
             Number { value } => {
                 let const_value = match value {
-                    ast::Number::Integer { value } => bytecode::Constant::Integer {
+                    ast::Number::Integer { value } => ConstantData::Integer {
                         value: value.clone(),
                     },
-                    ast::Number::Float { value } => bytecode::Constant::Float { value: *value },
-                    ast::Number::Complex { real, imag } => bytecode::Constant::Complex {
+                    ast::Number::Float { value } => ConstantData::Float { value: *value },
+                    ast::Number::Complex { real, imag } => ConstantData::Complex {
                         value: Complex64::new(*real, *imag),
                     },
                 };
-                self.emit(Instruction::LoadConst { value: const_value });
+                self.emit_constant(const_value);
             }
             List { elements } => {
-                let size = elements.len();
+                let size = elements.len() as u32;
                 let must_unpack = self.gather_elements(elements)?;
                 self.emit(Instruction::BuildList {
                     size,
@@ -1749,7 +1930,7 @@ impl<O: OutputStream> Compiler<O> {
                 });
             }
             Tuple { elements } => {
-                let size = elements.len();
+                let size = elements.len() as u32;
                 let must_unpack = self.gather_elements(elements)?;
                 self.emit(Instruction::BuildTuple {
                     size,
@@ -1757,7 +1938,7 @@ impl<O: OutputStream> Compiler<O> {
                 });
             }
             Set { elements } => {
-                let size = elements.len();
+                let size = elements.len() as u32;
                 let must_unpack = self.gather_elements(elements)?;
                 self.emit(Instruction::BuildSet {
                     size,
@@ -1768,11 +1949,11 @@ impl<O: OutputStream> Compiler<O> {
                 self.compile_dict(elements)?;
             }
             Slice { elements } => {
-                let size = elements.len();
+                let step = elements.len() >= 3;
                 for element in elements {
                     self.compile_expression(element)?;
                 }
-                self.emit(Instruction::BuildSlice { size });
+                self.emit(Instruction::BuildSlice { step });
             }
             Yield { value } => {
                 if !self.ctx.in_func() {
@@ -1781,9 +1962,7 @@ impl<O: OutputStream> Compiler<O> {
                 self.mark_generator();
                 match value {
                     Some(expression) => self.compile_expression(expression)?,
-                    Option::None => self.emit(Instruction::LoadConst {
-                        value: bytecode::Constant::None,
-                    }),
+                    Option::None => self.emit_constant(ConstantData::None),
                 };
                 self.emit(Instruction::YieldValue);
             }
@@ -1793,9 +1972,7 @@ impl<O: OutputStream> Compiler<O> {
                 }
                 self.compile_expression(value)?;
                 self.emit(Instruction::GetAwaitable);
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::None,
-                });
+                self.emit_constant(ConstantData::None);
                 self.emit(Instruction::YieldFrom);
             }
             YieldFrom { value } => {
@@ -1811,39 +1988,27 @@ impl<O: OutputStream> Compiler<O> {
                 self.mark_generator();
                 self.compile_expression(value)?;
                 self.emit(Instruction::GetIter);
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::None,
-                });
+                self.emit_constant(ConstantData::None);
                 self.emit(Instruction::YieldFrom);
             }
             True => {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::Boolean { value: true },
-                });
+                self.emit_constant(ConstantData::Boolean { value: true });
             }
             False => {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::Boolean { value: false },
-                });
+                self.emit_constant(ConstantData::Boolean { value: false });
             }
             ast::ExpressionType::None => {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::None,
-                });
+                self.emit_constant(ConstantData::None);
             }
             Ellipsis => {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::Ellipsis,
-                });
+                self.emit_constant(ConstantData::Ellipsis);
             }
-            String { value } => {
+            ast::ExpressionType::String { value } => {
                 self.compile_string(value)?;
             }
             Bytes { value } => {
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::Bytes {
-                        value: value.clone(),
-                    },
+                self.emit_constant(ConstantData::Bytes {
+                    value: value.clone(),
                 });
             }
             Identifier { name } => {
@@ -1852,26 +2017,25 @@ impl<O: OutputStream> Compiler<O> {
             Lambda { args, body } => {
                 let prev_ctx = self.ctx;
                 self.ctx = CompileContext {
-                    in_loop: false,
+                    loop_data: Option::None,
+                    in_class: prev_ctx.in_class,
                     func: FunctionContext::Function,
                 };
 
                 let name = "<lambda>".to_owned();
-                self.enter_function(&name, args)?;
+                let mut funcflags = self.enter_function(&name, args)?;
                 self.compile_expression(body)?;
                 self.emit(Instruction::ReturnValue);
                 let code = self.pop_code_object();
-                self.leave_scope();
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::Code {
-                        code: Box::new(code),
-                    },
+                if self.build_closure(&code) {
+                    funcflags |= bytecode::MakeFunctionFlags::CLOSURE;
+                }
+                self.emit_constant(ConstantData::Code {
+                    code: Box::new(code),
                 });
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::String { value: name },
-                });
+                self.emit_constant(ConstantData::Str { value: name });
                 // Turn code object into function object:
-                self.emit(Instruction::MakeFunction);
+                self.emit(Instruction::MakeFunction(funcflags));
 
                 self.ctx = prev_ctx;
             }
@@ -1916,10 +2080,8 @@ impl<O: OutputStream> Compiler<O> {
                 let mut subsize = 0;
                 for keyword in subkeywords {
                     if let Some(name) = &keyword.name {
-                        self.emit(Instruction::LoadConst {
-                            value: bytecode::Constant::String {
-                                value: name.to_owned(),
-                            },
+                        self.emit_constant(ConstantData::Str {
+                            value: name.to_owned(),
                         });
                         self.compile_expression(&keyword.value)?;
                         subsize += 1;
@@ -1950,7 +2112,7 @@ impl<O: OutputStream> Compiler<O> {
         keywords: &[ast::Keyword],
     ) -> CompileResult<()> {
         self.compile_expression(function)?;
-        let count = args.len() + keywords.len();
+        let count = (args.len() + keywords.len()) as u32;
 
         // Normal arguments:
         let must_unpack = self.gather_elements(args)?;
@@ -1959,20 +2121,16 @@ impl<O: OutputStream> Compiler<O> {
         if must_unpack || has_double_star {
             // Create a tuple with positional args:
             self.emit(Instruction::BuildTuple {
-                size: args.len(),
+                size: args.len() as u32,
                 unpack: must_unpack,
             });
 
             // Create an optional map with kw-args:
             if !keywords.is_empty() {
                 self.compile_keywords(keywords)?;
-                self.emit(Instruction::CallFunction {
-                    typ: CallType::Ex(true),
-                });
+                self.emit(Instruction::CallFunctionEx { has_kwargs: true });
             } else {
-                self.emit(Instruction::CallFunction {
-                    typ: CallType::Ex(false),
-                });
+                self.emit(Instruction::CallFunctionEx { has_kwargs: false });
             }
         } else {
             // Keyword arguments:
@@ -1980,7 +2138,7 @@ impl<O: OutputStream> Compiler<O> {
                 let mut kwarg_names = vec![];
                 for keyword in keywords {
                     if let Some(name) = &keyword.name {
-                        kwarg_names.push(bytecode::Constant::String {
+                        kwarg_names.push(ConstantData::Str {
                             value: name.to_owned(),
                         });
                     } else {
@@ -1990,18 +2148,12 @@ impl<O: OutputStream> Compiler<O> {
                     self.compile_expression(&keyword.value)?;
                 }
 
-                self.emit(Instruction::LoadConst {
-                    value: bytecode::Constant::Tuple {
-                        elements: kwarg_names,
-                    },
+                self.emit_constant(ConstantData::Tuple {
+                    elements: kwarg_names,
                 });
-                self.emit(Instruction::CallFunction {
-                    typ: CallType::Keyword(count),
-                });
+                self.emit(Instruction::CallFunctionKeyword { nargs: count });
             } else {
-                self.emit(Instruction::CallFunction {
-                    typ: CallType::Positional(count),
-                });
+                self.emit(Instruction::CallFunctionPositional { nargs: count });
             }
         }
         Ok(())
@@ -2037,6 +2189,14 @@ impl<O: OutputStream> Compiler<O> {
         kind: &ast::ComprehensionKind,
         generators: &[ast::Comprehension],
     ) -> CompileResult<()> {
+        let prev_ctx = self.ctx;
+
+        self.ctx = CompileContext {
+            loop_data: None,
+            in_class: prev_ctx.in_class,
+            func: FunctionContext::Function,
+        };
+
         // We must have at least one generator:
         assert!(!generators.is_empty());
 
@@ -2051,17 +2211,15 @@ impl<O: OutputStream> Compiler<O> {
         let line_number = self.get_source_line_number();
         // Create magnificent function <listcomp>:
         self.push_output(CodeObject::new(
-            Default::default(),
+            bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED,
             1,
-            vec![".0".to_owned()],
-            None,
-            vec![],
-            None,
+            1,
+            0,
             self.source_path.clone(),
             line_number,
             name.clone(),
         ));
-        self.enter_scope();
+        let arg0 = self.varname(".0");
 
         // Create empty object of proper type:
         match kind {
@@ -2095,10 +2253,7 @@ impl<O: OutputStream> Compiler<O> {
 
             if loop_labels.is_empty() {
                 // Load iterator onto stack (passed as first argument):
-                self.emit(Instruction::LoadName {
-                    name: String::from(".0"),
-                    scope: bytecode::NameScope::Local,
-                });
+                self.emit(Instruction::LoadFast(arg0));
             } else {
                 // Evaluate iterated item:
                 self.compile_expression(&generator.iter)?;
@@ -2111,10 +2266,7 @@ impl<O: OutputStream> Compiler<O> {
             let start_label = self.new_label();
             let end_label = self.new_label();
             loop_labels.push((start_label, end_label));
-            self.emit(Instruction::SetupLoop {
-                start: start_label,
-                end: end_label,
-            });
+            self.emit(Instruction::SetupLoop { end: end_label });
             self.set_label(start_label);
             self.emit(Instruction::ForIter { target: end_label });
 
@@ -2148,13 +2300,13 @@ impl<O: OutputStream> Compiler<O> {
             ast::ComprehensionKind::List { element } => {
                 compile_element(element)?;
                 self.emit(Instruction::ListAppend {
-                    i: 1 + generators.len(),
+                    i: (1 + generators.len()) as u32,
                 });
             }
             ast::ComprehensionKind::Set { element } => {
                 compile_element(element)?;
                 self.emit(Instruction::SetAdd {
-                    i: 1 + generators.len(),
+                    i: (1 + generators.len()) as u32,
                 });
             }
             ast::ComprehensionKind::Dict { key, value } => {
@@ -2163,7 +2315,7 @@ impl<O: OutputStream> Compiler<O> {
                 self.compile_expression(value)?;
 
                 self.emit(Instruction::MapAddRev {
-                    i: 1 + generators.len(),
+                    i: (1 + generators.len()) as u32,
                 });
             }
         }
@@ -2185,23 +2337,23 @@ impl<O: OutputStream> Compiler<O> {
         // Fetch code for listcomp function:
         let code = self.pop_code_object();
 
-        // Pop scope
-        self.leave_scope();
+        self.ctx = prev_ctx;
+
+        let mut funcflags = bytecode::MakeFunctionFlags::empty();
+        if self.build_closure(&code) {
+            funcflags |= bytecode::MakeFunctionFlags::CLOSURE;
+        }
 
         // List comprehension code:
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::Code {
-                code: Box::new(code),
-            },
+        self.emit_constant(ConstantData::Code {
+            code: Box::new(code),
         });
 
         // List comprehension function name:
-        self.emit(Instruction::LoadConst {
-            value: bytecode::Constant::String { value: name },
-        });
+        self.emit_constant(ConstantData::Str { value: name });
 
         // Turn code object into function object:
-        self.emit(Instruction::MakeFunction);
+        self.emit(Instruction::MakeFunction(funcflags));
 
         // Evaluate iterated item:
         self.compile_expression(&generators[0].iter)?;
@@ -2210,30 +2362,26 @@ impl<O: OutputStream> Compiler<O> {
         self.emit(Instruction::GetIter);
 
         // Call just created <listcomp> function:
-        self.emit(Instruction::CallFunction {
-            typ: CallType::Positional(1),
-        });
+        self.emit(Instruction::CallFunctionPositional { nargs: 1 });
         Ok(())
     }
 
     fn compile_string(&mut self, string: &ast::StringGroup) -> CompileResult<()> {
         if let Some(value) = try_get_constant_string(string) {
-            self.emit(Instruction::LoadConst {
-                value: bytecode::Constant::String { value },
-            });
+            self.emit_constant(ConstantData::Str { value });
         } else {
             match string {
                 ast::StringGroup::Joined { values } => {
                     for value in values {
                         self.compile_string(value)?;
                     }
-                    self.emit(Instruction::BuildString { size: values.len() })
+                    self.emit(Instruction::BuildString {
+                        size: values.len() as u32,
+                    })
                 }
                 ast::StringGroup::Constant { value } => {
-                    self.emit(Instruction::LoadConst {
-                        value: bytecode::Constant::String {
-                            value: value.to_owned(),
-                        },
+                    self.emit_constant(ConstantData::Str {
+                        value: value.to_owned(),
                     });
                 }
                 ast::StringGroup::FormattedValue {
@@ -2243,15 +2391,13 @@ impl<O: OutputStream> Compiler<O> {
                 } => {
                     match spec {
                         Some(spec) => self.compile_string(spec)?,
-                        None => self.emit(Instruction::LoadConst {
-                            value: bytecode::Constant::String {
-                                value: String::new(),
-                            },
+                        None => self.emit_constant(ConstantData::Str {
+                            value: String::new(),
                         }),
                     };
                     self.compile_expression(value)?;
                     self.emit(Instruction::FormatValue {
-                        conversion: conversion.map(compile_conversion_flag),
+                        conversion: compile_conversion_flag(*conversion),
                     });
                 }
             }
@@ -2281,56 +2427,51 @@ impl<O: OutputStream> Compiler<O> {
         Ok(())
     }
 
-    // Scope helpers:
-    fn enter_scope(&mut self) {
-        // println!("Enter scope {:?}", self.symbol_table_stack);
-        // Enter first subscope!
-        let table = self
-            .symbol_table_stack
-            .last_mut()
-            .unwrap()
-            .sub_tables
-            .remove(0);
-        self.symbol_table_stack.push(table);
-    }
-
-    fn leave_scope(&mut self) {
-        // println!("Leave scope {:?}", self.symbol_table_stack);
-        let table = self.symbol_table_stack.pop().unwrap();
-        assert!(table.sub_tables.is_empty());
-    }
-
-    fn lookup_name(&self, name: &str) -> &Symbol {
-        // println!("Looking up {:?}", name);
-        let symbol_table = self.symbol_table_stack.last().unwrap();
-        symbol_table.lookup(name).expect(
-            "The symbol must be present in the symbol table, even when it is undefined in python.",
-        )
-    }
-
     // Low level helper functions:
     fn emit(&mut self, instruction: Instruction) {
         let location = compile_location(&self.current_source_location);
         // TODO: insert source filename
-        self.current_output().emit(instruction, location);
+        let info = self.current_codeinfo();
+        info.instructions.push(instruction);
+        info.locations.push(location);
     }
 
-    fn current_output(&mut self) -> &mut O {
-        self.output_stack
-            .last_mut()
-            .expect("No OutputStream on stack")
+    fn emit_constant(&mut self, constant: ConstantData) {
+        let info = self.current_codeinfo();
+        let idx = info.constants.len() as u32;
+        info.constants.push(constant);
+        self.emit(Instruction::LoadConst { idx })
+    }
+
+    fn current_code(&mut self) -> &mut CodeObject {
+        &mut self.current_codeinfo().code
+    }
+
+    fn current_codeinfo(&mut self) -> &mut CodeInfo {
+        self.code_stack.last_mut().expect("no code on stack")
     }
 
     // Generate a new label
     fn new_label(&mut self) -> Label {
-        let l = Label::new(self.nxt_label);
-        self.nxt_label += 1;
-        l
+        let label_map = &mut self.current_codeinfo().label_map;
+        let label = Label(label_map.len() as u32);
+        label_map.push(Label(u32::MAX));
+        label
     }
 
     // Assign current position the given label
     fn set_label(&mut self, label: Label) {
-        self.current_output().set_label(label)
+        let CodeInfo {
+            instructions,
+            label_map,
+            ..
+        } = self.current_codeinfo();
+        let actual_label = Label(instructions.len() as u32);
+        let prev_val = std::mem::replace(&mut label_map[label.0 as usize], actual_label);
+        debug_assert!(
+            prev_val.0 == u32::MAX || prev_val == actual_label,
+            "double-set a label"
+        );
     }
 
     fn set_source_location(&mut self, location: ast::Location) {
@@ -2350,7 +2491,7 @@ impl<O: OutputStream> Compiler<O> {
     }
 
     fn mark_generator(&mut self) {
-        self.current_output().mark_generator();
+        self.current_code().flags |= bytecode::CodeFlags::IS_GENERATOR
     }
 }
 
@@ -2392,11 +2533,14 @@ fn compile_location(location: &ast::Location) -> bytecode::Location {
     bytecode::Location::new(location.row(), location.column())
 }
 
-fn compile_conversion_flag(conversion_flag: ast::ConversionFlag) -> bytecode::ConversionFlag {
+fn compile_conversion_flag(
+    conversion_flag: Option<ast::ConversionFlag>,
+) -> bytecode::ConversionFlag {
     match conversion_flag {
-        ast::ConversionFlag::Ascii => bytecode::ConversionFlag::Ascii,
-        ast::ConversionFlag::Repr => bytecode::ConversionFlag::Repr,
-        ast::ConversionFlag::Str => bytecode::ConversionFlag::Str,
+        None => bytecode::ConversionFlag::None,
+        Some(ast::ConversionFlag::Ascii) => bytecode::ConversionFlag::Ascii,
+        Some(ast::ConversionFlag::Repr) => bytecode::ConversionFlag::Repr,
+        Some(ast::ConversionFlag::Str) => bytecode::ConversionFlag::Str,
     }
 }
 
@@ -2404,134 +2548,58 @@ fn compile_conversion_flag(conversion_flag: ast::ConversionFlag) -> bytecode::Co
 mod tests {
     use super::{CompileOpts, Compiler};
     use crate::symboltable::make_symbol_table;
-    use rustpython_bytecode::bytecode::Constant::*;
-    use rustpython_bytecode::bytecode::Instruction::*;
-    use rustpython_bytecode::bytecode::{CodeObject, Label};
+    use rustpython_bytecode::CodeObject;
     use rustpython_parser::parser;
 
     fn compile_exec(source: &str) -> CodeObject {
-        let mut compiler: Compiler =
-            Compiler::new(CompileOpts::default(), "source_path".to_owned());
-        compiler.push_new_code_object("<module>".to_owned());
+        let mut compiler: Compiler = Compiler::new(
+            CompileOpts::default(),
+            "source_path".to_owned(),
+            "<module>".to_owned(),
+        );
         let ast = parser::parse_program(source).unwrap();
         let symbol_scope = make_symbol_table(&ast).unwrap();
         compiler.compile_program(&ast, symbol_scope).unwrap();
         compiler.pop_code_object()
     }
 
+    macro_rules! assert_dis_snapshot {
+        ($value:expr) => {
+            insta::assert_snapshot!(
+                insta::internals::AutoName,
+                $value.display_expand_codeobjects().to_string(),
+                stringify!($value)
+            )
+        };
+    }
+
     #[test]
     fn test_if_ors() {
-        let code = compile_exec("if True or False or False:\n pass\n");
-        assert_eq!(
-            vec![
-                LoadConst {
-                    value: Boolean { value: true }
-                },
-                JumpIfTrue {
-                    target: Label::new(1)
-                },
-                LoadConst {
-                    value: Boolean { value: false }
-                },
-                JumpIfTrue {
-                    target: Label::new(1)
-                },
-                LoadConst {
-                    value: Boolean { value: false }
-                },
-                JumpIfFalse {
-                    target: Label::new(0)
-                },
-                LoadConst { value: None },
-                ReturnValue
-            ],
-            code.instructions
-        );
+        assert_dis_snapshot!(compile_exec(
+            "\
+if True or False or False:
+    pass
+"
+        ));
     }
 
     #[test]
     fn test_if_ands() {
-        let code = compile_exec("if True and False and False:\n pass\n");
-        assert_eq!(
-            vec![
-                LoadConst {
-                    value: Boolean { value: true }
-                },
-                JumpIfFalse {
-                    target: Label::new(0)
-                },
-                LoadConst {
-                    value: Boolean { value: false }
-                },
-                JumpIfFalse {
-                    target: Label::new(0)
-                },
-                LoadConst {
-                    value: Boolean { value: false }
-                },
-                JumpIfFalse {
-                    target: Label::new(0)
-                },
-                LoadConst { value: None },
-                ReturnValue
-            ],
-            code.instructions
-        );
+        assert_dis_snapshot!(compile_exec(
+            "\
+if True and False and False:
+    pass
+"
+        ));
     }
 
     #[test]
     fn test_if_mixed() {
-        let code = compile_exec("if (True and False) or (False and True):\n pass\n");
-        assert_eq!(
-            vec![
-                LoadConst {
-                    value: Boolean { value: true }
-                },
-                JumpIfFalse {
-                    target: Label::new(2)
-                },
-                LoadConst {
-                    value: Boolean { value: false }
-                },
-                JumpIfTrue {
-                    target: Label::new(1)
-                },
-                LoadConst {
-                    value: Boolean { value: false }
-                },
-                JumpIfFalse {
-                    target: Label::new(0)
-                },
-                LoadConst {
-                    value: Boolean { value: true }
-                },
-                JumpIfFalse {
-                    target: Label::new(0)
-                },
-                LoadConst { value: None },
-                ReturnValue
-            ],
-            code.instructions
-        );
-    }
-
-    #[test]
-    fn test_constant_optimization() {
-        let code = compile_exec("1 + 2 + 3 + 4\n1.5 * 2.5");
-        assert_eq!(
-            code.instructions,
-            vec![
-                LoadConst {
-                    value: Integer { value: 10.into() }
-                },
-                Pop,
-                LoadConst {
-                    value: Float { value: 3.75 }
-                },
-                Pop,
-                LoadConst { value: None },
-                ReturnValue,
-            ]
-        );
+        assert_dis_snapshot!(compile_exec(
+            "\
+if (True and False) or (False and True):
+    pass
+"
+        ));
     }
 }

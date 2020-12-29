@@ -6,14 +6,12 @@ const { CleanWebpackPlugin } = require('clean-webpack-plugin');
 const path = require('path');
 const fs = require('fs');
 
-const interval = setInterval(() => console.log('keepalive'), 1000 * 60 * 5);
-
 module.exports = (env = {}) => {
     const config = {
         entry: './src/index.js',
         output: {
             path: path.join(__dirname, 'dist'),
-            filename: 'index.js'
+            filename: 'index.js',
         },
         mode: 'development',
         resolve: {
@@ -21,23 +19,23 @@ module.exports = (env = {}) => {
                 rustpython: path.resolve(
                     __dirname,
                     env.rustpythonPkg || '../lib/pkg'
-                )
-            }
+                ),
+            },
         },
         module: {
             rules: [
                 {
                     test: /\.css$/,
-                    use: [MiniCssExtractPlugin.loader, 'css-loader']
+                    use: [MiniCssExtractPlugin.loader, 'css-loader'],
                 },
                 {
                     test: /\.(woff(2)?|ttf)$/,
                     use: {
-                        loader:"file-loader",
-                        options: { name: "fonts/[name].[ext]" }
+                        loader: 'file-loader',
+                        options: { name: 'fonts/[name].[ext]' },
                     },
-                }
-            ]   
+                },
+            ],
         },
         plugins: [
             new CleanWebpackPlugin(),
@@ -57,22 +55,15 @@ module.exports = (env = {}) => {
                 // }
             }),
             new MiniCssExtractPlugin({
-                filename: 'styles.css'
+                filename: 'styles.css',
             }),
-            {
-                apply(compiler) {
-                    compiler.hooks.done.tap('clearInterval', () => {
-                        clearInterval(interval);
-                    });
-                }
-            }
-        ]
+        ],
     };
     if (!env.noWasmPack) {
         config.plugins.push(
             new WasmPackPlugin({
                 crateDirectory: path.join(__dirname, '../lib'),
-                forceMode: 'release'
+                forceMode: 'release',
             })
         );
     }

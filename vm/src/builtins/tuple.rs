@@ -1,16 +1,18 @@
 use crossbeam_utils::atomic::AtomicCell;
 use std::fmt;
+use std::marker::PhantomData;
 
 use super::pytype::PyTypeRef;
 use crate::common::hash::PyHash;
 use crate::function::OptionalArg;
 use crate::pyobject::{
     self, BorrowValue, Either, IdProtocol, IntoPyObject, PyArithmaticValue, PyClassImpl,
-    PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
+    PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TransmuteFromObject,
+    TryFromObject, TypeProtocol,
 };
 use crate::sequence::{self, SimpleSeq};
 use crate::sliceable::PySliceableSequence;
-use crate::slots::{Comparable, Hashable, PyComparisonOp};
+use crate::slots::{Comparable, Hashable, Iterable, PyComparisonOp, PyIter};
 use crate::vm::{ReprGuard, VirtualMachine};
 
 /// tuple() -> empty tuple
@@ -84,7 +86,7 @@ pub(crate) fn get_value(obj: &PyObjectRef) -> &[PyObjectRef] {
     obj.payload::<PyTuple>().unwrap().borrow_value()
 }
 
-#[pyimpl(flags(BASETYPE), with(Hashable, Comparable))]
+#[pyimpl(flags(BASETYPE), with(Hashable, Comparable, Iterable))]
 impl PyTuple {
     /// Creating a new tuple with given boxed slice.
     /// NOTE: for usual case, you probably want to use PyTupleRef::with_elements.
@@ -132,14 +134,6 @@ impl PyTuple {
             }
         }
         Ok(count)
-    }
-
-    #[pymethod(name = "__iter__")]
-    fn iter(zelf: PyRef<Self>) -> PyTupleIterator {
-        PyTupleIterator {
-            position: AtomicCell::new(0),
-            tuple: zelf,
-        }
     }
 
     #[pymethod(name = "__len__")]
@@ -258,9 +252,19 @@ impl Comparable for PyTuple {
     }
 }
 
+impl Iterable for PyTuple {
+    fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        Ok(PyTupleIterator {
+            position: AtomicCell::new(0),
+            tuple: zelf,
+        }
+        .into_object(vm))
+    }
+}
+
 #[pyclass(module = false, name = "tuple_iterator")]
 #[derive(Debug)]
-pub struct PyTupleIterator {
+pub(crate) struct PyTupleIterator {
     position: AtomicCell<usize>,
     tuple: PyTupleRef,
 }
@@ -271,27 +275,70 @@ impl PyValue for PyTupleIterator {
     }
 }
 
-#[pyimpl]
-impl PyTupleIterator {
-    #[pymethod(name = "__next__")]
-    fn next(&self, vm: &VirtualMachine) -> PyResult {
-        let pos = self.position.fetch_add(1);
-        if let Some(obj) = self.tuple.borrow_value().get(pos) {
+#[pyimpl(with(PyIter))]
+impl PyTupleIterator {}
+
+impl PyIter for PyTupleIterator {
+    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        let pos = zelf.position.fetch_add(1);
+        if let Some(obj) = zelf.tuple.borrow_value().get(pos) {
             Ok(obj.clone())
         } else {
             Err(vm.new_stop_iteration())
         }
     }
+}
 
-    #[pymethod(name = "__iter__")]
-    fn iter(zelf: PyRef<Self>) -> PyRef<Self> {
-        zelf
+pub(crate) fn init(context: &PyContext) {
+    PyTuple::extend_class(context, &context.types.tuple_type);
+    PyTupleIterator::extend_class(context, &context.types.tuple_iterator_type);
+}
+
+pub struct PyTupleTyped<T: TransmuteFromObject> {
+    // SAFETY INVARIANT: T must be repr(transparent) over PyObjectRef, and the
+    //                   elements must be logically valid when transmuted to T
+    tuple: PyTupleRef,
+    _marker: PhantomData<Vec<T>>,
+}
+
+impl<T: TransmuteFromObject> TryFromObject for PyTupleTyped<T> {
+    fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
+        let tuple = PyTupleRef::try_from_object(vm, obj)?;
+        for elem in tuple.borrow_value() {
+            T::check(vm, elem)?
+        }
+        // SAFETY: the contract of TransmuteFromObject upholds the variant on `tuple`
+        Ok(Self {
+            tuple,
+            _marker: PhantomData,
+        })
     }
 }
 
-pub fn init(context: &PyContext) {
-    let tuple_type = &context.types.tuple_type;
-    PyTuple::extend_class(context, tuple_type);
+impl<'a, T: TransmuteFromObject + 'a> BorrowValue<'a> for PyTupleTyped<T> {
+    type Borrowed = &'a [T];
+    #[inline]
+    fn borrow_value(&'a self) -> Self::Borrowed {
+        unsafe { &*(self.tuple.borrow_value() as *const [PyObjectRef] as *const [T]) }
+    }
+}
 
-    PyTupleIterator::extend_class(context, &context.types.tuple_iterator_type);
+impl<T: TransmuteFromObject + fmt::Debug> fmt::Debug for PyTupleTyped<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.borrow_value().fmt(f)
+    }
+}
+
+impl<T: TransmuteFromObject> From<PyTupleTyped<T>> for PyTupleRef {
+    #[inline]
+    fn from(tup: PyTupleTyped<T>) -> Self {
+        tup.tuple
+    }
+}
+
+impl<T: TransmuteFromObject> IntoPyObject for PyTupleTyped<T> {
+    #[inline]
+    fn into_pyobject(self, _vm: &VirtualMachine) -> PyObjectRef {
+        self.tuple.into_object()
+    }
 }

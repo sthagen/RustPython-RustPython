@@ -1,4 +1,4 @@
-use std::{fmt::Debug, ops::Deref};
+use std::{borrow::Cow, fmt::Debug, ops::Deref};
 
 use crate::builtins::bytes::{PyBytes, PyBytesRef};
 use crate::builtins::list::{PyList, PyListRef};
@@ -8,6 +8,8 @@ use crate::builtins::slice::PySliceRef;
 use crate::bytesinner::bytes_to_hex;
 use crate::common::borrow::{BorrowedValue, BorrowedValueMut};
 use crate::common::hash::PyHash;
+use crate::common::lock::OnceCell;
+use crate::common::rc::PyRc;
 use crate::function::OptionalArg;
 use crate::pyobject::{
     Either, IdProtocol, IntoPyObject, PyClassImpl, PyComparisonValue, PyContext, PyObjectRef,
@@ -36,29 +38,75 @@ impl Deref for BufferRef {
         self.0.deref()
     }
 }
+impl BufferRef {
+    pub fn new(buffer: impl Buffer + 'static) -> Self {
+        Self(Box::new(buffer))
+    }
+    pub fn into_rcbuf(self) -> RcBuffer {
+        // move self.0 out of self; BufferRef impls Drop so it's tricky
+        let this = std::mem::ManuallyDrop::new(self);
+        let buf_box = unsafe { std::ptr::read(&this.0) };
+        RcBuffer(buf_box.into())
+    }
+}
 impl From<Box<dyn Buffer>> for BufferRef {
     fn from(buffer: Box<dyn Buffer>) -> Self {
         BufferRef(buffer)
     }
 }
+#[derive(Debug, Clone)]
+pub struct RcBuffer(PyRc<dyn Buffer>);
+impl Deref for RcBuffer {
+    type Target = dyn Buffer;
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+impl Drop for RcBuffer {
+    fn drop(&mut self) {
+        // check if this is the last rc before the inner buffer gets dropped
+        if let Some(buf) = PyRc::get_mut(&mut self.0) {
+            buf.release()
+        }
+    }
+}
+impl Buffer for RcBuffer {
+    fn get_options(&self) -> &BufferOptions {
+        self.0.get_options()
+    }
+    fn obj_bytes(&self) -> BorrowedValue<[u8]> {
+        self.0.obj_bytes()
+    }
+    fn obj_bytes_mut(&self) -> BorrowedValueMut<[u8]> {
+        self.0.obj_bytes_mut()
+    }
+    fn release(&self) {}
+    fn as_contiguous(&self) -> Option<BorrowedValue<[u8]>> {
+        self.0.as_contiguous()
+    }
+    fn as_contiguous_mut(&self) -> Option<BorrowedValueMut<[u8]>> {
+        self.0.as_contiguous_mut()
+    }
+    fn to_contiguous(&self) -> Vec<u8> {
+        self.0.to_contiguous()
+    }
+}
 
 pub trait Buffer: Debug + PyThreadingConstraint {
-    fn get_options(&self) -> BorrowedValue<BufferOptions>;
+    fn get_options(&self) -> &BufferOptions;
     fn obj_bytes(&self) -> BorrowedValue<[u8]>;
     fn obj_bytes_mut(&self) -> BorrowedValueMut<[u8]>;
     fn release(&self);
 
     fn as_contiguous(&self) -> Option<BorrowedValue<[u8]>> {
-        let options = self.get_options();
-        if !options.contiguous {
+        if !self.get_options().contiguous {
             return None;
         }
         Some(self.obj_bytes())
     }
 
     fn as_contiguous_mut(&self) -> Option<BorrowedValueMut<[u8]>> {
-        let options = self.get_options();
-        if !options.contiguous {
+        if !self.get_options().contiguous {
             return None;
         }
         Some(self.obj_bytes_mut())
@@ -75,31 +123,35 @@ pub struct BufferOptions {
     pub len: usize,
     pub itemsize: usize,
     pub contiguous: bool,
-    pub format: String,
+    pub format: Cow<'static, str>,
     // TODO: support multiple dimension array
     pub ndim: usize,
     pub shape: Vec<usize>,
     pub strides: Vec<isize>,
 }
 
-pub(crate) trait ResizeGuard<'a> {
-    type Resizable: 'a;
-    fn try_resizable(&'a self, vm: &VirtualMachine) -> PyResult<Self::Resizable>;
+impl BufferOptions {
+    pub const DEFAULT: Self = BufferOptions {
+        readonly: true,
+        len: 0,
+        itemsize: 1,
+        contiguous: true,
+        format: Cow::Borrowed("B"),
+        ndim: 1,
+        shape: Vec::new(),
+        strides: Vec::new(),
+    };
 }
 
 impl Default for BufferOptions {
     fn default() -> Self {
-        BufferOptions {
-            readonly: true,
-            len: 0,
-            itemsize: 1,
-            contiguous: true,
-            format: "B".to_owned(),
-            ndim: 1,
-            shape: Vec::new(),
-            strides: Vec::new(),
-        }
+        Self::DEFAULT
     }
+}
+
+pub(crate) trait ResizeGuard<'a> {
+    type Resizable: 'a;
+    fn try_resizable(&'a self, vm: &VirtualMachine) -> PyResult<Self::Resizable>;
 }
 
 #[derive(FromArgs)]
@@ -114,7 +166,7 @@ pub struct PyMemoryView {
     obj: PyObjectRef,
     buffer: BufferRef,
     options: BufferOptions,
-    released: AtomicCell<bool>,
+    pub(crate) released: AtomicCell<bool>,
     // start should always less or equal to the stop
     // start and stop pointing to the memory index not slice index
     // if length is not zero than [start, stop)
@@ -124,6 +176,7 @@ pub struct PyMemoryView {
     step: isize,
     exports: AtomicCell<usize>,
     format_spec: FormatSpec,
+    hash: OnceCell<PyHash>,
 }
 
 type PyMemoryViewRef = PyRef<PyMemoryView>;
@@ -153,6 +206,30 @@ impl PyMemoryView {
             step: 1,
             exports: AtomicCell::new(0),
             format_spec,
+            hash: OnceCell::new(),
+        })
+    }
+
+    pub fn from_buffer_range(
+        obj: PyObjectRef,
+        buffer: BufferRef,
+        range: std::ops::Range<usize>,
+        vm: &VirtualMachine,
+    ) -> PyResult<Self> {
+        let options = buffer.get_options().clone();
+        let itemsize = options.itemsize;
+        let format_spec = Self::parse_format(&options.format, vm)?;
+        Ok(PyMemoryView {
+            obj,
+            buffer,
+            options,
+            released: AtomicCell::new(false),
+            start: range.start * itemsize,
+            stop: range.end * itemsize,
+            step: 1,
+            exports: AtomicCell::new(0),
+            format_spec,
+            hash: OnceCell::new(),
         })
     }
 
@@ -318,6 +395,7 @@ impl PyMemoryView {
                 step: 1,
                 exports: AtomicCell::new(0),
                 format_spec,
+                hash: OnceCell::new(),
             }
             .into_object(vm));
         }
@@ -365,6 +443,7 @@ impl PyMemoryView {
                 step: 1,
                 exports: AtomicCell::new(0),
                 format_spec,
+                hash: OnceCell::new(),
             }
             .into_object(vm));
         };
@@ -396,6 +475,7 @@ impl PyMemoryView {
             step: newstep,
             exports: AtomicCell::new(0),
             format_spec,
+            hash: OnceCell::new(),
         }
         .into_object(vm))
     }
@@ -584,6 +664,7 @@ impl PyMemoryView {
             released: AtomicCell::new(false),
             exports: AtomicCell::new(0),
             format_spec: zelf.format_spec.clone(),
+            hash: OnceCell::new(),
             ..*zelf
         }
         .into_ref(vm))
@@ -592,9 +673,9 @@ impl PyMemoryView {
     #[pymethod(magic)]
     fn repr(zelf: PyRef<Self>) -> String {
         if zelf.released.load() {
-            format!("<released memory at 0x{:x}>", zelf.get_id())
+            format!("<released memory at {:#x}>", zelf.get_id())
         } else {
-            format!("<memory at 0x{:x}>", zelf.get_id())
+            format!("<memory at {:#x}>", zelf.get_id())
         }
     }
 
@@ -630,10 +711,13 @@ impl PyMemoryView {
             return Ok(false);
         }
 
-        let other = try_buffer_from_object(vm, other)?;
+        let other = match try_buffer_from_object(vm, other) {
+            Ok(buf) => buf,
+            Err(_) => return Ok(false),
+        };
 
         let a_options = &zelf.options;
-        let b_options = &*other.get_options();
+        let b_options = other.get_options();
 
         if a_options.len != b_options.len
             || a_options.ndim != b_options.ndim
@@ -705,8 +789,8 @@ impl BufferProtocol for PyMemoryView {
 }
 
 impl Buffer for PyMemoryViewRef {
-    fn get_options(&self) -> BorrowedValue<BufferOptions> {
-        (&self.options).into()
+    fn get_options(&self) -> &BufferOptions {
+        &self.options
     }
 
     fn obj_bytes(&self) -> BorrowedValue<[u8]> {
@@ -724,8 +808,7 @@ impl Buffer for PyMemoryViewRef {
     }
 
     fn as_contiguous(&self) -> Option<BorrowedValue<[u8]>> {
-        let options = self.get_options();
-        if !options.contiguous {
+        if !self.options.contiguous {
             return None;
         }
         Some(BorrowedValue::map(self.obj_bytes(), |x| {
@@ -734,8 +817,7 @@ impl Buffer for PyMemoryViewRef {
     }
 
     fn as_contiguous_mut(&self) -> Option<BorrowedValueMut<[u8]>> {
-        let options = self.get_options();
-        if !options.contiguous {
+        if !self.options.contiguous {
             return None;
         }
         Some(BorrowedValueMut::map(self.obj_bytes_mut(), |x| {
@@ -772,7 +854,29 @@ impl Comparable for PyMemoryView {
 
 impl Hashable for PyMemoryView {
     fn hash(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
-        vm._hash(&zelf.obj)
+        zelf.hash
+            .get_or_try_init(|| {
+                zelf.try_not_released(vm)?;
+                if !zelf.options.readonly {
+                    return Err(
+                        vm.new_value_error("cannot hash writable memoryview object".to_owned())
+                    );
+                }
+                let guard;
+                let vec;
+                let bytes = match zelf.as_contiguous() {
+                    Some(bytes) => {
+                        guard = bytes;
+                        &*guard
+                    }
+                    None => {
+                        vec = zelf.to_contiguous();
+                        vec.as_slice()
+                    }
+                };
+                Ok(vm.state.hash_secret.hash_bytes(bytes))
+            })
+            .map(|&x| x)
     }
 }
 

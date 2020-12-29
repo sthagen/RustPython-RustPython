@@ -56,7 +56,8 @@ class TestRaise(unittest.TestCase):
                 raise
         self.assertRaises(TypeError, reraise)
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_finally_reraise(self):
         def reraise():
             try:
@@ -214,7 +215,6 @@ class TestCause(unittest.TestCase):
 
 class TestTraceback(unittest.TestCase):
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_sets_traceback(self):
         try:
             raise IndexError()
@@ -239,7 +239,8 @@ class TestTracebackType(unittest.TestCase):
     def raiser(self):
         raise ValueError
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_attrs(self):
         try:
             self.raiser()
@@ -275,7 +276,8 @@ class TestTracebackType(unittest.TestCase):
         tb.tb_next = new_tb
         self.assertIs(tb.tb_next, new_tb)
 
-    @unittest.skip("TODO: RUSTPYTHON")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_constructor(self):
         other_tb = get_tb()
         frame = sys._getframe()
@@ -376,8 +378,6 @@ class TestContext(unittest.TestCase):
         else:
             self.fail("No exception raised")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_raise_finally(self):
         try:
             try:
@@ -389,8 +389,6 @@ class TestContext(unittest.TestCase):
         else:
             self.fail("No exception raised")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_context_manager(self):
         class ContextManager:
             def __enter__(self):

@@ -150,8 +150,6 @@ class AbstractMemoryTests:
             l = m.tolist()
             self.assertEqual(l, list(b"abcdef"))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_compare(self):
         # memoryviews can compare for equality with other objects
         # having the buffer interface.
@@ -323,8 +321,6 @@ class AbstractMemoryTests:
     def test_getbuf_fail(self):
         self.assertRaises(TypeError, self._view, {})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hash(self):
         # Memoryviews of readonly (hashable) types are hashable, and they
         # hash as hash(obj.tobytes()).
@@ -343,8 +339,6 @@ class AbstractMemoryTests:
         m.release()
         self.assertRaises(ValueError, hash, m)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hash_writable(self):
         # Memoryviews of writable types are unhashable
         tp = self.rw_type

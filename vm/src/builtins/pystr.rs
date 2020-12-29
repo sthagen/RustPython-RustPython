@@ -26,7 +26,7 @@ use crate::pyobject::{
     TypeProtocol,
 };
 use crate::sliceable::PySliceableSequence;
-use crate::slots::{Comparable, Hashable, PyComparisonOp};
+use crate::slots::{Comparable, Hashable, Iterable, PyComparisonOp, PyIter};
 use crate::VirtualMachine;
 use rustpython_common::hash;
 
@@ -70,6 +70,11 @@ where
         s.as_ref().to_owned().into()
     }
 }
+impl AsRef<str> for PyStrRef {
+    fn as_ref(&self) -> &str {
+        &self.value
+    }
+}
 
 impl From<String> for PyStr {
     fn from(s: String) -> PyStr {
@@ -90,12 +95,14 @@ impl fmt::Display for PyStr {
 }
 
 impl TryIntoRef<PyStr> for String {
+    #[inline]
     fn try_into_ref(self, vm: &VirtualMachine) -> PyResult<PyRef<PyStr>> {
         Ok(PyStr::from(self).into_ref(vm))
     }
 }
 
 impl TryIntoRef<PyStr> for &str {
+    #[inline]
     fn try_into_ref(self, vm: &VirtualMachine) -> PyResult<PyRef<PyStr>> {
         Ok(PyStr::from(self).into_ref(vm))
     }
@@ -114,12 +121,13 @@ impl PyValue for PyStrIterator {
     }
 }
 
-#[pyimpl]
-impl PyStrIterator {
-    #[pymethod(name = "__next__")]
-    fn next(&self, vm: &VirtualMachine) -> PyResult<String> {
-        let value = &*self.string.value;
-        let start = self.position.load();
+#[pyimpl(with(PyIter))]
+impl PyStrIterator {}
+
+impl PyIter for PyStrIterator {
+    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        let value = &*zelf.string.value;
+        let start = zelf.position.load();
         if start == value.len() {
             return Err(vm.new_stop_iteration());
         }
@@ -134,17 +142,12 @@ impl PyStrIterator {
             end.unwrap_or(start + 4)
         };
 
-        if let Ok(_stored) = self.position.compare_exchange(start, end) {
-            Ok(value[start..end].to_owned())
+        if zelf.position.compare_exchange(start, end).is_ok() {
+            Ok(value[start..end].into_pyobject(vm))
         } else {
             // already taken from elsewhere
-            self.next(vm)
+            Self::next(zelf, vm)
         }
-    }
-
-    #[pymethod(name = "__iter__")]
-    fn iter(zelf: PyRef<Self>) -> PyRef<Self> {
-        zelf
     }
 }
 
@@ -161,12 +164,13 @@ impl PyValue for PyStrReverseIterator {
     }
 }
 
-#[pyimpl]
-impl PyStrReverseIterator {
-    #[pymethod(name = "__next__")]
-    fn next(&self, vm: &VirtualMachine) -> PyResult<String> {
-        let value = &*self.string.value;
-        let end = self.position.load();
+#[pyimpl(with(PyIter))]
+impl PyStrReverseIterator {}
+
+impl PyIter for PyStrReverseIterator {
+    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        let value = &*zelf.string.value;
+        let end = zelf.position.load();
         if end == 0 {
             return Err(vm.new_stop_iteration());
         }
@@ -178,21 +182,16 @@ impl PyStrReverseIterator {
                     break;
                 }
             }
-            start.unwrap_or(end - 4)
+            start.unwrap_or_else(|| end.saturating_sub(4))
         };
 
-        let stored = self.position.swap(start);
+        let stored = zelf.position.swap(start);
         if end != stored {
             // already taken from elsewhere
-            return self.next(vm);
+            return Self::next(zelf, vm);
         }
 
-        Ok(value[start..end].to_owned())
-    }
-
-    #[pymethod(name = "__iter__")]
-    fn iter(zelf: PyRef<Self>) -> PyRef<Self> {
-        zelf
+        Ok(value[start..end].into_pyobject(vm))
     }
 }
 
@@ -206,7 +205,7 @@ struct StrArgs {
     errors: OptionalArg<PyStrRef>,
 }
 
-#[pyimpl(flags(BASETYPE), with(Hashable, Comparable))]
+#[pyimpl(flags(BASETYPE), with(Hashable, Comparable, Iterable))]
 impl PyStr {
     #[pyslot]
     fn tp_new(cls: PyTypeRef, args: StrArgs, vm: &VirtualMachine) -> PyResult<PyStrRef> {
@@ -243,7 +242,10 @@ impl PyStr {
         if other.isinstance(&vm.ctx.types.str_type) {
             Ok(self.value.py_add(borrow_value(&other)))
         } else {
-            Err(vm.new_type_error(format!("Cannot add {} and {}", self, other)))
+            Err(vm.new_type_error(format!(
+                "can only concatenate str (not \"{}\") to str",
+                other.class().name
+            )))
         }
     }
 
@@ -1045,14 +1047,6 @@ impl PyStr {
     }
 
     #[pymethod(magic)]
-    fn iter(zelf: PyRef<Self>) -> PyStrIterator {
-        PyStrIterator {
-            position: AtomicCell::new(0),
-            string: zelf,
-        }
-    }
-
-    #[pymethod(magic)]
     fn reversed(zelf: PyRef<Self>) -> PyStrReverseIterator {
         let end = zelf.value.len();
 
@@ -1083,6 +1077,16 @@ impl Comparable for PyStr {
         Ok(op
             .eval_ord(zelf.borrow_value().cmp(other.borrow_value()))
             .into())
+    }
+}
+
+impl Iterable for PyStr {
+    fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+        Ok(PyStrIterator {
+            position: AtomicCell::new(0),
+            string: zelf,
+        }
+        .into_object(vm))
     }
 }
 

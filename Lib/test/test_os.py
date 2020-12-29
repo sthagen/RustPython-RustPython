@@ -190,8 +190,6 @@ class FileTests(unittest.TestCase):
         new = sys.getrefcount(path)
         self.assertEqual(old, new)
 
-    # TODO: RUSTPYTHON (OSError: Bad file descriptor (os error 9))
-    @unittest.expectedFailure
     def test_read(self):
         with open(support.TESTFN, "w+b") as fobj:
             fobj.write(b"spam")
@@ -1890,6 +1888,12 @@ class TestInvalidFD(unittest.TestCase):
         def helper(self):
             if  hasattr(os, f):
                 self.check(getattr(os, f))
+
+        # TODO: RUSTPYTHON; io.FileIO(fd) should check if the fd passed is valid
+        if f == "fdopen":
+            # this is test_fdopen
+            helper = unittest.expectedFailure(helper)
+
         return helper
     for f in singles:
         locals()["test_"+f] = get_single(f)
@@ -3067,6 +3071,7 @@ class SendfileTestServer(asyncore.dispatcher, threading.Thread):
         raise
 
 
+@unittest.skip("TODO: RUSTPYTHON (ValueError: invalid mode: 'xb')")
 @unittest.skipUnless(hasattr(os, 'sendfile'), "test needs os.sendfile()")
 class TestSendfile(unittest.TestCase):
 
