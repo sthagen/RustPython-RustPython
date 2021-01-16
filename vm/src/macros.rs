@@ -1,17 +1,4 @@
 #[macro_export]
-macro_rules! no_kwargs {
-    ( $vm: ident, $args:ident ) => {
-        // Zero-arg case
-        if $args.kwargs.len() != 0 {
-            return Err($vm.new_type_error(format!(
-                "Expected no keyword arguments (got: {})",
-                $args.kwargs.len()
-            )));
-        }
-    };
-}
-
-#[macro_export]
 macro_rules! py_module {
     ( $vm:expr, $module_name:expr, { $($name:expr => $value:expr),* $(,)? }) => {{
         let module = $vm.new_module($module_name, $vm.ctx.new_dict());
@@ -268,4 +255,22 @@ cfg_if::cfg_if! {
             };
         }
     }
+}
+
+/// A modified version of the hashmap! macro from the maplit crate
+macro_rules! hashmap {
+    (@single $($x:tt)*) => (());
+    (@count $($rest:expr),*) => (<[()]>::len(&[$(hashmap!(@single $rest)),*]));
+
+    (hasher=$hasher:expr, $($key:expr => $value:expr,)+) => { hashmap!(hasher=$hasher, $($key => $value),+) };
+    (hasher=$hasher:expr, $($key:expr => $value:expr),*) => {
+        {
+            let _cap = hashmap!(@count $($key),*);
+            let mut _map = ::std::collections::HashMap::with_capacity_and_hasher(_cap, $hasher);
+            $(
+                let _ = _map.insert($key, $value);
+            )*
+            _map
+        }
+    };
 }

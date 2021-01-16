@@ -23,6 +23,7 @@ use crossbeam_utils::atomic::AtomicCell;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
+use rustpython_common::borrow::BorrowValue;
 
 #[derive(Debug)]
 pub struct BufferRef(Box<dyn Buffer>);
@@ -499,7 +500,7 @@ impl PyMemoryView {
             .get_pos(i)
             .ok_or_else(|| vm.new_index_error("index out of range".to_owned()))?;
         let itemsize = zelf.options.itemsize;
-        let data = zelf.format_spec.pack(&[value], vm)?;
+        let data = zelf.format_spec.pack(vec![value], vm)?;
         zelf.obj_bytes_mut()[i..i + itemsize].copy_from_slice(&data);
         Ok(())
     }
@@ -654,6 +655,7 @@ impl PyMemoryView {
     fn toreadonly(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         zelf.try_not_released(vm)?;
         let buffer = BufferRef(Box::new(zelf.clone()));
+        zelf.exports.fetch_add(1);
         Ok(PyMemoryView {
             obj: zelf.obj.clone(),
             buffer,
@@ -701,6 +703,48 @@ impl PyMemoryView {
         };
 
         bytes_to_hex(bytes, sep, bytes_per_sep, vm)
+    }
+
+    // TODO: support cast shape
+    #[pymethod]
+    fn cast(zelf: PyRef<Self>, format: PyStrRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        zelf.try_not_released(vm)?;
+        if !zelf.options.contiguous {
+            return Err(vm.new_type_error(
+                "memoryview: casts are restricted to C-contiguous views".to_owned(),
+            ));
+        }
+
+        let format_spec = Self::parse_format(format.borrow_value(), vm)?;
+        let itemsize = format_spec.size();
+        let bytelen = zelf.options.len * zelf.options.itemsize;
+
+        if bytelen % itemsize != 0 {
+            return Err(
+                vm.new_type_error("memoryview: length is not a multiple of itemsize".to_owned())
+            );
+        }
+
+        let buffer = BufferRef(Box::new(zelf.clone()));
+        zelf.exports.fetch_add(1);
+
+        Ok(PyMemoryView {
+            obj: zelf.obj.clone(),
+            buffer,
+            options: BufferOptions {
+                itemsize,
+                len: bytelen / itemsize,
+                format: format.to_string().into(),
+                ..zelf.options.clone()
+            },
+            released: AtomicCell::new(false),
+            stop: zelf.stop + itemsize - zelf.options.itemsize,
+            exports: AtomicCell::new(0),
+            format_spec,
+            hash: OnceCell::new(),
+            ..*zelf
+        }
+        .into_ref(vm))
     }
 
     fn eq(zelf: &PyRef<Self>, other: &PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {

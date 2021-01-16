@@ -64,7 +64,7 @@ pub type PyResult<T = PyObjectRef> = Result<T, PyBaseExceptionRef>; // A valid v
 /// For attributes we do not use a dict, but a hashmap. This is probably
 /// faster, unordered, and only supports strings as keys.
 /// TODO: class attributes should maintain insertion order (use IndexMap here)
-pub type PyAttributes = HashMap<String, PyObjectRef>;
+pub type PyAttributes = HashMap<String, PyObjectRef, ahash::RandomState>;
 
 // TODO: remove this impl
 impl fmt::Display for PyObjectRef {
@@ -1104,9 +1104,11 @@ pub trait PyClassImpl: PyClassDef {
     fn extend_slots(slots: &mut PyTypeSlots);
 
     fn make_slots() -> PyTypeSlots {
-        let mut slots = PyTypeSlots::default();
-        slots.flags = Self::TP_FLAGS;
-        slots.name = PyRwLock::new(Some(Self::TP_NAME.to_owned()));
+        let mut slots = PyTypeSlots {
+            flags: Self::TP_FLAGS,
+            name: PyRwLock::new(Some(Self::TP_NAME.to_owned())),
+            ..Default::default()
+        };
         Self::extend_slots(&mut slots);
         slots
     }

@@ -570,11 +570,8 @@ impl PyInt {
     }
 
     #[pymethod(name = "as_integer_ratio")]
-    fn as_integer_ratio(&self, vm: &VirtualMachine) -> PyResult {
-        Ok(vm.ctx.new_tuple(vec![
-            vm.ctx.new_bigint(&self.value),
-            vm.ctx.new_bigint(&BigInt::one()),
-        ]))
+    fn as_integer_ratio(&self, vm: &VirtualMachine) -> (PyObjectRef, BigInt) {
+        (vm.ctx.new_bigint(&self.value), BigInt::one())
     }
 
     #[pymethod]
@@ -888,7 +885,7 @@ fn detect_base(c: &u8) -> Option<u32> {
 }
 
 // Retrieve inner int value:
-pub fn get_value(obj: &PyObjectRef) -> &BigInt {
+pub(crate) fn get_value(obj: &PyObjectRef) -> &BigInt {
     &obj.payload::<PyInt>().unwrap().value
 }
 
@@ -911,7 +908,7 @@ pub(crate) fn try_int(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<BigInt
                 vm.to_repr(obj)?,
             ))),
         }
-    };
+    }
 
     // test for strings and bytes
     if let Some(s) = obj.downcast_ref::<PyStr>() {

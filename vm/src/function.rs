@@ -10,7 +10,6 @@ use crate::vm::VirtualMachine;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use result_like::impl_option_like;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::RangeInclusive;
 
@@ -178,9 +177,7 @@ impl FuncArgs {
         self.kwargs.swap_remove(name)
     }
 
-    pub fn remaining_keywords<'a>(
-        &'a mut self,
-    ) -> impl Iterator<Item = (String, PyObjectRef)> + 'a {
+    pub fn remaining_keywords(&mut self) -> impl Iterator<Item = (String, PyObjectRef)> + '_ {
         self.kwargs.drain(..)
     }
 
@@ -327,9 +324,9 @@ impl<T> KwArgs<T> {
         self.0.remove(name)
     }
 }
-impl<T> From<HashMap<String, T>> for KwArgs<T> {
-    fn from(kwargs: HashMap<String, T>) -> Self {
-        KwArgs(kwargs.into_iter().collect())
+impl<T> std::iter::FromIterator<(String, T)> for KwArgs<T> {
+    fn from_iter<I: IntoIterator<Item = (String, T)>>(iter: I) -> Self {
+        KwArgs(iter.into_iter().collect())
     }
 }
 impl<T> Default for KwArgs<T> {

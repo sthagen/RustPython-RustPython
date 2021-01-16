@@ -103,11 +103,11 @@ mod decl {
     #[derive(FromArgs)]
     #[allow(dead_code)]
     struct CompileArgs {
-        #[pyarg(positional)]
+        #[pyarg(any)]
         source: Either<PyStrRef, PyBytesRef>,
-        #[pyarg(positional)]
+        #[pyarg(any)]
         filename: PyStrRef,
-        #[pyarg(positional)]
+        #[pyarg(any)]
         mode: PyStrRef,
         #[pyarg(any, optional)]
         flags: OptionalArg<PyIntRef>,
@@ -320,8 +320,8 @@ mod decl {
     }
 
     #[pyfunction]
-    fn globals(vm: &VirtualMachine) -> PyResult<PyDictRef> {
-        Ok(vm.current_globals().clone())
+    fn globals(vm: &VirtualMachine) -> PyDictRef {
+        vm.current_globals().clone()
     }
 
     #[pyfunction]
