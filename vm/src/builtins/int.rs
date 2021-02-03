@@ -128,6 +128,23 @@ impl_try_from_object_int!(
     (u64, to_u64),
 );
 
+// _PyLong_AsUnsignedLongMask
+pub fn bigint_unsigned_mask(v: &BigInt) -> u32 {
+    v.to_u32()
+        .or_else(|| v.to_i32().map(|i| i as u32))
+        .unwrap_or_else(|| {
+            let (sign, digits) = v.to_u32_digits();
+            let mut out = 0u32;
+            for digit in digits {
+                out = out.wrapping_shl(32) | digit;
+            }
+            match sign {
+                num_bigint::Sign::Minus => out * -1i32 as u32,
+                _ => out,
+            }
+        })
+}
+
 fn inner_pow(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
     if int2.is_negative() {
         let v1 = to_float(int1, vm)?;
@@ -428,11 +445,37 @@ impl PyInt {
                 self.general_op(
                     other,
                     |a, b| {
-                        if b.is_negative() {
-                            Err(vm.new_value_error("modular inverses not supported".to_owned()))
+                        let i = if b.is_negative() {
+                            // modular multiplicative inverse
+                            // based on rust-num/num-integer#10, should hopefully be published soon
+                            fn normalize(a: BigInt, n: &BigInt) -> BigInt {
+                                let a = a % n;
+                                if a.is_negative() {
+                                    a + n
+                                } else {
+                                    a
+                                }
+                            }
+                            fn inverse(a: BigInt, n: &BigInt) -> Option<BigInt> {
+                                use num_integer::*;
+                                let ExtendedGcd { gcd, x: c, .. } = a.extended_gcd(n);
+                                if gcd.is_one() {
+                                    Some(normalize(c, n))
+                                } else {
+                                    None
+                                }
+                            }
+                            let a = inverse(a % modulus, modulus).ok_or_else(|| {
+                                vm.new_value_error(
+                                    "base is not invertible for the given modulus".to_owned(),
+                                )
+                            })?;
+                            let b = -b;
+                            a.modpow(&b, modulus)
                         } else {
-                            Ok(vm.ctx.new_int(a.modpow(b, modulus)))
-                        }
+                            a.modpow(b, modulus)
+                        };
+                        Ok(vm.ctx.new_int(i))
                     },
                     vm,
                 )

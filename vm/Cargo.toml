@@ -15,7 +15,10 @@ flame-it = ["flame", "flamer"]
 freeze-stdlib = ["rustpython-pylib"]
 jit = ["rustpython-jit"]
 threading = ["rustpython-common/threading"]
-compile-parse = ["rustpython-parser", "rustpython-compiler"]
+compile-parse = ["parser", "compiler"]
+ast = ["rustpython-ast"]
+compiler = ["rustpython-compiler", "rustpython-compiler-core", "ast"]
+parser = ["rustpython-parser", "ast"]
 
 ssl = ["openssl", "openssl-sys", "openssl-probe"]
 
@@ -37,11 +40,12 @@ num-iter = "0.1.39"
 rand = "0.8"
 rand_core = "0.6"
 getrandom = { version = "0.2", features = ["js"] }
-mt19937 = "2.0"
 log = "0.4"
 rustpython-derive = { path = "../derive", version = "0.1.2" }
+rustpython-ast = { path = "../ast", optional = true, version = "0.1" }
 rustpython-parser = { path = "../parser", optional = true, version = "0.1.2" }
 rustpython-compiler = { path = "../compiler/porcelain", optional = true, version = "0.1.2" }
+rustpython-compiler-core = { path = "../compiler", optional = true, version = "0.1.2" }
 rustpython-bytecode = { path = "../bytecode", version = "0.1.2" }
 rustpython-jit = { path = "../jit", optional = true, version = "0.1.2" }
 rustpython-pylib = { path = "pylib-crate", optional = true, version = "0.1.0" }
@@ -62,23 +66,29 @@ crc = "^1.0.0"
 bitflags = "1.2.1"
 libc = "0.2"
 nix = "0.18"
-csv = "1.1.1"
+csv-core = "0.1"
 paste = "0.1"
 base64 = "0.13"
 is-macro = "0.1"
 result-like = "^0.3"
 foreign-types-shared = "0.1"
-num_enum = "0.4"
+num_enum = "0.5"
 bstr = "0.2.12"
 crossbeam-utils = "0.8"
 parking_lot = "0.11"
 thread_local = "1.0"
-cfg-if = "0.1.10"
+cfg-if = "1.0"
 timsort = "0.1"
 thiserror = "1.0"
 atty = "0.2"
 static_assertions = "1.1"
 half = "1.6"
+
+# RustPython crates implementing functionality based on CPython
+mt19937 = "2.0"
+sre-engine = { git = "https://github.com/RustPython/sre-engine" }
+# to work on sre-engine locally
+# sre-engine = { path = "../../sre-engine" }
 
 ## unicode stuff
 unicode_names2 = "0.4"
@@ -112,13 +122,14 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 openssl-sys = { version = "0.9", optional = true }
 openssl-probe = { version = "0.1", optional = true }
 utime = "0.3"
+which = "4.0"
 
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dependencies]
 num_cpus = "1"
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "redox")))'.dependencies]
 dns-lookup = "1.0"
-flate2 = { version = "1.0", features = ["zlib"], default-features = false }
+flate2 = { version = "1.0.20", features = ["zlib"], default-features = false }
 libz-sys = "1.0"
 
 [target.'cfg(windows)'.dependencies]

@@ -181,6 +181,10 @@ pub struct PySettings {
 
     /// PYTHONHASHSEED=x
     pub hash_seed: Option<u32>,
+
+    /// -u, PYTHONUNBUFFERED=x
+    // TODO: use this; can TextIOWrapper even work with a non-buffered?
+    pub stdio_unbuffered: bool,
 }
 
 /// Trace events for sys.settrace and sys.setprofile.
@@ -221,6 +225,7 @@ impl Default for PySettings {
             path_list: vec![],
             argv: vec![],
             hash_seed: None,
+            stdio_unbuffered: false,
         }
     }
 }
@@ -282,7 +287,7 @@ impl VirtualMachine {
             initialized: false,
         };
 
-        let frozen = frozen::get_module_inits(&vm);
+        let frozen = frozen::map_frozen(&vm, frozen::get_module_inits()).collect();
         PyRc::get_mut(&mut vm.state).unwrap().frozen = frozen;
 
         module::init_module_dict(
@@ -1034,7 +1039,10 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub fn extract_elements<T: TryFromObject>(&self, value: &PyObjectRef) -> PyResult<Vec<T>> {
+    pub fn extract_elements_func<T, F>(&self, value: &PyObjectRef, func: F) -> PyResult<Vec<T>>
+    where
+        F: Fn(PyObjectRef) -> PyResult<T>,
+    {
         // Extract elements from item, if possible:
         let cls = value.class();
         if cls.is(&self.ctx.types.tuple_type) {
@@ -1043,7 +1051,7 @@ impl VirtualMachine {
                 .unwrap()
                 .borrow_value()
                 .iter()
-                .map(|obj| T::try_from_object(self, obj.clone()))
+                .map(|obj| func(obj.clone()))
                 .collect()
         } else if cls.is(&self.ctx.types.list_type) {
             value
@@ -1051,12 +1059,16 @@ impl VirtualMachine {
                 .unwrap()
                 .borrow_value()
                 .iter()
-                .map(|obj| T::try_from_object(self, obj.clone()))
+                .map(|obj| func(obj.clone()))
                 .collect()
         } else {
             let iter = iterator::get_iter(self, value.clone())?;
-            iterator::get_all(self, &iter)
+            iterator::try_map(self, &iter, |obj| func(obj))
         }
+    }
+
+    pub fn extract_elements<T: TryFromObject>(&self, value: &PyObjectRef) -> PyResult<Vec<T>> {
+        self.extract_elements_func(value, |obj| T::try_from_object(self, obj))
     }
 
     pub fn map_iterable_object<F, R>(
@@ -1111,6 +1123,21 @@ impl VirtualMachine {
             .mro_find_map(|cls| cls.slots.getattro.load())
             .unwrap();
         getattro(obj, attr_name, self)
+    }
+
+    pub fn get_attribute_opt<T>(
+        &self,
+        obj: PyObjectRef,
+        attr_name: T,
+    ) -> PyResult<Option<PyObjectRef>>
+    where
+        T: TryIntoRef<PyStr>,
+    {
+        match self.get_attribute(obj, attr_name) {
+            Ok(attr) => Ok(Some(attr)),
+            Err(e) if e.isinstance(&self.ctx.exceptions.attribute_error) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn set_attr<K, V>(&self, obj: &PyObjectRef, attr_name: K, attr_value: V) -> PyResult

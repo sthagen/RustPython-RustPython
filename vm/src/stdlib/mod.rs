@@ -3,7 +3,7 @@ use crate::vm::VirtualMachine;
 use std::collections::HashMap;
 
 pub mod array;
-#[cfg(feature = "rustpython-parser")]
+#[cfg(feature = "rustpython-ast")]
 pub(crate) mod ast;
 mod atexit;
 mod binascii;
@@ -29,6 +29,7 @@ mod re;
 mod serde_json;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod socket;
+mod sre;
 mod string;
 #[cfg(feature = "rustpython-compiler")]
 mod symtable;
@@ -94,6 +95,7 @@ pub fn get_module_inits() -> HashMap<String, StdlibInitFunc, ahash::RandomState>
         "regex_crate".to_owned() => Box::new(re::make_module),
         "_random".to_owned() => Box::new(random::make_module),
         "_serde_json".to_owned() => Box::new(serde_json::make_module),
+        "_sre".to_owned() => Box::new(sre::make_module),
         "_string".to_owned() => Box::new(string::make_module),
         "_struct".to_owned() => Box::new(pystruct::make_module),
         "time".to_owned() => Box::new(time_module::make_module),
@@ -105,12 +107,16 @@ pub fn get_module_inits() -> HashMap<String, StdlibInitFunc, ahash::RandomState>
     };
 
     // Insert parser related modules:
-    #[cfg(feature = "rustpython-parser")]
+    #[cfg(feature = "rustpython-ast")]
     {
         modules.insert(
             "_ast".to_owned(),
             Box::new(ast::make_module) as StdlibInitFunc,
         );
+    }
+
+    #[cfg(feature = "rustpython-parser")]
+    {
         modules.insert("keyword".to_owned(), Box::new(keyword::make_module));
         modules.insert("tokenize".to_owned(), Box::new(tokenize::make_module));
     }
