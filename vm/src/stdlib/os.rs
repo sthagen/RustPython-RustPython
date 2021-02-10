@@ -191,17 +191,16 @@ impl IntoPyException for &'_ io::Error {
                 _ => vm.ctx.exceptions.os_error.clone(),
             },
         };
-        let os_error = vm.new_exception_msg(exc_type, self.to_string());
         let errno = self.raw_os_error().into_pyobject(vm);
-        vm.set_attr(os_error.as_object(), "errno", errno).unwrap();
-        os_error
+        let msg = vm.ctx.new_str(self.to_string());
+        vm.new_exception(exc_type, vec![errno, msg])
     }
 }
 
 #[cfg(unix)]
 impl IntoPyException for nix::Error {
     fn into_pyexception(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
-        let nix_error = match self {
+        match self {
             nix::Error::InvalidPath => {
                 let exc_type = vm.ctx.exceptions.file_not_found_error.clone();
                 vm.new_exception_msg(exc_type, self.to_string())
@@ -213,16 +212,15 @@ impl IntoPyException for nix::Error {
             nix::Error::UnsupportedOperation => vm.new_runtime_error(self.to_string()),
             nix::Error::Sys(errno) => {
                 let exc_type = posix::convert_nix_errno(vm, errno);
-                vm.new_exception_msg(exc_type, self.to_string())
+                vm.new_exception(
+                    exc_type,
+                    vec![
+                        vm.ctx.new_int(errno as i32),
+                        vm.ctx.new_str(self.to_string()),
+                    ],
+                )
             }
-        };
-
-        if let nix::Error::Sys(errno) = self {
-            vm.set_attr(nix_error.as_object(), "errno", vm.ctx.new_int(errno as i32))
-                .unwrap();
         }
-
-        nix_error
     }
 }
 
@@ -2328,6 +2326,30 @@ mod posix {
             SupportFunc::new(vm, "umask", umask, Some(false), Some(false), Some(false)),
             SupportFunc::new(vm, "execv", execv, None, None, None),
         ]
+    }
+
+    /// Return a string containing the name of the user logged in on the
+    /// controlling terminal of the process.
+    ///
+    /// Exceptions:
+    ///
+    /// - `OSError`: Raised if login name could not be determined (`getlogin()`
+    ///   returned a null pointer).
+    /// - `UnicodeDecodeError`: Raised if login name contained invalid UTF-8 bytes.
+    #[pyfunction]
+    fn getlogin(vm: &VirtualMachine) -> PyResult<String> {
+        // Get a pointer to the login name string. The string is statically
+        // allocated and might be overwritten on subsequent calls to this
+        // function or to `cuserid()`. See man getlogin(3) for more information.
+        let ptr = unsafe { libc::getlogin() };
+        if ptr.is_null() {
+            return Err(vm.new_os_error("unable to determine login name".to_owned()));
+        }
+        let slice = unsafe { ffi::CStr::from_ptr(ptr) };
+        slice
+            .to_str()
+            .map(|s| s.to_owned())
+            .map_err(|e| vm.new_unicode_decode_error(format!("unable to decode login name: {}", e)))
     }
 }
 #[cfg(unix)]
