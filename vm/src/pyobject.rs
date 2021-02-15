@@ -449,13 +449,9 @@ impl<T: PyValue> TryFromObject for PyRefExact<T> {
         let cls = obj.class();
         if cls.is(target_cls) {
             drop(cls);
-            let obj = obj.downcast().map_err(|obj| {
-                vm.new_runtime_error(format!(
-                    "Unexpected payload '{}' for type '{}'",
-                    target_cls.name,
-                    obj.class().name,
-                ))
-            })?;
+            let obj = obj
+                .downcast()
+                .map_err(|obj| pyref_payload_error(vm, target_cls, obj))?;
             Ok(Self { obj })
         } else if cls.issubclass(target_cls) {
             Err(vm.new_type_error(format!(
@@ -1129,7 +1125,7 @@ pub trait PyStructSequence: StaticType + PyClassImpl + Sized + 'static {
     fn repr(zelf: PyRef<PyTuple>, vm: &VirtualMachine) -> PyResult<String> {
         let format_field = |(value, name)| {
             let s = vm.to_repr(value)?;
-            Ok(format!("{}: {}", name, s))
+            Ok(format!("{}={}", name, s))
         };
         let (body, suffix) =
             if let Some(_guard) = rustpython_vm::vm::ReprGuard::enter(vm, zelf.as_object()) {
@@ -1150,6 +1146,15 @@ pub trait PyStructSequence: StaticType + PyClassImpl + Sized + 'static {
                 (String::new(), "...")
             };
         Ok(format!("{}({}{})", Self::TP_NAME, body, suffix))
+    }
+
+    #[pymethod(magic)]
+    fn reduce(zelf: PyRef<PyTuple>, vm: &VirtualMachine) -> PyObjectRef {
+        vm.ctx.new_tuple(vec![
+            zelf.clone_class().into_object(),
+            vm.ctx
+                .new_tuple(vec![vm.ctx.new_tuple(zelf.borrow_value().to_vec())]),
+        ])
     }
 
     #[extend_class]
