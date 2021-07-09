@@ -1,15 +1,16 @@
 use super::os::PyPathLike;
-use super::socket::PySocketRef;
+use super::socket::{self, PySocketRef};
 use crate::builtins::{pytype, weakref::PyWeak, PyStrRef, PyTypeRef};
 use crate::byteslike::{PyBytesLike, PyRwBytesLike};
 use crate::common::lock::{PyRwLock, PyRwLockWriteGuard};
 use crate::exceptions::{create_exception_type, IntoPyException, PyBaseExceptionRef};
 use crate::function::OptionalArg;
-use crate::pyobject::{
-    BorrowValue, Either, IntoPyObject, ItemProtocol, PyCallable, PyClassImpl, PyObjectRef, PyRef,
-    PyResult, PyValue, StaticType,
-};
+use crate::utils::Either;
 use crate::VirtualMachine;
+use crate::{
+    IntoPyObject, ItemProtocol, PyCallable, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue,
+    StaticType,
+};
 
 use crossbeam_utils::atomic::AtomicCell;
 use foreign_types_shared::{ForeignType, ForeignTypeRef};
@@ -143,7 +144,7 @@ fn _ssl_enum_certificates(store_name: PyStrRef, vm: &VirtualMachine) -> PyResult
     let open_fns = [CertStore::open_current_user, CertStore::open_local_machine];
     let stores = open_fns
         .iter()
-        .filter_map(|open| open(store_name.borrow_value()).ok())
+        .filter_map(|open| open(store_name.as_str()).ok())
         .collect::<Vec<_>>();
     let certs = stores.iter().map(|s| s.certs()).flatten().map(|c| {
         let cert = vm.ctx.new_bytes(c.to_der().to_owned());
@@ -223,7 +224,7 @@ fn _ssl_rand_add(string: Either<PyStrRef, PyBytesLike>, entropy: f64) {
         }
     };
     match string {
-        Either::A(s) => f(s.borrow_value().as_bytes()),
+        Either::A(s) => f(s.as_str().as_bytes()),
         Either::B(b) => b.with_ref(f),
     }
 }
@@ -341,7 +342,7 @@ impl PySslContext {
 
     #[pymethod]
     fn set_ciphers(&self, cipherlist: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
-        let ciphers = cipherlist.borrow_value();
+        let ciphers = cipherlist.as_str();
         if ciphers.contains('\0') {
             return Err(vm.new_value_error("embedded null character".to_owned()));
         }
@@ -459,10 +460,10 @@ impl PySslContext {
         if let Some(cadata) = args.cadata {
             let cert = match cadata {
                 Either::A(s) => {
-                    if !s.borrow_value().is_ascii() {
+                    if !s.as_str().is_ascii() {
                         return Err(vm.new_type_error("Must be an ascii string".to_owned()));
                     }
-                    X509::from_pem(s.borrow_value().as_bytes())
+                    X509::from_pem(s.as_str().as_bytes())
                 }
                 Either::B(b) => b.with_ref(X509::from_der),
             };
@@ -565,7 +566,7 @@ impl PySslContext {
         };
 
         if let Some(hostname) = &args.server_hostname {
-            let hostname = hostname.borrow_value();
+            let hostname = hostname.as_str();
             if hostname.is_empty() || hostname.starts_with('.') {
                 return Err(vm.new_value_error(
                     "server_hostname cannot be an empty string or start with a leading dot."
@@ -607,7 +608,6 @@ impl PySslContext {
 }
 
 #[derive(FromArgs)]
-// #[allow(dead_code)]
 struct WrapSocketArgs {
     #[pyarg(any)]
     sock: PySocketRef,
@@ -639,6 +639,76 @@ struct LoadCertChainArgs {
     keyfile: Option<PyPathLike>,
     #[pyarg(any, optional)]
     password: Option<Either<PyStrRef, PyCallable>>,
+}
+
+struct SocketTimeout {
+    // Err is true if the socket is blocking
+    deadline: Result<Instant, bool>,
+}
+impl SocketTimeout {
+    fn get(s: &socket::PySocket) -> Self {
+        let deadline = s.get_timeout().map(|d| Instant::now() + d);
+        Self { deadline }
+    }
+}
+enum SelectRet {
+    Nonblocking,
+    TimedOut,
+    IsBlocking,
+    Closed,
+    Ok,
+}
+fn ssl_select(sock: &socket::PySocket, needs: SslNeeds, timeout: &SocketTimeout) -> SelectRet {
+    let sock = sock.sock();
+    let timeout = match &timeout.deadline {
+        Ok(deadline) => match deadline.checked_duration_since(Instant::now()) {
+            Some(timeout) => timeout,
+            None => return SelectRet::TimedOut,
+        },
+        Err(true) => return SelectRet::IsBlocking,
+        Err(false) => return SelectRet::Nonblocking,
+    };
+    if socket::sock_fileno(&sock) == socket::INVALID_SOCKET {
+        return SelectRet::Closed;
+    }
+    let res = socket::sock_select(
+        &sock,
+        match needs {
+            SslNeeds::Read => socket::SelectKind::Read,
+            SslNeeds::Write => socket::SelectKind::Write,
+        },
+        Some(timeout),
+    );
+    match res {
+        Ok(true) => SelectRet::TimedOut,
+        _ => SelectRet::Ok,
+    }
+}
+#[derive(Clone, Copy)]
+enum SslNeeds {
+    Read,
+    Write,
+}
+
+fn socket_needs(
+    err: &ssl::Error,
+    sock: &socket::PySocket,
+    timeout: &SocketTimeout,
+) -> (Option<SslNeeds>, SelectRet) {
+    let needs = match err.code() {
+        ssl::ErrorCode::WANT_READ => Some(SslNeeds::Read),
+        ssl::ErrorCode::WANT_WRITE => Some(SslNeeds::Write),
+        _ => None,
+    };
+    let state = needs.map_or(SelectRet::Ok, |needs| ssl_select(sock, needs, &timeout));
+    (needs, state)
+}
+
+fn socket_closed_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
+    vm.new_exception_msg(
+        ssl_error(vm),
+        "Underlying socket has been closed.".to_owned(),
+    )
 }
 
 #[pyclass(module = "ssl", name = "_SSLSocket")]
@@ -747,74 +817,127 @@ impl PySslSocket {
     #[pymethod]
     fn do_handshake(&self, vm: &VirtualMachine) -> PyResult<()> {
         let mut stream = self.stream.write();
-        let timeout = stream.get_ref().timeout.load();
-        let deadline = if timeout > 0.0 {
-            Some((std::time::Duration::from_secs_f64(timeout), Instant::now()))
-        } else {
-            None
-        };
-        let err = loop {
+        let timeout = SocketTimeout::get(stream.get_ref());
+        loop {
             let err = match stream.do_handshake() {
                 Ok(()) => return Ok(()),
                 Err(e) => e,
             };
-            match err.code() {
-                ssl::ErrorCode::WANT_READ | ssl::ErrorCode::WANT_WRITE => {
-                    if let Some((timeout, ref start)) = deadline {
-                        if start.elapsed() >= timeout {
-                            let socket_timeout = vm.class("_socket", "timeout");
-                            return Err(vm.new_exception_msg(
-                                socket_timeout,
-                                "The handshake operation timed out".to_owned(),
-                            ));
-                        }
-                    } else if timeout == 0.0 {
-                        // socket's non-blocking, we tried once and now it needs more to read/write
-                        break err;
-                    }
-                    continue; // keep blocking
+            let (needs, state) = socket_needs(&err, stream.get_ref(), &timeout);
+            match state {
+                SelectRet::TimedOut => {
+                    return Err(socket::timeout_error_msg(
+                        vm,
+                        "The handshake operation timed out".to_owned(),
+                    ))
                 }
-                _ => break err,
+                SelectRet::Closed => return Err(socket_closed_error(vm)),
+                SelectRet::Nonblocking => {}
+                _ => {
+                    if needs.is_some() {
+                        continue;
+                    }
+                }
             }
-        };
-        Err(convert_ssl_error(vm, err))
+            return Err(convert_ssl_error(vm, err));
+        }
     }
 
     #[pymethod]
     fn write(&self, data: PyBytesLike, vm: &VirtualMachine) -> PyResult<usize> {
         let mut stream = self.stream.write();
-        data.with_ref(|b| stream.ssl_write(b))
-            .map_err(|e| convert_ssl_error(vm, e))
+        let data = data.borrow_buf();
+        let data = &*data;
+        let timeout = SocketTimeout::get(stream.get_ref());
+        let state = ssl_select(stream.get_ref(), SslNeeds::Write, &timeout);
+        match state {
+            SelectRet::TimedOut => {
+                return Err(socket::timeout_error_msg(
+                    vm,
+                    "The write operation timed out".to_owned(),
+                ))
+            }
+            SelectRet::Closed => return Err(socket_closed_error(vm)),
+            _ => {}
+        }
+        loop {
+            let err = match stream.ssl_write(data) {
+                Ok(len) => return Ok(len),
+                Err(e) => e,
+            };
+            let (needs, state) = socket_needs(&err, stream.get_ref(), &timeout);
+            match state {
+                SelectRet::TimedOut => {
+                    return Err(socket::timeout_error_msg(
+                        vm,
+                        "The write operation timed out".to_owned(),
+                    ))
+                }
+                SelectRet::Closed => return Err(socket_closed_error(vm)),
+                SelectRet::Nonblocking => {}
+                _ => {
+                    if needs.is_some() {
+                        continue;
+                    }
+                }
+            }
+            return Err(convert_ssl_error(vm, err));
+        }
     }
 
     #[pymethod]
     fn read(&self, n: usize, buffer: OptionalArg<PyRwBytesLike>, vm: &VirtualMachine) -> PyResult {
         let mut stream = self.stream.write();
-        let ret_nread = buffer.is_present();
-        let ssl_res = if let OptionalArg::Present(buffer) = buffer {
-            buffer.with_ref(|buf| stream.ssl_read(buf).map(|n| vm.ctx.new_int(n)))
+        let mut inner_buffer = if let OptionalArg::Present(buffer) = &buffer {
+            Either::A(buffer.borrow_buf_mut())
         } else {
-            let mut buf = vec![0u8; n];
-            stream.ssl_read(&mut buf).map(|n| {
-                buf.truncate(n);
-                vm.ctx.new_bytes(buf)
-            })
+            Either::B(vec![0u8; n])
         };
-        ssl_res.or_else(|e| {
-            if e.code() == ssl::ErrorCode::ZERO_RETURN
+        let buf = match &mut inner_buffer {
+            Either::A(b) => &mut **b,
+            Either::B(b) => b.as_mut_slice(),
+        };
+        let buf = match buf.get_mut(..n) {
+            Some(b) => b,
+            None => buf,
+        };
+        let timeout = SocketTimeout::get(stream.get_ref());
+        let count = loop {
+            let err = match stream.ssl_read(buf) {
+                Ok(count) => break count,
+                Err(e) => e,
+            };
+            if err.code() == ssl::ErrorCode::ZERO_RETURN
                 && stream.get_shutdown() == ssl::ShutdownState::RECEIVED
             {
-                Ok(if ret_nread {
-                    vm.ctx.new_int(0)
-                } else {
-                    vm.ctx.new_bytes(vec![])
-                })
-            } else {
-                Err(convert_ssl_error(vm, e))
+                break 0;
             }
-        })
-
-        // .map_err(|e| convert_ssl_error(vm, e))?;
+            let (needs, state) = socket_needs(&err, stream.get_ref(), &timeout);
+            match state {
+                SelectRet::TimedOut => {
+                    return Err(socket::timeout_error_msg(
+                        vm,
+                        "The read operation timed out".to_owned(),
+                    ))
+                }
+                SelectRet::Nonblocking => {}
+                _ => {
+                    if needs.is_some() {
+                        continue;
+                    }
+                }
+            }
+            return Err(convert_ssl_error(vm, err));
+        };
+        let ret = match inner_buffer {
+            Either::A(_buf) => vm.ctx.new_int(count),
+            Either::B(mut buf) => {
+                buf.truncate(n);
+                buf.shrink_to_fit();
+                vm.ctx.new_bytes(buf)
+            }
+        };
+        Ok(ret)
     }
 }
 
@@ -911,6 +1034,7 @@ fn cert_to_py(vm: &VirtualMachine, cert: &X509Ref, binary: bool) -> PyResult {
         )?;
         dict.set_item("notAfter", vm.ctx.new_str(cert.not_after().to_string()), vm)?;
 
+        #[allow(clippy::manual_map)]
         if let Some(names) = cert.subject_alt_names() {
             let san = names
                 .iter()
@@ -966,9 +1090,9 @@ fn parse_version_info(mut n: i64) -> (u8, u8, u8, u8, u8) {
 
 pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     // if openssl is vendored, it doesn't know the locations of system certificates
-    match option_env!("OPENSSL_NO_VENDOR") {
-        None | Some("0") => {}
-        _ => openssl_probe::init_ssl_cert_env_vars(),
+    #[cfg(feature = "ssl-vendor")]
+    if let None | Some("0") = option_env!("OPENSSL_NO_VENDOR") {
+        openssl_probe::init_ssl_cert_env_vars();
     }
     openssl::init();
 

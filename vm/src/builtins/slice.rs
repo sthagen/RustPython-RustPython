@@ -1,14 +1,14 @@
 // sliceobject.{h,c} in CPython
 
-use super::int::PyInt;
+use super::int::{PyInt, PyIntRef};
 use super::pytype::PyTypeRef;
 use crate::function::{FuncArgs, OptionalArg};
-use crate::pyobject::{
-    BorrowValue, IntoPyObject, PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef,
-    PyResult, PyValue, TryIntoRef, TypeProtocol,
-};
 use crate::slots::{Comparable, Hashable, PyComparisonOp, Unhashable};
 use crate::VirtualMachine;
+use crate::{
+    IntoPyObject, PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
+    TryIntoRef, TypeProtocol,
+};
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{One, Signed, Zero};
 
@@ -67,9 +67,9 @@ impl PySlice {
 
         Ok(format!(
             "slice({}, {}, {})",
-            start_repr.borrow_value(),
-            stop_repr.borrow_value(),
-            step_repr.borrow_value()
+            start_repr.as_str(),
+            stop_repr.as_str(),
+            step_repr.as_str()
         ))
     }
 
@@ -134,7 +134,7 @@ impl PySlice {
         } else {
             // Clone the value, not the reference.
             let this_step: PyRef<PyInt> = self.step(vm).try_into_ref(vm)?;
-            step = this_step.borrow_value().clone();
+            step = this_step.as_bigint().clone();
 
             if step.is_zero() {
                 return Err(vm.new_value_error("slice step cannot be zero.".to_owned()));
@@ -168,7 +168,7 @@ impl PySlice {
             };
         } else {
             let this_start: PyRef<PyInt> = self.start(vm).try_into_ref(vm)?;
-            start = this_start.borrow_value().clone();
+            start = this_start.as_bigint().clone();
 
             if start < Zero::zero() {
                 // From end of array
@@ -188,7 +188,7 @@ impl PySlice {
             stop = if backwards { lower } else { upper };
         } else {
             let this_stop: PyRef<PyInt> = self.stop(vm).try_into_ref(vm)?;
-            stop = this_stop.borrow_value().clone();
+            stop = this_stop.as_bigint().clone();
 
             if stop < Zero::zero() {
                 // From end of array
@@ -205,16 +205,17 @@ impl PySlice {
     }
 
     #[pymethod(name = "indices")]
-    fn indices(&self, length: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        if let Some(length) = length.payload::<PyInt>() {
-            let (start, stop, step) = self.inner_indices(length.borrow_value(), vm)?;
+    fn indices(&self, length: PyIntRef, vm: &VirtualMachine) -> PyResult {
+        let length = length.as_bigint();
+        if length.is_negative() {
+            Err(vm.new_value_error("length should not be negative.".to_owned()))
+        } else {
+            let (start, stop, step) = self.inner_indices(length, vm)?;
             Ok(vm.ctx.new_tuple(vec![
                 vm.ctx.new_int(start),
                 vm.ctx.new_int(stop),
                 vm.ctx.new_int(step),
             ]))
-        } else {
-            Ok(vm.ctx.not_implemented())
         }
     }
 }
@@ -279,7 +280,7 @@ fn to_index_value(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<Option<Big
             "slice indices must be integers or None or have an __index__ method".to_owned(),
         ))
     })?;
-    Ok(Some(result.borrow_value().clone()))
+    Ok(Some(result.as_bigint().clone()))
 }
 
 #[pyclass(module = false, name = "EllipsisType")]

@@ -13,13 +13,13 @@ use crate::builtins::PyTypeRef;
 use crate::byteslike::try_bytes_like;
 use crate::cformat::CFormatBytes;
 use crate::function::{OptionalArg, OptionalOption};
-use crate::pyobject::{
-    BorrowValue, Either, IdProtocol, PyComparisonValue, PyIterable, PyObjectRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol,
-};
 use crate::sliceable::PySliceableSequence;
 use crate::slots::PyComparisonOp;
+use crate::utils::Either;
 use crate::vm::VirtualMachine;
+use crate::{
+    IdProtocol, PyComparisonValue, PyIterable, PyObjectRef, PyResult, PyValue, TryFromObject,
+};
 use rustpython_common::hash;
 
 #[derive(Debug, Default, Clone)]
@@ -60,7 +60,7 @@ impl ByteInnerNewOptions {
         let encoding = encoding
             .ok_or_else(|| vm.new_type_error("string argument without an encoding".to_owned()))?;
         let bytes = pystr::encode_string(s, Some(encoding), errors.into_option(), vm)?;
-        Ok(bytes.borrow_value().to_vec().into())
+        Ok(bytes.as_bytes().to_vec().into())
     }
 
     fn get_value_from_source(source: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyBytesInner> {
@@ -68,7 +68,7 @@ impl ByteInnerNewOptions {
     }
 
     fn get_value_from_size(size: PyIntRef, vm: &VirtualMachine) -> PyResult<PyBytesInner> {
-        let size = size.borrow_value().to_isize().ok_or_else(|| {
+        let size = size.as_bigint().to_isize().ok_or_else(|| {
             vm.new_overflow_error("cannot fit 'int' into an index-sized integer".to_owned())
         })?;
         let size = if size < 0 {
@@ -163,7 +163,7 @@ impl ByteInnerFindOptions {
     ) -> PyResult<(Vec<u8>, std::ops::Range<usize>)> {
         let sub = match self.sub {
             Either::A(v) => v.elements.to_vec(),
-            Either::B(int) => vec![int.borrow_value().byte_or(vm)?],
+            Either::B(int) => vec![int.as_bigint().byte_or(vm)?],
         };
         let range = anystr::adjust_indices(self.start, self.end, len);
         Ok((sub, range))
@@ -229,24 +229,73 @@ impl ByteInnerTranslateOptions {
 
 pub type ByteInnerSplitOptions<'a> = anystr::SplitArgs<'a, PyBytesInner>;
 
-#[allow(clippy::len_without_is_empty)]
 impl PyBytesInner {
-    pub fn repr(&self) -> String {
-        let mut res = String::with_capacity(self.elements.len());
-        for i in self.elements.iter() {
-            match i {
-                9 => res.push_str("\\t"),
-                10 => res.push_str("\\n"),
-                13 => res.push_str("\\r"),
-                32..=126 => res.push(*(i) as char),
-                _ => res.push_str(&format!("\\x{:02x}", i)),
+    pub fn repr(&self, prefix: &str, suffix: &str) -> String {
+        use std::fmt::Write;
+
+        let mut out_len = 0usize;
+        let mut squote = 0;
+        let mut dquote = 0;
+
+        for &ch in self.elements.iter() {
+            let incr = match ch {
+                b'\'' => {
+                    squote += 1;
+                    1
+                }
+                b'"' => {
+                    dquote += 1;
+                    1
+                }
+                b'\\' | b'\t' | b'\r' | b'\n' => 2,
+                0x20..=0x7e => 1,
+                _ => 4, // \xHH
+            };
+            // TODO: OverflowError
+            out_len = out_len.checked_add(incr).unwrap();
+        }
+
+        let (quote, num_escaped_quotes) = anystr::choose_quotes_for_repr(squote, dquote);
+        // we'll be adding backslashes in front of the existing inner quotes
+        out_len += num_escaped_quotes;
+
+        // 3 is for b prefix + outer quotes
+        out_len += 3 + prefix.len() + suffix.len();
+
+        let mut res = String::with_capacity(out_len);
+        res.push_str(prefix);
+        res.push('b');
+        res.push(quote);
+        for &ch in self.elements.iter() {
+            match ch {
+                b'\t' => res.push_str("\\t"),
+                b'\n' => res.push_str("\\n"),
+                b'\r' => res.push_str("\\r"),
+                // printable ascii range
+                0x20..=0x7e => {
+                    let ch = ch as char;
+                    if ch == quote || ch == '\\' {
+                        res.push('\\');
+                    }
+                    res.push(ch);
+                }
+                _ => write!(res, "\\x{:02x}", ch).unwrap(),
             }
         }
+        res.push(quote);
+        res.push_str(suffix);
+
         res
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.elements.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
     }
 
     pub fn cmp(
@@ -280,7 +329,7 @@ impl PyBytesInner {
     ) -> PyResult<bool> {
         Ok(match needle {
             Either::A(byte) => self.elements.contains_str(byte.elements.as_slice()),
-            Either::B(int) => self.elements.contains(&int.borrow_value().byte_or(vm)?),
+            Either::B(int) => self.elements.contains(&int.as_bigint().byte_or(vm)?),
         })
     }
 
@@ -911,8 +960,8 @@ where
     F: Fn(&[u8]) -> R,
 {
     match_class!(match obj {
-        i @ PyBytes => Some(f(i.borrow_value())),
-        j @ PyByteArray => Some(f(&j.borrow_value().elements)),
+        i @ PyBytes => Some(f(i.as_bytes())),
+        j @ PyByteArray => Some(f(&j.borrow_buf())),
         _ => None,
     })
 }
@@ -1068,16 +1117,12 @@ pub fn bytes_decode(
     vm: &VirtualMachine,
 ) -> PyResult<PyStrRef> {
     let DecodeArgs { encoding, errors } = args;
-    vm.decode(zelf, encoding.clone(), errors)?
-        .downcast::<PyStr>()
-        .map_err(|obj| {
-            vm.new_type_error(format!(
-                "'{}' decoder returned '{}' instead of 'str'; use codecs.encode() to \
-                     encode arbitrary types",
-                encoding.as_ref().map_or("utf-8", |s| s.borrow_value()),
-                obj.class().name,
-            ))
-        })
+    let encoding = encoding
+        .as_ref()
+        .map_or(crate::codecs::DEFAULT_ENCODING, |s| s.as_str());
+    vm.state
+        .codec_registry
+        .decode_text(zelf, encoding, errors, vm)
 }
 
 fn hex_impl_no_sep(bytes: &[u8]) -> String {
@@ -1152,11 +1197,11 @@ pub fn bytes_to_hex(
         let b_guard;
         let sep = match &sep {
             Either::A(s) => {
-                s_guard = s.borrow_value();
+                s_guard = s.as_str();
                 s_guard.as_bytes()
             }
             Either::B(bytes) => {
-                b_guard = bytes.borrow_value();
+                b_guard = bytes.as_bytes();
                 b_guard
             }
         };
@@ -1195,7 +1240,7 @@ pub fn bytes_from_object(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<Vec
 
 pub fn value_from_object(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<u8> {
     vm.to_index(obj)?
-        .borrow_value()
+        .as_bigint()
         .to_u8()
         .ok_or_else(|| vm.new_value_error("byte must be in range(0, 256)".to_owned()))
 }

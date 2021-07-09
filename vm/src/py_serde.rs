@@ -3,9 +3,9 @@ use num_traits::sign::Signed;
 use serde::de::{DeserializeSeed, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq};
 
-use crate::builtins::{dict::PyDictRef, float, int, list::PyList, pybool, pystr, tuple::PyTuple};
-use crate::pyobject::{BorrowValue, ItemProtocol, PyObjectRef, TypeProtocol};
+use crate::builtins::{dict::PyDictRef, float, int, list::PyList, pybool, tuple::PyTuple, PyStr};
 use crate::VirtualMachine;
+use crate::{ItemProtocol, PyObjectRef, TypeProtocol};
 
 #[inline]
 pub fn serialize<S>(
@@ -16,7 +16,7 @@ pub fn serialize<S>(
 where
     S: serde::Serializer,
 {
-    PyObjectSerializer { vm, pyobject }.serialize(serializer)
+    PyObjectSerializer { pyobject, vm }.serialize(serializer)
 }
 
 #[inline]
@@ -39,7 +39,7 @@ pub struct PyObjectSerializer<'s> {
 
 impl<'s> PyObjectSerializer<'s> {
     pub fn new(vm: &'s VirtualMachine, pyobject: &'s PyObjectRef) -> Self {
-        PyObjectSerializer { vm, pyobject }
+        PyObjectSerializer { pyobject, vm }
     }
 
     fn clone_with_object(&self, pyobject: &'s PyObjectRef) -> PyObjectSerializer {
@@ -63,8 +63,8 @@ impl<'s> serde::Serialize for PyObjectSerializer<'s> {
                 }
                 seq.end()
             };
-        if self.pyobject.isinstance(&self.vm.ctx.types.str_type) {
-            serializer.serialize_str(pystr::borrow_value(&self.pyobject))
+        if let Some(s) = self.pyobject.payload::<PyStr>() {
+            serializer.serialize_str(s.as_ref())
         } else if self.pyobject.isinstance(&self.vm.ctx.types.float_type) {
             serializer.serialize_f64(float::get_value(self.pyobject))
         } else if self.pyobject.isinstance(&self.vm.ctx.types.bool_type) {
@@ -82,9 +82,9 @@ impl<'s> serde::Serialize for PyObjectSerializer<'s> {
                 serializer.serialize_i64(v.to_i64().ok_or_else(int_too_large)?)
             }
         } else if let Some(list) = self.pyobject.payload_if_subclass::<PyList>(self.vm) {
-            serialize_seq_elements(serializer, &list.borrow_value())
+            serialize_seq_elements(serializer, &list.borrow_vec())
         } else if let Some(tuple) = self.pyobject.payload_if_subclass::<PyTuple>(self.vm) {
-            serialize_seq_elements(serializer, tuple.borrow_value())
+            serialize_seq_elements(serializer, tuple.as_slice())
         } else if self.pyobject.isinstance(&self.vm.ctx.types.dict_type) {
             let dict: PyDictRef = self.pyobject.clone().downcast().unwrap();
             let pairs: Vec<_> = dict.into_iter().collect();

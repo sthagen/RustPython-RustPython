@@ -1,17 +1,18 @@
 use num_complex::Complex64;
 use num_traits::Zero;
+use std::convert::Infallible as Never;
 
 use super::float;
 use super::pystr::PyStr;
 use super::pytype::PyTypeRef;
 use crate::function::{OptionalArg, OptionalOption};
-use crate::pyobject::{
-    BorrowValue, IdProtocol, IntoPyObject, Never,
+use crate::slots::{Comparable, Hashable, PyComparisonOp};
+use crate::VirtualMachine;
+use crate::{
+    IdProtocol, IntoPyObject,
     PyArithmaticValue::{self, *},
     PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
 };
-use crate::slots::{Comparable, Hashable, PyComparisonOp};
-use crate::VirtualMachine;
 use rustpython_common::{float_ops, hash};
 
 /// Create a complex number from a real part and an optional imaginary part.
@@ -48,10 +49,8 @@ pub fn init(context: &PyContext) {
 fn to_op_complex(value: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<Complex64>> {
     let r = if let Some(complex) = value.payload_if_subclass::<PyComplex>(vm) {
         Some(complex.value)
-    } else if let Some(float) = float::to_op_float(value, vm)? {
-        Some(Complex64::new(float, 0.0))
     } else {
-        None
+        float::to_op_float(value, vm)?.map(|float| Complex64::new(float, 0.0))
     };
     Ok(r)
 }
@@ -284,7 +283,7 @@ impl PyComplex {
                             "complex() can't take second arg if first is a string".to_owned(),
                         ));
                     }
-                    let value = parse_str(s.borrow_value().trim()).ok_or_else(|| {
+                    let value = parse_str(s.as_str().trim()).ok_or_else(|| {
                         vm.new_value_error("complex() arg is a malformed string".to_owned())
                     })?;
                     return Self::from(value).into_ref_with_type(vm, cls);

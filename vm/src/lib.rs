@@ -17,7 +17,10 @@
 #![allow(clippy::upper_case_acronyms)]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/RustPython/RustPython/master/logo.png")]
 #![doc(html_root_url = "https://docs.rs/rustpython-vm/")]
-#![cfg_attr(target_os = "redox", feature(array_value_iter, const_generics))]
+#![cfg_attr(
+    target_os = "redox",
+    feature(array_value_iter, const_generics, bool_to_option)
+)]
 
 #[cfg(feature = "flame-it")]
 #[macro_use]
@@ -48,6 +51,7 @@ pub mod builtins;
 mod bytesinner;
 pub mod byteslike;
 pub mod cformat;
+mod codecs;
 mod coroutine;
 #[cfg(any(unix, windows, target_os = "wasi"))]
 mod crt_fd;
@@ -63,7 +67,7 @@ pub mod import;
 pub mod iterator;
 pub mod py_io;
 pub mod py_serde;
-pub mod pyobject;
+mod pyobject;
 mod pyobjectrc;
 pub mod readline;
 pub mod scope;
@@ -73,10 +77,12 @@ pub mod slots;
 pub mod stdlib;
 pub mod sysmodule;
 pub mod types;
+pub mod utils;
 mod version;
 mod vm;
 
-// pub use self::pyobject::Executor;
+// pub use self::Executor;
+pub use self::pyobject::*;
 pub use self::vm::{InitParameter, Interpreter, PySettings, VirtualMachine};
 pub use rustpython_bytecode as bytecode;
 pub use rustpython_common as common;

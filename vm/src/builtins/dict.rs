@@ -2,20 +2,20 @@ use crossbeam_utils::atomic::AtomicCell;
 use std::fmt;
 use std::mem::size_of;
 
-use super::pystr;
+use super::pystr::PyStrRef;
 use super::pytype::PyTypeRef;
 use super::set::PySet;
 use crate::dictdatatype::{self, DictKey};
 use crate::exceptions::PyBaseExceptionRef;
 use crate::function::{FuncArgs, KwArgs, OptionalArg};
 use crate::iterator;
-use crate::pyobject::{
-    BorrowValue, IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue::*, PyAttributes,
-    PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol,
-};
 use crate::slots::{Comparable, Hashable, Iterable, PyComparisonOp, PyIter, Unhashable};
 use crate::vm::{ReprGuard, VirtualMachine};
+use crate::{
+    IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue::*, PyAttributes, PyClassImpl,
+    PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    TypeProtocol,
+};
 
 pub type DictContentType = dictdatatype::Dict;
 
@@ -205,11 +205,7 @@ impl PyDict {
             for (key, value) in zelf {
                 let key_repr = vm.to_repr(&key)?;
                 let value_repr = vm.to_repr(&value)?;
-                str_parts.push(format!(
-                    "{}: {}",
-                    key_repr.borrow_value(),
-                    value_repr.borrow_value()
-                ));
+                str_parts.push(format!("{}: {}", key_repr, value_repr));
             }
 
             format!("{{{}}}", str_parts.join(", "))
@@ -452,8 +448,8 @@ impl PyDictRef {
     pub fn to_attributes(self) -> PyAttributes {
         let mut attrs = PyAttributes::default();
         for (key, value) in self {
-            let key = pystr::clone_value(&key);
-            attrs.insert(key, value);
+            let key: PyStrRef = key.downcast().expect("dict has non-string keys");
+            attrs.insert(key.as_ref().to_owned(), value);
         }
         attrs
     }
@@ -584,10 +580,7 @@ impl Iterator for DictIter {
     type Item = (PyObjectRef, PyObjectRef);
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.dict.entries.next_entry(&mut self.position) {
-            Some((key, value)) => Some((key, value)),
-            None => None,
-        }
+        self.dict.entries.next_entry(&mut self.position)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -625,7 +618,7 @@ macro_rules! dict_iterator {
                     let mut str_parts = vec![];
                     for (key, value) in zelf.dict.clone() {
                         let s = vm.to_repr(&($result_fn)(vm, key, value))?;
-                        str_parts.push(s.borrow_value().to_owned());
+                        str_parts.push(s.as_str().to_owned());
                     }
                     format!("{}([{}])", $class_name, str_parts.join(", "))
                 } else {

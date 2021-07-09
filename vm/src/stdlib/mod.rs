@@ -1,5 +1,5 @@
-use crate::pyobject::PyObjectRef;
 use crate::vm::VirtualMachine;
+use crate::PyObjectRef;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -8,6 +8,8 @@ pub mod array;
 pub(crate) mod ast;
 mod atexit;
 mod binascii;
+mod bisect;
+mod codecs;
 mod collections;
 mod csv;
 mod dis;
@@ -62,6 +64,8 @@ mod pwd;
 // libc is missing constants on redox
 #[cfg(all(unix, not(target_os = "redox")))]
 mod resource;
+#[cfg(target_os = "macos")]
+mod scproxy;
 #[cfg(not(target_arch = "wasm32"))]
 mod select;
 #[cfg(not(target_arch = "wasm32"))]
@@ -101,6 +105,8 @@ pub fn get_module_inits() -> StdlibMap {
             "array" => array::make_module,
             "atexit" => atexit::make_module,
             "binascii" => binascii::make_module,
+            "_bisect" => bisect::make_module,
+            "_codecs" => codecs::make_module,
             "_collections" => collections::make_module,
             "_csv" => csv::make_module,
             "dis" => dis::make_module,
@@ -185,6 +191,10 @@ pub fn get_module_inits() -> StdlibMap {
             "msvcrt" => msvcrt::make_module,
             "_winapi" => winapi::make_module,
             "winreg" => winreg::make_module,
+        }
+        #[cfg(target_os = "macos")]
+        {
+            "_scproxy" => scproxy::make_module,
         }
     }
 }

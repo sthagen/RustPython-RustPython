@@ -9,10 +9,10 @@ use crate::builtins::{code, list};
 #[cfg(feature = "rustpython-compiler")]
 use crate::compile;
 use crate::exceptions::PyBaseExceptionRef;
-use crate::pyobject::{BorrowValue, ItemProtocol, PyResult, PyValue, TryFromObject, TypeProtocol};
 use crate::scope::Scope;
 use crate::version::get_git_revision;
 use crate::vm::{InitParameter, VirtualMachine};
+use crate::{ItemProtocol, PyResult, PyValue, TryFromObject, TypeProtocol};
 
 pub(crate) fn init_importlib(
     vm: &mut VirtualMachine,
@@ -20,6 +20,13 @@ pub(crate) fn init_importlib(
 ) -> PyResult<()> {
     use crate::vm::thread::enter_vm;
     flame_guard!("init importlib");
+
+    // importlib_bootstrap needs these and it inlines checks to sys.modules before calling into
+    // import machinery, so this should bring some speedup
+    #[cfg(feature = "threading")]
+    import_builtin(vm, "_thread")?;
+    import_builtin(vm, "_warnings")?;
+    import_builtin(vm, "_weakref")?;
 
     let importlib = enter_vm(vm, || {
         let importlib = import_frozen(vm, "_frozen_importlib")?;
@@ -33,6 +40,15 @@ pub(crate) fn init_importlib(
     if initialize_parameter == InitParameter::External && cfg!(feature = "rustpython-compiler") {
         enter_vm(vm, || {
             flame_guard!("install_external");
+
+            // same deal as imports above
+            #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+            import_builtin(vm, crate::stdlib::os::MODULE_NAME)?;
+            #[cfg(windows)]
+            import_builtin(vm, "winreg")?;
+            import_builtin(vm, "_io")?;
+            import_builtin(vm, "marshal")?;
+
             let install_external = vm.get_attribute(importlib, "_install_external_importers")?;
             vm.invoke(&install_external, ())?;
             // Set pyc magic number to commit hash. Should be changed when bytecode will be more stable.
@@ -139,12 +155,12 @@ fn remove_importlib_frames_inner(
         return (None, false);
     };
 
-    let file_name = traceback.frame.code.source_path.borrow_value();
+    let file_name = traceback.frame.code.source_path.as_str();
 
     let (inner_tb, mut now_in_importlib) =
         remove_importlib_frames_inner(vm, traceback.next.clone(), always_trim);
     if file_name == "_frozen_importlib" || file_name == "_frozen_importlib_external" {
-        if traceback.frame.code.obj_name.borrow_value() == "_call_with_frames_removed" {
+        if traceback.frame.code.obj_name.as_str() == "_call_with_frames_removed" {
             now_in_importlib = true;
         }
         if always_trim || now_in_importlib {

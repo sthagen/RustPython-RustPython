@@ -6,12 +6,13 @@ use crate::builtins::tuple::PyTupleRef;
 use crate::exceptions::{self, IntoPyException};
 use crate::function::{FuncArgs, KwArgs, OptionalArg};
 use crate::py_io;
-use crate::pyobject::{
-    BorrowValue, Either, IdProtocol, ItemProtocol, PyCallable, PyClassImpl, PyObjectRef, PyRef,
-    PyResult, PyValue, StaticType, TypeProtocol,
-};
 use crate::slots::{SlotGetattro, SlotSetattro};
+use crate::utils::Either;
 use crate::VirtualMachine;
+use crate::{
+    IdProtocol, ItemProtocol, PyCallable, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue,
+    StaticType, TypeProtocol,
+};
 
 use parking_lot::{
     lock_api::{RawMutex as RawMutexT, RawMutexTimed, RawReentrantMutex},
@@ -229,7 +230,7 @@ fn _thread_start_new_thread(
     vm: &VirtualMachine,
 ) -> PyResult<u64> {
     let args = FuncArgs::new(
-        args.borrow_value().to_owned(),
+        args.as_slice().to_owned(),
         kwargs
             .map_or_else(Default::default, |k| k.to_attributes())
             .into_iter()
@@ -253,17 +254,21 @@ fn _thread_start_new_thread(
 }
 
 fn run_thread(func: PyCallable, args: FuncArgs, vm: &VirtualMachine) {
-    if let Err(exc) = func.invoke(args, vm) {
-        // TODO: sys.unraisablehook
-        let stderr = std::io::stderr();
-        let mut stderr = py_io::IoWriter(stderr.lock());
-        let repr = vm.to_repr(&func.into_object()).ok();
-        let repr = repr
-            .as_ref()
-            .map_or("<object repr() failed>", |s| s.borrow_value());
-        writeln!(*stderr, "Exception ignored in thread started by: {}", repr)
-            .and_then(|()| exceptions::write_exception(&mut stderr, vm, &exc))
-            .ok();
+    match func.invoke(args, vm) {
+        Ok(_obj) => {}
+        Err(e) if e.isinstance(&vm.ctx.exceptions.system_exit) => {}
+        Err(exc) => {
+            // TODO: sys.unraisablehook
+            let stderr = std::io::stderr();
+            let mut stderr = py_io::IoWriter(stderr.lock());
+            let repr = vm.to_repr(&func.into_object()).ok();
+            let repr = repr
+                .as_ref()
+                .map_or("<object repr() failed>", |s| s.as_str());
+            writeln!(*stderr, "Exception ignored in thread started by: {}", repr)
+                .and_then(|()| exceptions::write_exception(&mut stderr, vm, &exc))
+                .ok();
+        }
     }
     SENTINELS.with(|sents| {
         for lock in sents.replace(Default::default()) {
@@ -273,6 +278,10 @@ fn run_thread(func: PyCallable, args: FuncArgs, vm: &VirtualMachine) {
         }
     });
     vm.state.thread_count.fetch_sub(1);
+}
+
+fn _thread_exit(vm: &VirtualMachine) -> PyResult {
+    Err(vm.new_exception_empty(vm.ctx.exceptions.system_exit.clone()))
 }
 
 thread_local!(static SENTINELS: RefCell<Vec<PyLockRef>> = RefCell::default());
@@ -323,7 +332,7 @@ impl PyLocal {
 impl SlotGetattro for PyLocal {
     fn getattro(zelf: PyRef<Self>, attr: PyStrRef, vm: &VirtualMachine) -> PyResult {
         let ldict = zelf.ldict(vm);
-        if attr.borrow_value() == "__dict__" {
+        if attr.as_str() == "__dict__" {
             Ok(ldict.into_object())
         } else {
             let zelf = zelf.into_object();
@@ -342,7 +351,7 @@ impl SlotSetattro for PyLocal {
         value: Option<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        if attr.borrow_value() == "__dict__" {
+        if attr.as_str() == "__dict__" {
             Err(vm.new_attribute_error(format!(
                 "{} attribute '__dict__' is read-only",
                 zelf.as_object()
@@ -369,6 +378,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         "get_ident" => named_function!(ctx, _thread, get_ident),
         "allocate_lock" => named_function!(ctx, _thread, allocate_lock),
         "start_new_thread" => named_function!(ctx, _thread, start_new_thread),
+        "exit" => named_function!(ctx, _thread, exit),
         "_set_sentinel" => named_function!(ctx, _thread, set_sentinel),
         "stack_size" => named_function!(ctx, _thread, stack_size),
         "_count" => named_function!(ctx, _thread, count),

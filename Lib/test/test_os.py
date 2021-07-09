@@ -1342,8 +1342,6 @@ class MakedirTests(unittest.TestCase):
                             'dir5', 'dir6')
         os.makedirs(path)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_mode(self):
         with support.temp_umask(0o002):
             base = support.TESTFN
@@ -2127,8 +2125,6 @@ class Pep383Tests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.dir)
 
-    # TODO: RUSTPYTHON (TypeError: Expected at least 1 arguments (0 given))
-    @unittest.expectedFailure
     def test_listdir(self):
         expected = self.unicodefn
         found = set(os.listdir(self.dir))
@@ -3620,8 +3616,6 @@ class FDInheritanceTests(unittest.TestCase):
         self.assertEqual(os.dup2(fd, fd3, inheritable=False), fd3)
         self.assertFalse(os.get_inheritable(fd3))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @unittest.skipUnless(hasattr(os, 'openpty'), "need os.openpty()")
     def test_openpty(self):
         master_fd, slave_fd = os.openpty()
@@ -3636,15 +3630,13 @@ class PathTConverterTests(unittest.TestCase):
     # function, cleanup function)
     functions = [
         ('stat', True, (), None),
-        ('lstat', False, (), None),
+        ('lstat', True, (), None),
         ('access', False, (os.F_OK,), None),
         ('chflags', False, (0,), None),
         ('lchflags', False, (0,), None),
         ('open', False, (0,), getattr(os, 'close', None)),
     ]
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_path_t_converter(self):
         str_filename = support.TESTFN
         if os.name == 'nt':
@@ -3689,8 +3681,6 @@ class PathTConverterTests(unittest.TestCase):
                             'os.PathLike'):
                         fn(fd, *extra_args)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_path_t_converter_and_custom_class(self):
         msg = r'__fspath__\(\) to return str or bytes, not %s'
         with self.assertRaisesRegex(TypeError, msg % r'int'):
@@ -3785,8 +3775,7 @@ class TestScandir(unittest.TestCase):
                                entry_lstat,
                                os.name == 'nt')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
+    @unittest.skipIf(sys.platform == "linux", "TODO: RUSTPYTHON, flaky test")
     def test_attributes(self):
         link = hasattr(os, 'link')
         symlink = support.can_symlink()
@@ -3855,8 +3844,6 @@ class TestScandir(unittest.TestCase):
         finally:
             os.chdir(old_dir)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_repr(self):
         entry = self.create_file_entry()
         self.assertEqual(repr(entry), "<DirEntry 'file.txt'>")
@@ -3873,8 +3860,6 @@ class TestScandir(unittest.TestCase):
         self.assertEqual(fspath,
                          os.path.join(os.fsencode(self.path),bytes_filename))
 
-    # TODO: RUSTPYTHON (FileNotFoundError: No such file or directory (os error 2))
-    @unittest.expectedFailure
     def test_removed_dir(self):
         path = os.path.join(self.path, 'dir')
 
@@ -3897,8 +3882,6 @@ class TestScandir(unittest.TestCase):
             self.assertRaises(FileNotFoundError, entry.stat)
             self.assertRaises(FileNotFoundError, entry.stat, follow_symlinks=False)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_removed_file(self):
         entry = self.create_file_entry()
         os.unlink(entry.path)
@@ -3918,8 +3901,6 @@ class TestScandir(unittest.TestCase):
             self.assertRaises(FileNotFoundError, entry.stat)
             self.assertRaises(FileNotFoundError, entry.stat, follow_symlinks=False)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_broken_symlink(self):
         if not support.can_symlink():
             return self.skipTest('cannot create symbolic link')
@@ -4118,8 +4099,6 @@ class TestPEP519(unittest.TestCase):
         self.assertRaises(ZeroDivisionError, self.fspath,
                           FakePath(ZeroDivisionError()))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pathlike_subclasshook(self):
         # bpo-38878: subclasshook causes subclass checks
         # true on abstract implementation.
@@ -4130,8 +4109,6 @@ class TestPEP519(unittest.TestCase):
 
 
 class TimesTests(unittest.TestCase):
-    # TODO: RUSTPYTHON (AttributeError: module 'os' has no attribute 'times')
-    @unittest.expectedFailure
     def test_times(self):
         times = os.times()
         self.assertIsInstance(times, os.times_result)

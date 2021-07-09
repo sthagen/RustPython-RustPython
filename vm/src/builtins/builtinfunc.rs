@@ -3,13 +3,12 @@ use std::fmt;
 use super::classmethod::PyClassMethod;
 use crate::builtins::pystr::PyStrRef;
 use crate::builtins::pytype::PyTypeRef;
-use crate::common::borrow::BorrowValue;
 use crate::function::{FuncArgs, PyNativeFunc};
-use crate::pyobject::{
-    PyClassImpl, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
-};
 use crate::slots::{Callable, SlotDescriptor};
 use crate::vm::VirtualMachine;
+use crate::{
+    PyClassImpl, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
+};
 
 pub struct PyNativeFuncDef {
     pub func: PyNativeFunc,
@@ -70,7 +69,7 @@ impl PyValue for PyBuiltinFunction {
 
 impl fmt::Debug for PyBuiltinFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "builtin function {}", self.value.name.borrow_value())
+        write!(f, "builtin function {}", self.value.name.as_str())
     }
 }
 
@@ -121,6 +120,23 @@ impl PyBuiltinFunction {
     #[pyproperty(magic)]
     fn doc(&self) -> Option<PyStrRef> {
         self.value.doc.clone()
+    }
+    #[pyproperty(name = "__self__")]
+    fn get_self(&self, vm: &VirtualMachine) -> PyObjectRef {
+        vm.ctx.none()
+    }
+    #[pymethod(magic)]
+    fn reduce(&self) -> PyStrRef {
+        // TODO: return (getattr, (self.object, self.name)) if this is a method
+        self.name()
+    }
+    #[pymethod(magic)]
+    fn reduce_ex(&self, _ver: PyObjectRef) -> PyStrRef {
+        self.name()
+    }
+    #[pymethod(magic)]
+    fn repr(&self) -> String {
+        format!("<built-in function {}>", self.value.name)
     }
 }
 

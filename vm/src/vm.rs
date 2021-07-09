@@ -22,20 +22,22 @@ use crate::builtins::pybool;
 use crate::builtins::pystr::{PyStr, PyStrRef};
 use crate::builtins::pytype::PyTypeRef;
 use crate::builtins::tuple::{PyTuple, PyTupleTyped};
+use crate::codecs::CodecsRegistry;
 use crate::common::{hash::HashSecret, lock::PyMutex, rc::PyRc};
 #[cfg(feature = "rustpython-compiler")]
 use crate::compile::{self, CompileError, CompileErrorType, CompileOpts};
 use crate::exceptions::{self, PyBaseException, PyBaseExceptionRef};
 use crate::frame::{ExecutionResult, Frame, FrameRef};
 use crate::function::{FuncArgs, IntoFuncArgs};
-use crate::pyobject::{
-    BorrowValue, Either, IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue, PyContext,
-    PyLease, PyMethod, PyObject, PyObjectRef, PyRef, PyRefExact, PyResult, PyValue, TryFromObject,
-    TryIntoRef, TypeProtocol,
-};
 use crate::scope::Scope;
 use crate::slots::PyComparisonOp;
+use crate::utils::Either;
 use crate::{builtins, bytecode, frozen, import, iterator, stdlib, sysmodule};
+use crate::{
+    IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue, PyContext, PyLease, PyMethod,
+    PyObject, PyObjectRef, PyRef, PyRefExact, PyResult, PyValue, TryFromObject, TryIntoRef,
+    TypeProtocol,
+};
 
 // use objects::ects;
 
@@ -122,6 +124,7 @@ pub struct PyGlobalState {
     pub thread_count: AtomicCell<usize>,
     pub hash_secret: HashSecret,
     pub atexit_funcs: PyMutex<Vec<(PyObjectRef, FuncArgs)>>,
+    pub codec_registry: CodecsRegistry,
 }
 
 pub const NSIG: usize = 64;
@@ -228,7 +231,10 @@ impl Default for PySettings {
             isolated: false,
             dev_mode: false,
             warnopts: vec![],
-            path_list: vec![],
+            path_list: vec![
+                #[cfg(all(feature = "pylib", not(feature = "freeze-stdlib")))]
+                rustpython_pylib::LIB_PATH.to_owned(),
+            ],
             argv: vec![],
             hash_seed: None,
             stdio_unbuffered: false,
@@ -267,6 +273,8 @@ impl VirtualMachine {
             None => rand::random(),
         };
 
+        let codec_registry = CodecsRegistry::new(&ctx);
+
         let mut vm = VirtualMachine {
             builtins,
             sys_module: sysmod,
@@ -289,6 +297,7 @@ impl VirtualMachine {
                 thread_count: AtomicCell::new(0),
                 hash_secret,
                 atexit_funcs: PyMutex::default(),
+                codec_registry,
             }),
             initialized: false,
         };
@@ -320,6 +329,20 @@ impl VirtualMachine {
             #[cfg(not(target_arch = "wasm32"))]
             import::import_builtin(self, "_signal")?;
 
+            import::init_importlib(self, initialize_parameter)?;
+
+            // set up the encodings search function
+            self.import("encodings", None, 0).map_err(|import_err| {
+                let err = self.new_runtime_error(
+                    "Could not import encodings. Is your RUSTPYTHONPATH set? If you don't have \
+                     access to a consistent external environment (e.g. if you're embedding \
+                     rustpython in another application), try enabling the freeze-stdlib feature"
+                        .to_owned(),
+                );
+                err.set_cause(Some(import_err));
+                err
+            })?;
+
             #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
             {
                 // this isn't fully compatible with CPython; it imports "io" and sets
@@ -348,8 +371,6 @@ impl VirtualMachine {
                 let io_open = self.get_attribute(io, "open")?;
                 self.set_attr(&self.builtins, "open", io_open)?;
             }
-
-            import::init_importlib(self, initialize_parameter)?;
 
             Ok(())
         };
@@ -621,6 +642,10 @@ impl VirtualMachine {
         self.new_exception_msg(name_error, msg)
     }
 
+    pub fn new_unsupported_unary_error(&self, a: &PyObjectRef, op: &str) -> PyBaseExceptionRef {
+        self.new_type_error(format!("bad operand type for {}: '{}'", op, a.class().name))
+    }
+
     pub fn new_unsupported_binop_error(
         &self,
         a: &PyObjectRef,
@@ -826,11 +851,6 @@ impl VirtualMachine {
         }
     }
 
-    pub fn to_pystr<'a, T: Into<&'a PyObjectRef>>(&'a self, obj: T) -> PyResult<String> {
-        let py_str_obj = self.to_str(obj.into())?;
-        Ok(py_str_obj.borrow_value().to_owned())
-    }
-
     pub fn to_repr(&self, obj: &PyObjectRef) -> PyResult<PyStrRef> {
         let repr = self.call_special_method(obj.clone(), "__repr__", ())?;
         PyStrRef::try_from_object(self, repr)
@@ -877,11 +897,9 @@ impl VirtualMachine {
     ) -> PyResult {
         // if the import inputs seem weird, e.g a package import or something, rather than just
         // a straight `import ident`
-        let weird = module.borrow_value().contains('.')
+        let weird = module.as_str().contains('.')
             || level != 0
-            || from_list
-                .as_ref()
-                .map_or(false, |x| !x.borrow_value().is_empty());
+            || from_list.as_ref().map_or(false, |x| !x.is_empty());
 
         let cached_module = if weird {
             None
@@ -1088,7 +1106,7 @@ impl VirtualMachine {
             value
                 .payload::<PyTuple>()
                 .unwrap()
-                .borrow_value()
+                .as_slice()
                 .iter()
                 .map(|obj| func(obj.clone()))
                 .collect()
@@ -1096,7 +1114,7 @@ impl VirtualMachine {
             value
                 .payload::<PyList>()
                 .unwrap()
-                .borrow_value()
+                .borrow_vec()
                 .iter()
                 .map(|obj| func(obj.clone()))
                 .collect()
@@ -1121,10 +1139,10 @@ impl VirtualMachine {
         match_class!(match obj {
             ref l @ PyList => {
                 let mut i: usize = 0;
-                let mut results = Vec::with_capacity(l.borrow_value().len());
+                let mut results = Vec::with_capacity(l.borrow_vec().len());
                 loop {
                     let elem = {
-                        let elements = &*l.borrow_value();
+                        let elements = &*l.borrow_vec();
                         if i >= elements.len() {
                             results.shrink_to_fit();
                             return Ok(Ok(results));
@@ -1140,7 +1158,7 @@ impl VirtualMachine {
                     i += 1;
                 }
             }
-            ref t @ PyTuple => Ok(t.borrow_value().iter().cloned().map(f).collect()),
+            ref t @ PyTuple => Ok(t.as_slice().iter().cloned().map(f).collect()),
             // TODO: put internal iterable type
             obj => {
                 let iter = iterator::get_iter(self, obj.clone())?;
@@ -1310,7 +1328,7 @@ impl VirtualMachine {
         name_str: PyStrRef,
         dict: Option<PyDictRef>,
     ) -> PyResult<Option<PyObjectRef>> {
-        let name = name_str.borrow_value();
+        let name = name_str.as_str();
         let obj_cls = obj.class();
         let cls_attr = match obj_cls.get_attr(name) {
             Some(descr) => {
@@ -1407,40 +1425,6 @@ impl VirtualMachine {
     ) -> Result<PyCodeRef, CompileError> {
         compile::compile(source, mode, source_path, opts)
             .map(|code| PyCode::new(self.map_codeobj(code)).into_ref(self))
-    }
-
-    fn call_codec_func(
-        &self,
-        func: &str,
-        obj: PyObjectRef,
-        encoding: Option<PyStrRef>,
-        errors: Option<PyStrRef>,
-    ) -> PyResult {
-        let codecsmodule = self.import("_codecs", None, 0)?;
-        let func = self.get_attribute(codecsmodule, func)?;
-        let mut args = vec![obj, encoding.into_pyobject(self)];
-        if let Some(errors) = errors {
-            args.push(errors.into_object());
-        }
-        self.invoke(&func, args)
-    }
-
-    pub fn decode(
-        &self,
-        obj: PyObjectRef,
-        encoding: Option<PyStrRef>,
-        errors: Option<PyStrRef>,
-    ) -> PyResult {
-        self.call_codec_func("decode", obj, encoding, errors)
-    }
-
-    pub fn encode(
-        &self,
-        obj: PyObjectRef,
-        encoding: Option<PyStrRef>,
-        errors: Option<PyStrRef>,
-    ) -> PyResult {
-        self.call_codec_func("encode", obj, encoding, errors)
     }
 
     pub fn _sub(&self, a: &PyObjectRef, b: &PyObjectRef) -> PyResult {
@@ -1631,6 +1615,30 @@ impl VirtualMachine {
         })
     }
 
+    pub fn _abs(&self, a: &PyObjectRef) -> PyResult<PyObjectRef> {
+        self.get_special_method(a.clone(), "__abs__")?
+            .map_err(|_| self.new_unsupported_unary_error(a, "abs()"))?
+            .invoke((), self)
+    }
+
+    pub fn _pos(&self, a: &PyObjectRef) -> PyResult {
+        self.get_special_method(a.clone(), "__pos__")?
+            .map_err(|_| self.new_unsupported_unary_error(a, "unary +"))?
+            .invoke((), self)
+    }
+
+    pub fn _neg(&self, a: &PyObjectRef) -> PyResult {
+        self.get_special_method(a.clone(), "__neg__")?
+            .map_err(|_| self.new_unsupported_unary_error(a, "unary -"))?
+            .invoke((), self)
+    }
+
+    pub fn _invert(&self, a: &PyObjectRef) -> PyResult {
+        self.get_special_method(a.clone(), "__invert__")?
+            .map_err(|_| self.new_unsupported_unary_error(a, "unary ~"))?
+            .invoke((), self)
+    }
+
     // Perform a comparison, raising TypeError when the requested comparison
     // operator is not supported.
     // see: CPython PyObject_RichCompare
@@ -1717,7 +1725,7 @@ impl VirtualMachine {
                             len.class().name
                         ))
                     })?
-                    .borrow_value();
+                    .as_bigint();
                 if len.is_negative() {
                     return Err(self.new_value_error("__len__() should return >= 0".to_owned()));
                 }
@@ -2030,7 +2038,7 @@ impl PyThread {
 #[cfg(test)]
 mod tests {
     use super::Interpreter;
-    use crate::builtins::{int, pystr};
+    use crate::builtins::{int, PyStr};
     use num_bigint::ToBigInt;
 
     #[test]
@@ -2050,8 +2058,8 @@ mod tests {
             let a = vm.ctx.new_str(String::from("Hello "));
             let b = vm.ctx.new_int(4_i32);
             let res = vm._mul(&a, &b).unwrap();
-            let value = pystr::borrow_value(&res);
-            assert_eq!(value, String::from("Hello Hello Hello Hello "))
+            let value = res.payload::<PyStr>().unwrap();
+            assert_eq!(value.as_ref(), "Hello Hello Hello Hello ")
         })
     }
 }

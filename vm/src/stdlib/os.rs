@@ -1,6 +1,8 @@
 use std::ffi;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::DirEntryExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{env, fs};
@@ -8,6 +10,8 @@ use std::{env, fs};
 use crate::crt_fd::Fd;
 use crossbeam_utils::atomic::AtomicCell;
 use num_bigint::BigInt;
+#[cfg(unix)]
+use strum_macros::EnumString;
 
 use super::errno::errors;
 use crate::builtins::bytes::{PyBytes, PyBytesRef};
@@ -21,12 +25,13 @@ use crate::byteslike::PyBytesLike;
 use crate::common::lock::PyRwLock;
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
 use crate::function::{ArgumentError, FromArgs, FuncArgs, OptionalArg};
-use crate::pyobject::{
-    BorrowValue, Either, IntoPyObject, ItemProtocol, PyObjectRef, PyRef, PyResult,
-    PyStructSequence, PyValue, StaticType, TryFromObject, TypeProtocol,
-};
 use crate::slots::PyIter;
-use crate::vm::VirtualMachine;
+use crate::utils::Either;
+use crate::vm::{ReprGuard, VirtualMachine};
+use crate::{
+    IntoPyObject, ItemProtocol, PyObjectRef, PyRef, PyResult, PyStructSequence, PyValue,
+    StaticType, TryFromObject, TypeProtocol,
+};
 
 #[cfg(unix)]
 use std::os::unix::ffi as ffi_ext;
@@ -132,7 +137,7 @@ fn fspath(obj: PyObjectRef, check_for_nul: bool, vm: &VirtualMachine) -> PyResul
     let match1 = |obj: &PyObjectRef| {
         let pathlike = match_class!(match obj {
             ref s @ PyStr => {
-                let s = s.borrow_value();
+                let s = s.as_str();
                 check_nul(s.as_bytes())?;
                 PyPathLike {
                     path: s.into(),
@@ -155,14 +160,14 @@ fn fspath(obj: PyObjectRef, check_for_nul: bool, vm: &VirtualMachine) -> PyResul
     }
     let method = vm.get_method_or_type_error(obj.clone(), "__fspath__", || {
         format!(
-            "expected str, bytes or os.PathLike object, not '{}'",
+            "expected str, bytes or os.PathLike object, not {}",
             obj.class().name
         )
     })?;
     let result = vm.invoke(&method, ())?;
     match1(&result)?.ok_or_else(|| {
         vm.new_type_error(format!(
-            "expected {}.__fspath__() to return str or bytes, not '{}'",
+            "expected {}.__fspath__() to return str or bytes, not {}",
             obj.class().name,
             result.class().name,
         ))
@@ -183,7 +188,7 @@ enum PathOrFd {
 impl TryFromObject for PathOrFd {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
         match obj.downcast::<int::PyInt>() {
-            Ok(int) => int::try_to_primitive(int.borrow_value(), vm).map(Self::Fd),
+            Ok(int) => int::try_to_primitive(int.as_bigint(), vm).map(Self::Fd),
             Err(obj) => PyPathLike::try_from_object(vm, obj).map(Self::Path),
         }
     }
@@ -328,7 +333,7 @@ impl<const AVAILABLE: usize> FromArgs for DirFd<AVAILABLE> {
                         o.class().name
                     )))
                 })?;
-                let fd = int::try_to_primitive(fd.borrow_value(), vm)?;
+                let fd = int::try_to_primitive(fd.as_bigint(), vm)?;
                 Fd(fd)
             }
         };
@@ -383,6 +388,8 @@ fn os_unimpl<T>(func: &str, vm: &VirtualMachine) -> PyResult<T> {
 #[pymodule(name = "os")]
 mod _os {
     use super::*;
+
+    use rustpython_common::lock::OnceCell;
 
     #[pyattr]
     use libc::{
@@ -466,6 +473,7 @@ mod _os {
             }
             #[cfg(target_os = "redox")]
             {
+                let [] = dir_fd.0;
                 Fd::open(&name, flags, mode)
             }
         };
@@ -503,7 +511,7 @@ mod _os {
 
         let headers = headers
             .as_ref()
-            .map(|v| v.iter().map(|b| b.borrow_value()).collect::<Vec<_>>());
+            .map(|v| v.iter().map(|b| b.borrow_buf()).collect::<Vec<_>>());
         let headers = headers
             .as_ref()
             .map(|v| v.iter().map(|borrowed| &**borrowed).collect::<Vec<_>>());
@@ -516,7 +524,7 @@ mod _os {
 
         let trailers = trailers
             .as_ref()
-            .map(|v| v.iter().map(|b| b.borrow_value()).collect::<Vec<_>>());
+            .map(|v| v.iter().map(|b| b.borrow_buf()).collect::<Vec<_>>());
         let trailers = trailers
             .as_ref()
             .map(|v| v.iter().map(|borrowed| &**borrowed).collect::<Vec<_>>());
@@ -603,6 +611,8 @@ mod _os {
                 let res = if res < 0 { Err(errno_err(vm)) } else { Ok(()) };
                 return res;
             }
+            #[cfg(target_os = "redox")]
+            let [] = dir_fd.0;
             let res = unsafe { libc::mkdir(path.as_ptr(), mode as _) };
             if res < 0 {
                 Err(errno_err(vm))
@@ -615,7 +625,7 @@ mod _os {
 
     #[pyfunction]
     fn mkdirs(path: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
-        fs::create_dir_all(path.borrow_value()).map_err(|err| err.into_pyexception(vm))
+        fs::create_dir_all(path.as_str()).map_err(|err| err.into_pyexception(vm))
     }
 
     #[pyfunction]
@@ -627,7 +637,11 @@ mod _os {
     const LISTDIR_FD: bool = cfg!(all(unix, not(target_os = "redox")));
 
     #[pyfunction]
-    fn listdir(path: PathOrFd, vm: &VirtualMachine) -> PyResult {
+    fn listdir(path: OptionalArg<PathOrFd>, vm: &VirtualMachine) -> PyResult {
+        let path = match path {
+            OptionalArg::Present(path) => path,
+            OptionalArg::Missing => PathOrFd::Path(PyPathLike::new_str(".")),
+        };
         let list = match path {
             PathOrFd::Path(path) => {
                 let dir_iter = fs::read_dir(&path).map_err(|err| err.into_pyexception(vm))?;
@@ -682,12 +696,12 @@ mod _os {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let key: &ffi::OsStr = match key {
-            Either::A(ref s) => s.borrow_value().as_ref(),
-            Either::B(ref b) => bytes_as_osstr(b.borrow_value(), vm)?,
+            Either::A(ref s) => s.as_str().as_ref(),
+            Either::B(ref b) => bytes_as_osstr(b.as_bytes(), vm)?,
         };
         let value: &ffi::OsStr = match value {
-            Either::A(ref s) => s.borrow_value().as_ref(),
-            Either::B(ref b) => bytes_as_osstr(b.borrow_value(), vm)?,
+            Either::A(ref s) => s.as_str().as_ref(),
+            Either::B(ref b) => bytes_as_osstr(b.as_bytes(), vm)?,
         };
         env::set_var(key, value);
         Ok(())
@@ -696,8 +710,8 @@ mod _os {
     #[pyfunction]
     fn unsetenv(key: Either<PyStrRef, PyBytesRef>, vm: &VirtualMachine) -> PyResult<()> {
         let key: &ffi::OsStr = match key {
-            Either::A(ref s) => s.borrow_value().as_ref(),
-            Either::B(ref b) => bytes_as_osstr(b.borrow_value(), vm)?,
+            Either::A(ref s) => s.as_str().as_ref(),
+            Either::B(ref b) => bytes_as_osstr(b.as_bytes(), vm)?,
         };
         env::remove_var(key);
         Ok(())
@@ -717,6 +731,10 @@ mod _os {
     struct DirEntry {
         entry: fs::DirEntry,
         mode: OutputMode,
+        stat: OnceCell<PyObjectRef>,
+        lstat: OnceCell<PyObjectRef>,
+        #[cfg(not(unix))]
+        ino: AtomicCell<Option<u64>>,
     }
 
     impl PyValue for DirEntry {
@@ -743,9 +761,17 @@ mod _os {
             action: fn(fs::Metadata) -> bool,
             vm: &VirtualMachine,
         ) -> PyResult<bool> {
-            let meta = fs_metadata(self.entry.path(), follow_symlinks.0)
-                .map_err(|err| err.into_pyexception(vm))?;
-            Ok(action(meta))
+            match fs_metadata(self.entry.path(), follow_symlinks.0) {
+                Ok(meta) => Ok(action(meta)),
+                Err(e) => {
+                    // FileNotFoundError is caught and not raised
+                    if e.kind() == io::ErrorKind::NotFound {
+                        Ok(false)
+                    } else {
+                        Err(e.into_pyexception(vm))
+                    }
+                }
+            }
         }
 
         #[pymethod]
@@ -782,20 +808,92 @@ mod _os {
             follow_symlinks: FollowSymlinks,
             vm: &VirtualMachine,
         ) -> PyResult {
-            stat(
-                PathOrFd::Path(PyPathLike {
-                    path: self.entry.path(),
-                    mode: OutputMode::String,
-                }),
-                dir_fd,
-                follow_symlinks,
-                vm,
-            )
+            let do_stat = |follow_symlinks| {
+                stat(
+                    PathOrFd::Path(PyPathLike {
+                        path: self.entry.path(),
+                        mode: OutputMode::String,
+                    }),
+                    dir_fd,
+                    FollowSymlinks(follow_symlinks),
+                    vm,
+                )
+            };
+            let lstat = || self.lstat.get_or_try_init(|| do_stat(false));
+            let stat = if follow_symlinks.0 {
+                // if follow_symlinks == true and we aren't a symlink, cache both stat and lstat
+                self.stat.get_or_try_init(|| {
+                    if self.is_symlink(vm)? {
+                        do_stat(true)
+                    } else {
+                        lstat().map(Clone::clone)
+                    }
+                })?
+            } else {
+                lstat()?
+            };
+            Ok(stat.clone())
+        }
+
+        #[cfg(not(unix))]
+        #[pymethod]
+        fn inode(&self, vm: &VirtualMachine) -> PyResult<u64> {
+            match self.ino.load() {
+                Some(ino) => Ok(ino),
+                None => {
+                    let stat = stat_inner(
+                        PathOrFd::Path(PyPathLike {
+                            path: self.entry.path(),
+                            mode: OutputMode::String,
+                        }),
+                        DirFd::default(),
+                        FollowSymlinks(false),
+                    )
+                    .map_err(|e| e.into_pyexception(vm))?
+                    .ok_or_else(|| vm.new_value_error("embedded null character".to_owned()))?;
+                    // Err(T) means other thread set `ino` at the mean time which is safe to ignore
+                    let _ = self.ino.compare_exchange(None, Some(stat.st_ino));
+                    Ok(stat.st_ino)
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        #[pymethod]
+        fn inode(&self, _vm: &VirtualMachine) -> PyResult<u64> {
+            Ok(self.entry.ino())
         }
 
         #[pymethod(magic)]
         fn fspath(&self, vm: &VirtualMachine) -> PyResult {
             self.path(vm)
+        }
+
+        #[pymethod(magic)]
+        fn repr(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<String> {
+            let name = match vm.get_attribute(zelf.clone(), "name") {
+                Ok(name) => Some(name),
+                Err(e)
+                    if e.isinstance(&vm.ctx.exceptions.attribute_error)
+                        || e.isinstance(&vm.ctx.exceptions.value_error) =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            };
+            if let Some(name) = name {
+                if let Some(_guard) = ReprGuard::enter(vm, &zelf) {
+                    let repr = vm.to_repr(&name)?;
+                    Ok(format!("<{} {}>", zelf.class(), repr))
+                } else {
+                    Err(vm.new_runtime_error(format!(
+                        "reentrant call inside {}.__repr__",
+                        zelf.class()
+                    )))
+                }
+            } else {
+                Ok(format!("<{}>", zelf.class()))
+            }
         }
     }
 
@@ -842,6 +940,10 @@ mod _os {
                     Ok(entry) => Ok(DirEntry {
                         entry,
                         mode: zelf.mode,
+                        lstat: OnceCell::new(),
+                        stat: OnceCell::new(),
+                        #[cfg(not(unix))]
+                        ino: AtomicCell::new(None),
                     }
                     .into_ref(vm)
                     .into_object()),
@@ -1213,7 +1315,7 @@ mod _os {
     #[pyfunction]
     fn utime(args: UtimeArgs, vm: &VirtualMachine) -> PyResult<()> {
         let parse_tup = |tup: &PyTuple| -> Option<(PyObjectRef, PyObjectRef)> {
-            let tup = tup.borrow_value();
+            let tup = tup.as_slice();
             if tup.len() != 2 {
                 None
             } else {
@@ -1250,8 +1352,8 @@ mod _os {
                                     divmod.class().name
                                 ))
                             })?;
-                    let secs = int::try_to_primitive(vm.to_index(&div)?.borrow_value(), vm)?;
-                    let ns = int::try_to_primitive(vm.to_index(&rem)?.borrow_value(), vm)?;
+                    let secs = int::try_to_primitive(vm.to_index(&div)?.as_bigint(), vm)?;
+                    let ns = int::try_to_primitive(vm.to_index(&rem)?.as_bigint(), vm)?;
                     Ok(Duration::new(secs, ns))
                 };
                 // TODO: do validation to make sure this doesn't.. underflow?
@@ -1359,6 +1461,76 @@ mod _os {
         }
     }
 
+    #[pyattr]
+    #[pyclass(module = "os", name = "times_result")]
+    #[derive(Debug, PyStructSequence)]
+    struct TimesResult {
+        pub user: f64,
+        pub system: f64,
+        pub children_user: f64,
+        pub children_system: f64,
+        pub elapsed: f64,
+    }
+
+    #[pyimpl(with(PyStructSequence))]
+    impl TimesResult {}
+
+    #[pyfunction]
+    fn times(vm: &VirtualMachine) -> PyResult {
+        #[cfg(windows)]
+        {
+            use winapi::shared::minwindef::FILETIME;
+            use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessTimes};
+
+            let mut _create = FILETIME::default();
+            let mut _exit = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+
+            unsafe {
+                let h_proc = GetCurrentProcess();
+                GetProcessTimes(h_proc, &mut _create, &mut _exit, &mut kernel, &mut user);
+            }
+
+            let times_result = TimesResult {
+                user: user.dwHighDateTime as f64 * 429.4967296 + user.dwLowDateTime as f64 * 1e-7,
+                system: kernel.dwHighDateTime as f64 * 429.4967296
+                    + kernel.dwLowDateTime as f64 * 1e-7,
+                children_user: 0.0,
+                children_system: 0.0,
+                elapsed: 0.0,
+            };
+
+            Ok(times_result.into_pyobject(vm))
+        }
+        #[cfg(unix)]
+        {
+            let mut t = libc::tms {
+                tms_utime: 0,
+                tms_stime: 0,
+                tms_cutime: 0,
+                tms_cstime: 0,
+            };
+
+            let tick_for_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+            let c = unsafe { libc::times(&mut t as *mut _) } as i64;
+
+            if c == -1 {
+                return Err(vm.new_os_error("Fail to get times".to_string()));
+            }
+
+            let times_result = TimesResult {
+                user: t.tms_utime as f64 / tick_for_second,
+                system: t.tms_stime as f64 / tick_for_second,
+                children_user: t.tms_cutime as f64 / tick_for_second,
+                children_system: t.tms_cstime as f64 / tick_for_second,
+                elapsed: c as f64 / tick_for_second,
+            };
+
+            Ok(times_result.into_pyobject(vm))
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[derive(FromArgs)]
     struct CopyFileRangeArgs {
@@ -1461,6 +1633,246 @@ mod _os {
     #[pyimpl(with(PyStructSequence))]
     impl PyTerminalSize {}
 
+    #[pyattr]
+    #[pyclass(module = "os", name = "uname_result")]
+    #[derive(Debug, PyStructSequence)]
+    pub(super) struct UnameResult {
+        pub sysname: String,
+        pub nodename: String,
+        pub release: String,
+        pub version: String,
+        pub machine: String,
+    }
+
+    #[pyimpl(with(PyStructSequence))]
+    impl UnameResult {}
+
+    enum NameOrVal {
+        Name(String),
+        Val(i32),
+    }
+
+    impl TryFromObject for NameOrVal {
+        fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
+            match obj.downcast::<int::PyInt>() {
+                Ok(int) => int::try_to_primitive(int.as_bigint(), vm).map(Self::Val),
+                Err(obj) => {
+                    let cstring = std::ffi::CString::try_from_object(vm, obj)?;
+                    cstring.into_string().map(Self::Name).map_err(|e| {
+                        vm.new_os_error(format!("error while parsing string: {:?}", e))
+                    })
+                }
+            }
+        }
+    }
+
+    // Copy from [nix::unistd::PathconfVar](https://docs.rs/nix/0.21.0/nix/unistd/enum.PathconfVar.html)
+    // Change enum name to fit python doc
+    #[cfg(unix)]
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EnumString)]
+    #[repr(i32)]
+    #[allow(non_camel_case_types)]
+    pub enum PathconfVar {
+        #[cfg(any(
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "linux",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "redox"
+        ))]
+        /// Minimum number of bits needed to represent, as a signed integer value,
+        /// the maximum size of a regular file allowed in the specified directory.
+        PC_FILESIZEBITS = libc::_PC_FILESIZEBITS,
+        /// Maximum number of links to a single file.
+        PC_LINK_MAX = libc::_PC_LINK_MAX,
+        /// Maximum number of bytes in a terminal canonical input line.
+        PC_MAX_CANON = libc::_PC_MAX_CANON,
+        /// Minimum number of bytes for which space is available in a terminal input
+        /// queue; therefore, the maximum number of bytes a conforming application
+        /// may require to be typed as input before reading them.
+        PC_MAX_INPUT = libc::_PC_MAX_INPUT,
+        /// Maximum number of bytes in a filename (not including the terminating
+        /// null of a filename string).
+        PC_NAME_MAX = libc::_PC_NAME_MAX,
+        /// Maximum number of bytes the implementation will store as a pathname in a
+        /// user-supplied buffer of unspecified size, including the terminating null
+        /// character. Minimum number the implementation will accept as the maximum
+        /// number of bytes in a pathname.
+        PC_PATH_MAX = libc::_PC_PATH_MAX,
+        /// Maximum number of bytes that is guaranteed to be atomic when writing to
+        /// a pipe.
+        PC_PIPE_BUF = libc::_PC_PIPE_BUF,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "illumos",
+            target_os = "linux",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "solaris"
+        ))]
+        /// Symbolic links can be created.
+        PC_2_SYMLINKS = libc::_PC_2_SYMLINKS,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "linux",
+            target_os = "openbsd",
+            target_os = "redox"
+        ))]
+        /// Minimum number of bytes of storage actually allocated for any portion of
+        /// a file.
+        PC_ALLOC_SIZE_MIN = libc::_PC_ALLOC_SIZE_MIN,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "linux",
+            target_os = "openbsd"
+        ))]
+        /// Recommended increment for file transfer sizes between the
+        /// `POSIX_REC_MIN_XFER_SIZE` and `POSIX_REC_MAX_XFER_SIZE` values.
+        PC_REC_INCR_XFER_SIZE = libc::_PC_REC_INCR_XFER_SIZE,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "linux",
+            target_os = "openbsd",
+            target_os = "redox"
+        ))]
+        /// Maximum recommended file transfer size.
+        PC_REC_MAX_XFER_SIZE = libc::_PC_REC_MAX_XFER_SIZE,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "linux",
+            target_os = "openbsd",
+            target_os = "redox"
+        ))]
+        /// Minimum recommended file transfer size.
+        PC_REC_MIN_XFER_SIZE = libc::_PC_REC_MIN_XFER_SIZE,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "linux",
+            target_os = "openbsd",
+            target_os = "redox"
+        ))]
+        ///  Recommended file transfer buffer alignment.
+        PC_REC_XFER_ALIGN = libc::_PC_REC_XFER_ALIGN,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "illumos",
+            target_os = "linux",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "solaris"
+        ))]
+        /// Maximum number of bytes in a symbolic link.
+        PC_SYMLINK_MAX = libc::_PC_SYMLINK_MAX,
+        /// The use of `chown` and `fchown` is restricted to a process with
+        /// appropriate privileges, and to changing the group ID of a file only to
+        /// the effective group ID of the process or to one of its supplementary
+        /// group IDs.
+        PC_CHOWN_RESTRICTED = libc::_PC_CHOWN_RESTRICTED,
+        /// Pathname components longer than {NAME_MAX} generate an error.
+        PC_NO_TRUNC = libc::_PC_NO_TRUNC,
+        /// This symbol shall be defined to be the value of a character that shall
+        /// disable terminal special character handling.
+        PC_VDISABLE = libc::_PC_VDISABLE,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "illumos",
+            target_os = "linux",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "solaris"
+        ))]
+        /// Asynchronous input or output operations may be performed for the
+        /// associated file.
+        PC_ASYNC_IO = libc::_PC_ASYNC_IO,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "illumos",
+            target_os = "linux",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "solaris"
+        ))]
+        /// Prioritized input or output operations may be performed for the
+        /// associated file.
+        PC_PRIO_IO = libc::_PC_PRIO_IO,
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "illumos",
+            target_os = "linux",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "solaris"
+        ))]
+        /// Synchronized input or output operations may be performed for the
+        /// associated file.
+        PC_SYNC_IO = libc::_PC_SYNC_IO,
+        #[cfg(any(target_os = "dragonfly", target_os = "openbsd"))]
+        /// The resolution in nanoseconds for all file timestamps.
+        PC_TIMESTAMP_RESOLUTION = libc::_PC_TIMESTAMP_RESOLUTION,
+    }
+
+    #[cfg(unix)]
+    #[pyfunction]
+    fn pathconf(path: PathOrFd, name: NameOrVal, vm: &VirtualMachine) -> PyResult<Option<i64>> {
+        use nix::errno::{self, Errno};
+        use std::str::FromStr;
+        let name = match name {
+            NameOrVal::Name(s) => PathconfVar::from_str(&s)
+                .map_err(|_| vm.new_value_error("unrecognized configuration name".to_string()))?
+                as i32,
+            NameOrVal::Val(v) => v,
+        };
+
+        Errno::clear();
+        let raw = match path {
+            PathOrFd::Path(path) => {
+                let path = ffi::CString::new(path.into_bytes())
+                    .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
+                unsafe { libc::pathconf(path.as_ptr(), name) }
+            }
+            PathOrFd::Fd(fd) => unsafe { libc::fpathconf(fd, name) },
+        };
+
+        if raw == -1 {
+            if errno::errno() == 0 {
+                Ok(None)
+            } else {
+                Err(io::Error::from(Errno::last()).into_pyexception(vm))
+            }
+        } else {
+            Ok(Some(raw))
+        }
+    }
+
+    #[cfg(unix)]
+    #[pyfunction]
+    fn fpathconf(fd: i32, name: NameOrVal, vm: &VirtualMachine) -> PyResult<Option<i64>> {
+        pathconf(PathOrFd::Fd(fd), name, vm)
+    }
+
     pub(super) fn support_funcs() -> Vec<SupportFunc> {
         let mut supports = super::platform::support_funcs();
         supports.extend(vec![
@@ -1472,7 +1884,8 @@ mod _os {
             SupportFunc::new("mkdir", Some(false), Some(MKDIR_DIR_FD), Some(false)),
             // mkfifo Some Some None
             // mknod Some Some None
-            // pathconf Some None None
+            #[cfg(unix)]
+            SupportFunc::new("pathconf", Some(true), None, None),
             SupportFunc::new("readlink", Some(false), None, Some(false)),
             SupportFunc::new("remove", Some(false), None, Some(false)),
             SupportFunc::new("unlink", Some(false), None, Some(false)),
@@ -1567,7 +1980,7 @@ mod posix {
 
     use crate::builtins::dict::PyMapping;
     use crate::builtins::list::PyListRef;
-    use crate::pyobject::PyIterable;
+    use crate::PyIterable;
     use bitflags::bitflags;
     use nix::errno::{errno, Errno};
     use nix::unistd::{self, Gid, Pid, Uid};
@@ -1676,7 +2089,7 @@ mod posix {
         let others_permissions = get_permissions(others_mode);
 
         let user_id = nix::unistd::getuid();
-        let groups_ids = getgroups()?;
+        let groups_ids = getgroups_impl()?;
 
         if file_owner == user_id {
             Ok(owner_permissions)
@@ -1688,7 +2101,7 @@ mod posix {
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn getgroups() -> nix::Result<Vec<Gid>> {
+    fn getgroups_impl() -> nix::Result<Vec<Gid>> {
         use libc::{c_int, gid_t};
         use std::ptr;
         let ret = unsafe { libc::getgroups(0, ptr::null_mut()) };
@@ -1707,11 +2120,22 @@ mod posix {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "redox")))]
-    use nix::unistd::getgroups;
+    use nix::unistd::getgroups as getgroups_impl;
 
     #[cfg(target_os = "redox")]
-    fn getgroups() -> nix::Result<Vec<Gid>> {
+    fn getgroups_impl() -> nix::Result<Vec<Gid>> {
         Err(nix::Error::UnsupportedOperation)
+    }
+
+    #[pyfunction]
+    fn getgroups(vm: &VirtualMachine) -> PyResult {
+        let group_ids = getgroups_impl().map_err(|e| e.into_pyexception(vm))?;
+        Ok(vm.ctx.new_list(
+            group_ids
+                .into_iter()
+                .map(|gid| vm.ctx.new_int(gid.as_raw()))
+                .collect(),
+        ))
     }
 
     #[pyfunction]
@@ -1759,7 +2183,7 @@ mod posix {
     #[pyattr]
     fn environ(vm: &VirtualMachine) -> PyDictRef {
         let environ = vm.ctx.new_dict();
-        use std::os::unix::ffi::OsStringExt;
+        use ffi_ext::OsStringExt;
         for (key, value) in env::vars_os() {
             environ
                 .set_item(
@@ -1798,6 +2222,7 @@ mod posix {
         }
         #[cfg(target_os = "redox")]
         {
+            let [] = args.dir_fd.0;
             let res = unsafe { libc::symlink(src.as_ptr(), dst.as_ptr()) };
             if res < 0 {
                 Err(errno_err(vm))
@@ -1973,7 +2398,7 @@ mod posix {
     fn system(command: PyStrRef) -> PyResult<i32> {
         use std::ffi::CString;
 
-        let rstr = command.borrow_value();
+        let rstr = command.as_str();
         let cstr = CString::new(rstr).unwrap();
         let x = unsafe { libc::system(cstr.as_ptr()) };
         Ok(x)
@@ -2004,7 +2429,7 @@ mod posix {
         argv: Either<PyListRef, PyTupleRef>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        let path = ffi::CString::new(path.borrow_value())
+        let path = ffi::CString::new(path.as_str())
             .map_err(|_| vm.new_value_error("embedded null character".to_owned()))?;
 
         let argv: Vec<ffi::CString> = vm.extract_elements(argv.as_object())?;
@@ -2186,6 +2611,9 @@ mod posix {
     #[pyfunction]
     fn openpty(vm: &VirtualMachine) -> PyResult {
         let r = nix::pty::openpty(None, None).map_err(|err| err.into_pyexception(vm))?;
+        for fd in &[r.master, r.slave] {
+            raw_set_inheritable(*fd, false).map_err(|e| e.into_pyexception(vm))?;
+        }
         Ok(vm
             .ctx
             .new_tuple(vec![vm.ctx.new_int(r.master), vm.ctx.new_int(r.slave)]))
@@ -2207,24 +2635,10 @@ mod posix {
         unsafe { libc::umask(mask) }
     }
 
-    #[pyattr]
-    #[pyclass(module = "os", name = "uname_result")]
-    #[derive(Debug, PyStructSequence)]
-    struct UnameResult {
-        sysname: String,
-        nodename: String,
-        release: String,
-        version: String,
-        machine: String,
-    }
-
-    #[pyimpl(with(PyStructSequence))]
-    impl UnameResult {}
-
     #[pyfunction]
-    fn uname(vm: &VirtualMachine) -> PyResult<UnameResult> {
+    fn uname(vm: &VirtualMachine) -> PyResult<super::_os::UnameResult> {
         let info = uname::uname().map_err(|err| err.into_pyexception(vm))?;
-        Ok(UnameResult {
+        Ok(super::_os::UnameResult {
             sysname: info.sysname,
             nodename: info.nodename,
             release: info.release,
@@ -2309,7 +2723,7 @@ mod posix {
     ))]
     #[pyfunction]
     fn initgroups(user_name: PyStrRef, gid: u32, vm: &VirtualMachine) -> PyResult<()> {
-        let user = ffi::CString::new(user_name.borrow_value()).unwrap();
+        let user = ffi::CString::new(user_name.as_str()).unwrap();
         let gid = Gid::from_raw(gid);
         unistd::initgroups(&user, gid).map_err(|err| err.into_pyexception(vm))
     }
@@ -2329,6 +2743,7 @@ mod posix {
         ret.map_err(|err| err.into_pyexception(vm))
     }
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn envp_from_dict(dict: PyDictRef, vm: &VirtualMachine) -> PyResult<Vec<ffi::CString>> {
         dict.into_iter()
             .map(|(k, v)| {
@@ -2395,7 +2810,7 @@ mod posix {
             if let Some(it) = self.file_actions {
                 for action in it.iter(vm)? {
                     let action = action?;
-                    let (id, args) = action.borrow_value().split_first().ok_or_else(|| {
+                    let (id, args) = action.as_slice().split_first().ok_or_else(|| {
                         vm.new_type_error(
                             "Each file_actions element must be a non-empty tuple".to_owned(),
                         )
@@ -2697,7 +3112,7 @@ mod posix {
     ))]
     #[pyfunction]
     fn getgrouplist(user: PyStrRef, group: u32, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        let user = ffi::CString::new(user.borrow_value()).unwrap();
+        let user = ffi::CString::new(user.as_str()).unwrap();
         let gid = Gid::from_raw(group);
         let group_ids = unistd::getgrouplist(&user, gid).map_err(|err| err.into_pyexception(vm))?;
         Ok(vm.ctx.new_list(
@@ -2708,6 +3123,7 @@ mod posix {
         ))
     }
 
+    #[cfg(not(target_os = "redox"))]
     cfg_if::cfg_if! {
         if #[cfg(all(target_os = "linux", target_env = "gnu"))] {
             type PriorityWhichType = libc::__priority_which_t;
@@ -2715,6 +3131,7 @@ mod posix {
             type PriorityWhichType = libc::c_int;
         }
     }
+    #[cfg(not(target_os = "redox"))]
     cfg_if::cfg_if! {
         if #[cfg(target_os = "freebsd")] {
             type PriorityWhoType = i32;
@@ -2723,7 +3140,7 @@ mod posix {
         }
     }
 
-    #[cfg(not(any(windows, target_os = "redox")))]
+    #[cfg(not(target_os = "redox"))]
     #[pyfunction]
     fn getpriority(
         which: PriorityWhichType,
@@ -2739,7 +3156,7 @@ mod posix {
         }
     }
 
-    #[cfg(not(any(windows, target_os = "redox")))]
+    #[cfg(not(target_os = "redox"))]
     #[pyfunction]
     fn setpriority(
         which: PriorityWhichType,
@@ -2764,12 +3181,16 @@ pub(crate) use posix::raw_set_inheritable;
 #[pymodule]
 mod nt {
     use super::*;
-    use crate::builtins::list::PyListRef;
     #[cfg(target_env = "msvc")]
+    use crate::builtins::list::PyListRef;
     use winapi::vc::vcruntime::intptr_t;
 
     #[pyattr]
     use libc::O_BINARY;
+
+    #[pyattr]
+    // use libc::O_TEMPORARY;
+    const O_TEMPORARY: i32 = 0x40;
 
     #[pyfunction]
     pub(super) fn access(path: PyPathLike, mode: u8, vm: &VirtualMachine) -> PyResult<bool> {
@@ -2989,7 +3410,7 @@ mod nt {
         use std::os::windows::prelude::*;
         use std::str::FromStr;
 
-        let path: Vec<u16> = ffi::OsString::from_str(path.borrow_value())
+        let path: Vec<u16> = ffi::OsString::from_str(path.as_str())
             .unwrap()
             .encode_wide()
             .chain(once(0u16))
@@ -3114,13 +3535,41 @@ mod nt {
         return Err(err.into_pyexception(vm));
     }
 
+    #[pyfunction]
+    fn get_handle_inheritable(handle: intptr_t, vm: &VirtualMachine) -> PyResult<bool> {
+        let mut flags = 0;
+        if unsafe { winapi::um::handleapi::GetHandleInformation(handle as _, &mut flags) } == 0 {
+            Err(errno_err(vm))
+        } else {
+            Ok(flags & winapi::um::winbase::HANDLE_FLAG_INHERIT != 0)
+        }
+    }
+
+    #[pyfunction]
+    fn set_handle_inheritable(
+        handle: intptr_t,
+        inheritable: bool,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
+        use winapi::um::winbase::HANDLE_FLAG_INHERIT;
+        let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
+        let res = unsafe {
+            winapi::um::handleapi::SetHandleInformation(handle as _, HANDLE_FLAG_INHERIT, flags)
+        };
+        if res == 0 {
+            Err(errno_err(vm))
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn support_funcs() -> Vec<SupportFunc> {
         Vec::new()
     }
 }
 #[cfg(windows)]
 use nt as platform;
-#[cfg(windows)]
+#[cfg(all(windows, target_env = "msvc"))]
 pub use nt::{_set_thread_local_invalid_parameter_handler, silent_iph_handler};
 
 #[cfg(not(any(unix, windows)))]
@@ -3136,6 +3585,7 @@ mod minor {
     pub const SYMLINK_DIR_FD: bool = false;
 
     #[derive(FromArgs)]
+    #[allow(unused)]
     pub(super) struct SimlinkArgs {
         #[pyarg(any)]
         src: PyPathLike,
@@ -3148,13 +3598,25 @@ mod minor {
     }
 
     #[pyfunction]
-    pub(super) fn symlink(args: SimkinkArgs, vm: &VirtualMachine) -> PyResult<()> {
+    pub(super) fn symlink(_args: SimlinkArgs, vm: &VirtualMachine) -> PyResult<()> {
         os_unimpl("os.symlink", vm)
     }
 
     #[pyattr]
     fn environ(vm: &VirtualMachine) -> PyDictRef {
-        vm.ctx.new_dict()
+        let environ = vm.ctx.new_dict();
+        use ffi_ext::OsStringExt;
+        for (key, value) in env::vars_os() {
+            environ
+                .set_item(
+                    vm.ctx.new_bytes(key.into_vec()),
+                    vm.ctx.new_bytes(value.into_vec()),
+                    vm,
+                )
+                .unwrap();
+        }
+
+        environ
     }
 
     pub(super) fn support_funcs() -> Vec<SupportFunc> {

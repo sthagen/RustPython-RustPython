@@ -1,24 +1,28 @@
+use crate::builtins::int;
 use crate::builtins::int::PyIntRef;
 use crate::builtins::pystr::PyStrRef;
 use crate::byteslike::PyBytesLike;
 use crate::common::cmp;
 use crate::function::OptionalArg;
 use crate::iterator;
-use crate::pyobject::{BorrowValue, Either, PyObjectRef, PyResult, TypeProtocol};
+use crate::utils::Either;
 use crate::VirtualMachine;
+use crate::{PyObjectRef, PyResult, TypeProtocol};
+use int::PyInt;
 
 fn _operator_length_hint(obj: PyObjectRef, default: OptionalArg, vm: &VirtualMachine) -> PyResult {
-    let default = default.unwrap_or_else(|| vm.ctx.new_int(0));
-    if !default.isinstance(&vm.ctx.types.int_type) {
-        return Err(vm.new_type_error(format!(
-            "'{}' type cannot be interpreted as an integer",
-            default.class().name
-        )));
-    }
-    let hint = iterator::length_hint(vm, obj)?
-        .map(|i| vm.ctx.new_int(i))
-        .unwrap_or(default);
-    Ok(hint)
+    let default: usize = default
+        .map(|v| {
+            if !v.isinstance(&vm.ctx.types.int_type) {
+                return Err(vm.new_type_error(format!(
+                    "'{}' type cannot be interpreted as an integer",
+                    v.class().name
+                )));
+            }
+            int::try_to_primitive(v.payload::<PyInt>().unwrap().as_bigint(), vm)
+        })
+        .unwrap_or(Ok(0))?;
+    iterator::length_hint(vm, obj).map(|v| vm.ctx.new_int(v.unwrap_or(default)))
 }
 
 fn _operator_compare_digest(
@@ -28,12 +32,12 @@ fn _operator_compare_digest(
 ) -> PyResult<bool> {
     let res = match (a, b) {
         (Either::A(a), Either::A(b)) => {
-            if !a.borrow_value().is_ascii() || !b.borrow_value().is_ascii() {
+            if !a.as_str().is_ascii() || !b.as_str().is_ascii() {
                 return Err(vm.new_type_error(
                     "comparing strings with non-ASCII characters is not supported".to_owned(),
                 ));
             }
-            cmp::timing_safe_cmp(a.borrow_value().as_bytes(), b.borrow_value().as_bytes())
+            cmp::timing_safe_cmp(a.as_str().as_bytes(), b.as_str().as_bytes())
         }
         (Either::B(a), Either::B(b)) => a.with_ref(|a| b.with_ref(|b| cmp::timing_safe_cmp(a, b))),
         _ => {

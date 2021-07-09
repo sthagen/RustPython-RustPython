@@ -9,9 +9,6 @@
  * https://docs.rs/byteorder/1.2.6/byteorder/
  */
 
-use crate::pyobject::PyObjectRef;
-use crate::VirtualMachine;
-
 #[pymodule]
 pub(crate) mod _struct {
     use crossbeam_utils::atomic::AtomicCell;
@@ -29,12 +26,10 @@ pub(crate) mod _struct {
     use crate::byteslike::{PyBytesLike, PyRwBytesLike};
     use crate::exceptions::PyBaseExceptionRef;
     use crate::function::Args;
-    use crate::pyobject::{
-        BorrowValue, Either, IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, StaticType,
-        TryFromObject,
-    };
     use crate::slots::PyIter;
+    use crate::utils::Either;
     use crate::VirtualMachine;
+    use crate::{IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject};
     use half::f16;
 
     #[derive(Debug, Copy, Clone, PartialEq)]
@@ -222,7 +217,7 @@ pub(crate) mod _struct {
             fmt: &Either<PyStrRef, PyBytesRef>,
         ) -> PyResult<FormatSpec> {
             let decoded_fmt = match fmt {
-                Either::A(string) => string.borrow_value(),
+                Either::A(string) => string.as_str(),
                 Either::B(bytes) if bytes.is_ascii() => std::str::from_utf8(&bytes).unwrap(),
                 _ => {
                     return Err(vm.new_unicode_decode_error(
@@ -462,7 +457,7 @@ pub(crate) mod _struct {
         T: PrimInt + for<'a> std::convert::TryFrom<&'a BigInt>,
     {
         match vm.to_index_opt(arg) {
-            Some(index) => try_to_primitive(index?.borrow_value(), vm),
+            Some(index) => try_to_primitive(index?.as_bigint(), vm),
             None => Err(new_struct_error(
                 vm,
                 "required argument is not an integer".to_owned(),
@@ -709,7 +704,7 @@ pub(crate) mod _struct {
 
     fn pack_char(vm: &VirtualMachine, arg: PyObjectRef, data: &mut [u8]) -> PyResult<()> {
         let v = PyBytesRef::try_from_object(vm, arg)?;
-        let ch = *v.borrow_value().iter().exactly_one().map_err(|_| {
+        let ch = *v.as_bytes().iter().exactly_one().map_err(|_| {
             new_struct_error(
                 vm,
                 "char format requires a bytes object of length 1".to_owned(),
@@ -894,7 +889,7 @@ pub(crate) mod _struct {
             let spec = FormatSpec::decode_and_parse(vm, &fmt)?;
             let fmt_str = match fmt {
                 Either::A(s) => s,
-                Either::B(b) => PyStr::from(std::str::from_utf8(b.borrow_value()).unwrap())
+                Either::B(b) => PyStr::from(std::str::from_utf8(b.as_bytes()).unwrap())
                     .into_ref_with_type(vm, vm.ctx.types.str_type.clone())?,
             };
             PyStruct { spec, fmt_str }.into_ref_with_type(vm, cls)
@@ -958,32 +953,27 @@ pub(crate) mod _struct {
     #[pyfunction]
     fn _clearcache() {}
 
-    rustpython_common::static_cell! {
-        pub(crate) static STRUCT_ERROR: PyTypeRef;
+    #[pyattr(name = "error")]
+    fn struct_error(vm: &VirtualMachine) -> PyTypeRef {
+        rustpython_common::static_cell! {
+            static STRUCT_ERROR: PyTypeRef;
+        }
+        STRUCT_ERROR
+            .get_or_init(|| {
+                vm.ctx.new_class(
+                    "struct.error",
+                    &vm.ctx.exceptions.exception_type,
+                    Default::default(),
+                )
+            })
+            .clone()
     }
 
     fn new_struct_error(vm: &VirtualMachine, msg: String) -> PyBaseExceptionRef {
-        let class = STRUCT_ERROR.get().unwrap();
-        vm.new_exception_msg(class.clone(), msg)
+        // can't just STRUCT_ERROR.get().unwrap() cause this could be called before from buffer
+        // machinery, independent of whether _struct was ever imported
+        vm.new_exception_msg(struct_error(vm), msg)
     }
 }
 
-pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
-    let ctx = &vm.ctx;
-
-    let struct_error = _struct::STRUCT_ERROR
-        .get_or_init(|| {
-            ctx.new_class(
-                "struct.error",
-                &ctx.exceptions.exception_type,
-                Default::default(),
-            )
-        })
-        .clone();
-
-    let module = _struct::make_module(vm);
-    extend_module!(vm, module, {
-        "error" => struct_error,
-    });
-    module
-}
+pub(crate) use _struct::make_module;

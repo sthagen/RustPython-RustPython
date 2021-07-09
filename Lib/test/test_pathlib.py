@@ -1368,8 +1368,6 @@ class _BasePathTest(object):
         self.assertRaises(TypeError, (p / 'fileA').write_bytes, 'somestr')
         self.assertEqual((p / 'fileA').read_bytes(), b'abcdefg')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_read_write_text(self):
         p = self.cls(BASE)
         (p / 'fileA').write_text('äbcdefg', encoding='latin-1')
@@ -1408,8 +1406,6 @@ class _BasePathTest(object):
         self.assertIn(cm.exception.errno, (errno.ENOTDIR,
                                            errno.ENOENT, errno.EINVAL))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_glob_common(self):
         def _check(glob, expected):
             self.assertEqual(set(glob), { P(BASE, q) for q in expected })
@@ -1434,8 +1430,6 @@ class _BasePathTest(object):
         else:
             _check(p.glob("*/fileB"), ['dirB/fileB', 'linkB/fileB'])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_rglob_common(self):
         def _check(glob, expected):
             self.assertEqual(set(glob), { P(BASE, q) for q in expected })

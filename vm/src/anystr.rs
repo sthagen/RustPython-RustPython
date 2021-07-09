@@ -1,10 +1,8 @@
 use crate::builtins::int::PyIntRef;
 use crate::cformat::CFormatString;
 use crate::function::{single_or_tuple_any, OptionalOption};
-use crate::pyobject::{
-    BorrowValue, PyIterator, PyObjectRef, PyResult, TryFromObject, TypeProtocol,
-};
 use crate::vm::VirtualMachine;
+use crate::{PyIterator, PyObjectRef, PyResult, TryFromObject, TypeProtocol};
 use num_traits::{cast::ToPrimitive, sign::Signed};
 use std::str::FromStr;
 
@@ -68,7 +66,7 @@ impl StartsEndsWithArgs {
 }
 
 fn saturate_to_isize(py_int: PyIntRef) -> isize {
-    let big = py_int.borrow_value();
+    let big = py_int.as_bigint();
     big.to_isize().unwrap_or_else(|| {
         if big.is_negative() {
             std::isize::MIN
@@ -421,5 +419,17 @@ pub trait AnyStr<'s>: 's {
         CFormatString::from_str(format_string)
             .map_err(|err| vm.new_value_error(err.to_string()))?
             .format(vm, values)
+    }
+}
+
+/// returns the outer quotes to use and the number of quotes that need to be escaped
+#[inline]
+pub fn choose_quotes_for_repr(num_squotes: usize, num_dquotes: usize) -> (char, usize) {
+    // always use squote unless we have squotes but no dquotes
+    let use_dquote = num_squotes > 0 && num_dquotes == 0;
+    if use_dquote {
+        ('"', num_dquotes)
+    } else {
+        ('\'', num_squotes)
     }
 }

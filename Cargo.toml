@@ -1,3 +1,6 @@
+# REDOX START, TODO: shouldn't be necessary once redox bumps toolchain version
+# cargo-features = ['resolver']
+# REDOX END
 [package]
 name = "rustpython"
 version = "0.1.2"
@@ -24,6 +27,7 @@ threading = ["rustpython-vm/threading"]
 zlib = ["rustpython-vm/zlib"]
 
 ssl = ["rustpython-vm/ssl"]
+ssl-vendor = ["rustpython-vm/ssl-vendor"]
 
 [dependencies]
 log = "0.4"
@@ -32,7 +36,7 @@ clap = "2.33"
 rustpython-compiler = { path = "compiler/porcelain", version = "0.1.1" }
 rustpython-parser = { path = "parser", version = "0.1.1" }
 rustpython-vm = { path = "vm", version = "0.1.1", default-features = false, features = ["compile-parse"] }
-pylib = { package = "rustpython-pylib", path = "vm/pylib-crate", version = "0.1.0", default-features = false, optional = true }
+pylib = { package = "rustpython-pylib", path = "vm/pylib-crate", version = "0.1.0", optional = true }
 dirs = { package = "dirs-next", version = "2.0.0" }
 num-traits = "0.2.8"
 cfg-if = "1.0"
@@ -72,4 +76,6 @@ opt-level = 3
 [patch.crates-io]
 # REDOX START, Uncommment when you want to compile/check with redoxer
 # rustyline = { git = "https://github.com/kkawakam/rustyline" }
+# libc = { git = "https://github.com/rust-lang/libc" }
+# dns-lookup = { git = "https://github.com/coolreader18/dns-lookup", branch = "fix-redox" }
 # REDOX END

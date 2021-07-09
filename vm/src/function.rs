@@ -2,11 +2,11 @@ use self::OptionalArg::*;
 use crate::builtins::pytype::PyTypeRef;
 use crate::builtins::tuple::PyTupleRef;
 use crate::exceptions::PyBaseExceptionRef;
-use crate::pyobject::{
-    BorrowValue, IntoPyObject, IntoPyResult, PyObjectRef, PyRef, PyResult, PyThreadingConstraint,
-    PyValue, TryFromObject, TypeProtocol,
-};
 use crate::vm::VirtualMachine;
+use crate::{
+    IntoPyObject, IntoPyResult, PyObjectRef, PyRef, PyResult, PyThreadingConstraint, PyValue,
+    TryFromObject, TypeProtocol,
+};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use result_like::impl_option_like;
@@ -219,11 +219,10 @@ impl FuncArgs {
     }
 
     pub fn check_kwargs_empty(&self, vm: &VirtualMachine) -> Option<PyBaseExceptionRef> {
-        if let Some(k) = self.kwargs.keys().next() {
-            Some(vm.new_type_error(format!("Unexpected keyword argument {}", k)))
-        } else {
-            None
-        }
+        self.kwargs
+            .keys()
+            .next()
+            .map(|k| vm.new_type_error(format!("Unexpected keyword argument {}", k)))
     }
 }
 
@@ -709,7 +708,7 @@ where
         Err(_) => {
             let tuple = PyTupleRef::try_from_object(vm, obj.clone())
                 .map_err(|_| vm.new_type_error((message)(&obj)))?;
-            for obj in tuple.borrow_value().iter() {
+            for obj in tuple.as_slice().iter() {
                 if single_or_tuple_any(obj.clone(), predicate, message, vm)? {
                     return Ok(true);
                 }

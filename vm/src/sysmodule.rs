@@ -5,11 +5,11 @@ use crate::builtins::{PyStr, PyStrRef, PyTypeRef};
 use crate::common::hash::{PyHash, PyUHash};
 use crate::frame::FrameRef;
 use crate::function::{Args, FuncArgs, OptionalArg};
-use crate::pyobject::{
-    ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRefExact, PyResult, PyStructSequence,
-};
 use crate::vm::{PySettings, VirtualMachine};
 use crate::{builtins, exceptions, py_io, version};
+use crate::{
+    ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRefExact, PyResult, PyStructSequence,
+};
 
 /*
  * The magic sys module.
@@ -161,8 +161,8 @@ fn sys_getfilesystemencoding(_vm: &VirtualMachine) -> String {
     "utf-8".to_owned()
 }
 
-fn sys_getdefaultencoding(_vm: &VirtualMachine) -> String {
-    "utf-8".to_owned()
+fn sys_getdefaultencoding() -> &'static str {
+    crate::codecs::DEFAULT_ENCODING
 }
 
 #[cfg(not(windows))]
@@ -643,7 +643,7 @@ settrace() -- set the global debug tracing function
     let modules = ctx.new_dict();
 
     // TODO: the windows one doesn't really make sense
-    let default_prefix = if cfg!(windows) { "C:\\" } else { "/usr/local" };
+    let default_prefix = if cfg!(windows) { "C:" } else { "/usr/local" };
     let prefix = option_env!("RUSTPYTHON_PREFIX").unwrap_or(default_prefix);
     let base_prefix = option_env!("RUSTPYTHON_BASEPREFIX").unwrap_or(prefix);
     let exec_prefix = option_env!("RUSTPYTHON_EXECPREFIX").unwrap_or(prefix);

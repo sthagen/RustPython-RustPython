@@ -5,8 +5,8 @@
 use crate::builtins::int::{self, PyInt};
 use crate::builtins::iter::PySequenceIterator;
 use crate::exceptions::PyBaseExceptionRef;
-use crate::pyobject::{BorrowValue, PyObjectRef, PyResult, PyValue, TryFromObject, TypeProtocol};
 use crate::vm::VirtualMachine;
+use crate::{IdProtocol, PyObjectRef, PyResult, PyValue, TryFromObject, TypeProtocol};
 use num_traits::Signed;
 
 /*
@@ -103,7 +103,7 @@ pub fn stop_iter_with_value(val: PyObjectRef, vm: &VirtualMachine) -> PyBaseExce
 
 pub fn stop_iter_value(vm: &VirtualMachine, exc: &PyBaseExceptionRef) -> PyObjectRef {
     let args = exc.args();
-    vm.unwrap_or_none(args.borrow_value().first().cloned())
+    vm.unwrap_or_none(args.as_slice().first().cloned())
 }
 
 pub fn length_hint(vm: &VirtualMachine, iter: PyObjectRef) -> PyResult<Option<usize>> {
@@ -122,7 +122,12 @@ pub fn length_hint(vm: &VirtualMachine, iter: PyObjectRef) -> PyResult<Option<us
         None => return Ok(None),
     };
     let result = match vm.invoke(&hint, ()) {
-        Ok(res) => res,
+        Ok(res) => {
+            if res.is(&vm.ctx.not_implemented) {
+                return Ok(None);
+            }
+            res
+        }
         Err(e) => {
             return if e.isinstance(&vm.ctx.exceptions.type_error) {
                 Ok(None)
@@ -139,7 +144,7 @@ pub fn length_hint(vm: &VirtualMachine, iter: PyObjectRef) -> PyResult<Option<us
                 result.class().name
             ))
         })?
-        .borrow_value();
+        .as_bigint();
     if result.is_negative() {
         return Err(vm.new_value_error("__length_hint__() should return >= 0".to_owned()));
     }
