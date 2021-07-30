@@ -335,11 +335,11 @@ impl PyBytesInner {
 
     pub fn getitem(
         &self,
-        name: &'static str,
+        owner_type: &'static str,
         needle: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult {
-        let obj = match self.elements.get_item(vm, needle, name)? {
+        let obj = match self.elements.get_item(vm, needle, owner_type)? {
             Either::A(byte) => vm.new_pyobj(byte),
             Either::B(bytes) => vm.ctx.new_bytes(bytes),
         };
@@ -594,7 +594,7 @@ impl PyBytesInner {
         };
 
         for i in self.elements.iter() {
-            if !delete.contains(&i) {
+            if !delete.contains(i) {
                 res.push(table[*i as usize]);
             }
         }
