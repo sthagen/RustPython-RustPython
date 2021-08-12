@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::builtins::memory::Buffer;
+use crate::builtins::memory::PyBuffer;
 use crate::builtins::pystr::PyStrRef;
 use crate::common::hash::PyHash;
 use crate::common::lock::PyRwLock;
@@ -52,7 +52,7 @@ pub(crate) type DescrGetFunc =
 pub(crate) type DescrSetFunc =
     fn(PyObjectRef, PyObjectRef, Option<PyObjectRef>, &VirtualMachine) -> PyResult<()>;
 pub(crate) type HashFunc = fn(&PyObjectRef, &VirtualMachine) -> PyResult<PyHash>;
-pub(crate) type CmpFunc = fn(
+pub(crate) type RichCompareFunc = fn(
     &PyObjectRef,
     &PyObjectRef,
     PyComparisonOp,
@@ -61,26 +61,61 @@ pub(crate) type CmpFunc = fn(
 pub(crate) type GetattroFunc = fn(PyObjectRef, PyStrRef, &VirtualMachine) -> PyResult;
 pub(crate) type SetattroFunc =
     fn(&PyObjectRef, PyStrRef, Option<PyObjectRef>, &VirtualMachine) -> PyResult<()>;
-pub(crate) type BufferFunc = fn(&PyObjectRef, &VirtualMachine) -> PyResult<Box<dyn Buffer>>;
+pub(crate) type BufferFunc = fn(&PyObjectRef, &VirtualMachine) -> PyResult<Box<dyn PyBuffer>>;
 pub(crate) type IterFunc = fn(PyObjectRef, &VirtualMachine) -> PyResult;
 pub(crate) type IterNextFunc = fn(&PyObjectRef, &VirtualMachine) -> PyResult;
 
 #[derive(Default)]
 pub struct PyTypeSlots {
-    pub flags: PyTpFlags,
     pub name: PyRwLock<Option<String>>, // tp_name, not class name
-    pub new: Option<PyNativeFunc>,
-    pub del: AtomicCell<Option<DelFunc>>,
-    pub call: AtomicCell<Option<GenericMethod>>,
-    pub descr_get: AtomicCell<Option<DescrGetFunc>>,
-    pub descr_set: AtomicCell<Option<DescrSetFunc>>,
+    // tp_basicsize, tp_itemsize
+
+    // Methods to implement standard operations
+
+    // Method suites for standard classes
+    // tp_as_number
+    // tp_as_sequence
+    // tp_as_mapping
+
+    // More standard operations (here for binary compatibility)
     pub hash: AtomicCell<Option<HashFunc>>,
-    pub cmp: AtomicCell<Option<CmpFunc>>,
+    pub call: AtomicCell<Option<GenericMethod>>,
+    // tp_str
     pub getattro: AtomicCell<Option<GetattroFunc>>,
     pub setattro: AtomicCell<Option<SetattroFunc>>,
-    pub buffer: Option<BufferFunc>,
+
+    // Functions to access object as input/output buffer
+    pub as_buffer: Option<BufferFunc>,
+
+    // Assigned meaning in release 2.1
+    // rich comparisons
+    pub richcompare: AtomicCell<Option<RichCompareFunc>>,
+
+    // Iterators
     pub iter: AtomicCell<Option<IterFunc>>,
     pub iternext: AtomicCell<Option<IterNextFunc>>,
+
+    // Flags to define presence of optional/expanded features
+    pub flags: PyTpFlags,
+    // tp_doc
+
+    // Strong reference on a heap type, borrowed reference on a static type
+    // tp_base
+    // tp_dict
+    pub descr_get: AtomicCell<Option<DescrGetFunc>>,
+    pub descr_set: AtomicCell<Option<DescrSetFunc>>,
+    // tp_dictoffset
+    // tp_init
+    // tp_alloc
+    pub new: Option<PyNativeFunc>,
+    // tp_free
+    // tp_is_gc
+    // tp_bases
+    // tp_mro
+    // tp_cache
+    // tp_subclasses
+    // tp_weaklist
+    pub del: AtomicCell<Option<DelFunc>>,
 }
 
 impl PyTypeSlots {
@@ -233,7 +268,7 @@ where
 #[pyimpl]
 pub trait Comparable: PyValue {
     #[pyslot]
-    fn tp_cmp(
+    fn tp_richcompare(
         zelf: &PyObjectRef,
         other: &PyObjectRef,
         op: PyComparisonOp,
@@ -461,7 +496,7 @@ pub trait SlotSetattro: PyValue {
 #[pyimpl]
 pub trait BufferProtocol: PyValue {
     #[pyslot]
-    fn tp_buffer(zelf: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Box<dyn Buffer>> {
+    fn tp_as_buffer(zelf: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Box<dyn PyBuffer>> {
         if let Some(zelf) = zelf.downcast_ref() {
             Self::get_buffer(zelf, vm)
         } else {
@@ -469,7 +504,7 @@ pub trait BufferProtocol: PyValue {
         }
     }
 
-    fn get_buffer(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<Box<dyn Buffer>>;
+    fn get_buffer(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<Box<dyn PyBuffer>>;
 }
 
 #[pyimpl]

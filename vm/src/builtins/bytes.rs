@@ -21,11 +21,11 @@ use crate::slots::{BufferProtocol, Comparable, Hashable, Iterable, PyComparisonO
 use crate::utils::Either;
 use crate::vm::VirtualMachine;
 use crate::{
-    IntoPyObject, PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef,
-    PyResult, PyValue, TryFromObject, TypeProtocol,
+    IdProtocol, IntoPyObject, PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef,
+    PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
 };
 
-use crate::builtins::memory::{Buffer, BufferOptions};
+use crate::builtins::memory::{BufferOptions, PyBuffer};
 
 /// "bytes(iterable_of_ints) -> bytes\n\
 /// bytes(string, encoding[, errors]) -> bytes\n\
@@ -109,12 +109,12 @@ impl PyBytes {
         options.get_bytes(cls, vm)
     }
 
-    #[pymethod(name = "__repr__")]
+    #[pymethod(magic)]
     pub(crate) fn repr(&self) -> String {
         self.inner.repr("", "")
     }
 
-    #[pymethod(name = "__len__")]
+    #[pymethod(magic)]
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -130,17 +130,17 @@ impl PyBytes {
         &self.inner.elements
     }
 
-    #[pymethod(name = "__sizeof__")]
+    #[pymethod(magic)]
     fn sizeof(&self) -> usize {
         size_of::<Self>() + self.inner.elements.len() * size_of::<u8>()
     }
 
-    #[pymethod(name = "__add__")]
+    #[pymethod(magic)]
     fn add(&self, other: PyBytesLike, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.new_bytes(self.inner.add(&*other.borrow_buf()))
     }
 
-    #[pymethod(name = "__contains__")]
+    #[pymethod(magic)]
     fn contains(
         &self,
         needle: Either<PyBytesInner, PyIntRef>,
@@ -149,7 +149,7 @@ impl PyBytes {
         self.inner.contains(needle, vm)
     }
 
-    #[pymethod(name = "__getitem__")]
+    #[pymethod(magic)]
     fn getitem(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         self.inner.getitem("byte", needle, vm) // byte != Self::NAME
     }
@@ -428,22 +428,30 @@ impl PyBytes {
         self.inner.title().into()
     }
 
-    #[pymethod(name = "__mul__")]
     #[pymethod(name = "__rmul__")]
-    fn mul(&self, value: isize, vm: &VirtualMachine) -> PyResult<PyBytes> {
-        if value > 0 && self.inner.len() as isize > std::isize::MAX / value {
+    #[pymethod(magic)]
+    fn mul(zelf: PyRef<Self>, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        if value > 0 && zelf.inner.len() as isize > std::isize::MAX / value {
             return Err(vm.new_overflow_error("repeated bytes are too long".to_owned()));
         }
-        Ok(self.inner.repeat(value).into())
+        if value == 1 && zelf.class().is(&vm.ctx.types.bytes_type) {
+            // Special case: when some `bytes` is multiplied by `1`,
+            // nothing really happens, we need to return an object itself
+            // with the same `id()` to be compatible with CPython.
+            // This only works for `bytes` itself, not its subclasses.
+            return Ok(zelf);
+        }
+        let bytes: PyBytes = zelf.inner.repeat(value).into();
+        Ok(bytes.into_ref(vm))
     }
 
     #[pymethod(name = "__mod__")]
-    fn modulo(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyBytes> {
+    fn mod_(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyBytes> {
         let formatted = self.inner.cformat(values, vm)?;
         Ok(formatted.into())
     }
 
-    #[pymethod(name = "__rmod__")]
+    #[pymethod(magic)]
     fn rmod(&self, _values: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.not_implemented()
     }
@@ -495,7 +503,7 @@ impl PyBytes {
 }
 
 impl BufferProtocol for PyBytes {
-    fn get_buffer(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<Box<dyn Buffer>> {
+    fn get_buffer(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<Box<dyn PyBuffer>> {
         let buf = BytesBuffer {
             bytes: zelf.clone(),
             options: BufferOptions {
@@ -513,7 +521,7 @@ struct BytesBuffer {
     options: BufferOptions,
 }
 
-impl Buffer for BytesBuffer {
+impl PyBuffer for BytesBuffer {
     fn obj_bytes(&self) -> BorrowedValue<[u8]> {
         self.bytes.as_bytes().into()
     }

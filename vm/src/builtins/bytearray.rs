@@ -2,7 +2,7 @@
 use super::bytes::{PyBytes, PyBytesRef};
 use super::dict::PyDictRef;
 use super::int::PyIntRef;
-use super::memory::{Buffer, BufferOptions, ResizeGuard};
+use super::memory::{BufferOptions, PyBuffer, ResizeGuard};
 use super::pystr::PyStrRef;
 use super::pytype::PyTypeRef;
 use super::tuple::PyTupleRef;
@@ -18,7 +18,7 @@ use crate::common::lock::{
     PyMappedRwLockReadGuard, PyMappedRwLockWriteGuard, PyRwLock, PyRwLockReadGuard,
     PyRwLockWriteGuard,
 };
-use crate::function::{OptionalArg, OptionalOption};
+use crate::function::{FuncArgs, OptionalArg, OptionalOption};
 use crate::sliceable::{PySliceableSequence, PySliceableSequenceMut, SequenceIndex};
 use crate::slots::{
     BufferProtocol, Comparable, Hashable, Iterable, PyComparisonOp, PyIter, Unhashable,
@@ -45,7 +45,7 @@ use std::mem::size_of;
 ///  - any object implementing the buffer API.\n  \
 ///  - an integer";
 #[pyclass(module = false, name = "bytearray")]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PyByteArray {
     inner: PyRwLock<PyBytesInner>,
     exports: AtomicCell<usize>,
@@ -102,12 +102,16 @@ pub(crate) fn init(context: &PyContext) {
 #[pyimpl(flags(BASETYPE), with(Hashable, Comparable, BufferProtocol, Iterable))]
 impl PyByteArray {
     #[pyslot]
-    fn tp_new(
-        cls: PyTypeRef,
-        options: ByteInnerNewOptions,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyRef<Self>> {
-        options.get_bytearray(cls, vm)
+    fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        PyByteArray::default().into_ref_with_type(vm, cls)
+    }
+
+    #[pymethod(magic)]
+    fn init(&self, options: ByteInnerNewOptions, vm: &VirtualMachine) -> PyResult<()> {
+        // First unpack bytearray and *then* get a lock to set it.
+        let mut inner = options.get_bytearray_inner(vm)?;
+        std::mem::swap(&mut *self.inner_mut(), &mut inner);
+        Ok(())
     }
 
     #[inline]
@@ -119,27 +123,32 @@ impl PyByteArray {
         self.inner.write()
     }
 
-    #[pymethod(name = "__repr__")]
+    #[pymethod(magic)]
     fn repr(&self) -> String {
         self.inner().repr("bytearray(", ")")
     }
 
-    #[pymethod(name = "__len__")]
+    #[pymethod(magic)]
+    fn alloc(&self) -> usize {
+        self.inner().capacity()
+    }
+
+    #[pymethod(magic)]
     fn len(&self) -> usize {
         self.borrow_buf().len()
     }
 
-    #[pymethod(name = "__sizeof__")]
+    #[pymethod(magic)]
     fn sizeof(&self) -> usize {
         size_of::<Self>() + self.borrow_buf().len() * size_of::<u8>()
     }
 
-    #[pymethod(name = "__add__")]
+    #[pymethod(magic)]
     fn add(&self, other: PyBytesLike, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.new_bytearray(self.inner().add(&*other.borrow_buf()))
     }
 
-    #[pymethod(name = "__contains__")]
+    #[pymethod(magic)]
     fn contains(
         &self,
         needle: Either<PyBytesInner, PyIntRef>,
@@ -589,8 +598,8 @@ impl PyByteArray {
         self.inner().title().into()
     }
 
-    #[pymethod(name = "__mul__")]
     #[pymethod(name = "__rmul__")]
+    #[pymethod(magic)]
     fn mul(&self, n: isize) -> Self {
         self.inner().repeat(n).into()
     }
@@ -601,12 +610,12 @@ impl PyByteArray {
     }
 
     #[pymethod(name = "__mod__")]
-    fn modulo(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyByteArray> {
+    fn mod_(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyByteArray> {
         let formatted = self.inner().cformat(values, vm)?;
         Ok(formatted.into())
     }
 
-    #[pymethod(name = "__rmod__")]
+    #[pymethod(magic)]
     fn rmod(&self, _values: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.not_implemented()
     }
@@ -659,7 +668,7 @@ impl Comparable for PyByteArray {
 }
 
 impl BufferProtocol for PyByteArray {
-    fn get_buffer(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<Box<dyn Buffer>> {
+    fn get_buffer(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<Box<dyn PyBuffer>> {
         zelf.exports.fetch_add(1);
         let buf = ByteArrayBuffer {
             bytearray: zelf.clone(),
@@ -679,7 +688,7 @@ struct ByteArrayBuffer {
     options: BufferOptions,
 }
 
-impl Buffer for ByteArrayBuffer {
+impl PyBuffer for ByteArrayBuffer {
     fn obj_bytes(&self) -> BorrowedValue<[u8]> {
         self.bytearray.borrow_buf().into()
     }

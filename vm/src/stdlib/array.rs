@@ -1,6 +1,6 @@
 use crate::builtins::float::IntoPyFloat;
 use crate::builtins::list::{PyList, PyListRef};
-use crate::builtins::memory::{Buffer, BufferOptions, ResizeGuard};
+use crate::builtins::memory::{BufferOptions, PyBuffer, ResizeGuard};
 use crate::builtins::pystr::PyStrRef;
 use crate::builtins::pytype::PyTypeRef;
 use crate::builtins::slice::PySliceRef;
@@ -711,7 +711,7 @@ impl PyArray {
         }
     }
 
-    #[pymethod(name = "__delitem__")]
+    #[pymethod(magic)]
     fn delitem(
         zelf: PyRef<Self>,
         needle: Either<isize, PySliceRef>,
@@ -723,7 +723,7 @@ impl PyArray {
         }
     }
 
-    #[pymethod(name = "__add__")]
+    #[pymethod(magic)]
     fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         if let Some(other) = other.payload::<PyArray>() {
             self.read()
@@ -737,7 +737,7 @@ impl PyArray {
         }
     }
 
-    #[pymethod(name = "__iadd__")]
+    #[pymethod(magic)]
     fn iadd(zelf: PyRef<Self>, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         if zelf.is(&other) {
             zelf.try_resizable(vm)?.imul(2);
@@ -753,28 +753,24 @@ impl PyArray {
         }
     }
 
-    #[pymethod(name = "__mul__")]
+    #[pymethod(name = "__rmul__")]
+    #[pymethod(magic)]
     fn mul(&self, counter: isize, vm: &VirtualMachine) -> PyRef<Self> {
         PyArray::from(self.read().mul(counter)).into_ref(vm)
     }
 
-    #[pymethod(name = "__rmul__")]
-    fn rmul(&self, counter: isize, vm: &VirtualMachine) -> PyRef<Self> {
-        self.mul(counter, vm)
-    }
-
-    #[pymethod(name = "__imul__")]
+    #[pymethod(magic)]
     fn imul(zelf: PyRef<Self>, counter: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         zelf.try_resizable(vm)?.imul(counter);
         Ok(zelf)
     }
 
-    #[pymethod(name = "__repr__")]
+    #[pymethod(magic)]
     fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
         zelf.read().repr(vm)
     }
 
-    #[pymethod(name = "__len__")]
+    #[pymethod(magic)]
     pub(crate) fn len(&self) -> usize {
         self.read().len()
     }
@@ -853,7 +849,7 @@ impl Comparable for PyArray {
 }
 
 impl BufferProtocol for PyArray {
-    fn get_buffer(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<Box<dyn Buffer>> {
+    fn get_buffer(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<Box<dyn PyBuffer>> {
         zelf.exports.fetch_add(1);
         let array = zelf.read();
         let buf = ArrayBuffer {
@@ -876,7 +872,7 @@ struct ArrayBuffer {
     options: BufferOptions,
 }
 
-impl Buffer for ArrayBuffer {
+impl PyBuffer for ArrayBuffer {
     fn obj_bytes(&self) -> BorrowedValue<[u8]> {
         self.array.get_bytes().into()
     }
