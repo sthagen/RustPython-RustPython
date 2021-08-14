@@ -201,17 +201,17 @@ impl PyRange {
         PyRange { start, stop, step }.into_ref_with_type(vm, cls)
     }
 
-    #[pyproperty(name = "start")]
+    #[pyproperty]
     fn start(&self) -> PyIntRef {
         self.start.clone()
     }
 
-    #[pyproperty(name = "stop")]
+    #[pyproperty]
     fn stop(&self) -> PyIntRef {
         self.stop.clone()
     }
 
-    #[pyproperty(name = "step")]
+    #[pyproperty]
     fn step(&self) -> PyIntRef {
         self.step.clone()
     }
@@ -301,7 +301,7 @@ impl PyRange {
         (vm.ctx.types.range_type.clone(), range_paramters_tuple)
     }
 
-    #[pymethod(name = "index")]
+    #[pymethod]
     fn index(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<BigInt> {
         if let Ok(int) = needle.clone().downcast::<PyInt>() {
             match self.index_of(int.as_bigint()) {
@@ -318,7 +318,7 @@ impl PyRange {
         }
     }
 
-    #[pymethod(name = "count")]
+    #[pymethod]
     fn count(&self, item: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
         if let Ok(int) = item.clone().downcast::<PyInt>() {
             if self.index_of(int.as_bigint()).is_some() {

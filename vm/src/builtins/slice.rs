@@ -30,7 +30,7 @@ pub type PySliceRef = PyRef<PySlice>;
 
 #[pyimpl(with(Hashable, Comparable))]
 impl PySlice {
-    #[pyproperty(name = "start")]
+    #[pyproperty]
     fn start(&self, vm: &VirtualMachine) -> PyObjectRef {
         self.start.clone().into_pyobject(vm)
     }
@@ -42,12 +42,12 @@ impl PySlice {
         }
     }
 
-    #[pyproperty(name = "stop")]
+    #[pyproperty]
     fn stop(&self, _vm: &VirtualMachine) -> PyObjectRef {
         self.stop.clone()
     }
 
-    #[pyproperty(name = "step")]
+    #[pyproperty]
     fn step(&self, vm: &VirtualMachine) -> PyObjectRef {
         self.step.clone().into_pyobject(vm)
     }
@@ -204,7 +204,7 @@ impl PySlice {
         Ok((start, stop, step))
     }
 
-    #[pymethod(name = "indices")]
+    #[pymethod]
     fn indices(&self, length: PyIntRef, vm: &VirtualMachine) -> PyResult {
         let length = length.as_bigint();
         if length.is_negative() {

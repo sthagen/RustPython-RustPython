@@ -21,7 +21,7 @@ use crate::builtins::pystr::{PyStr, PyStrRef};
 use crate::builtins::pytype::PyTypeRef;
 use crate::builtins::set::PySet;
 use crate::builtins::tuple::{PyTuple, PyTupleRef};
-use crate::byteslike::PyBytesLike;
+use crate::byteslike::ArgBytesLike;
 use crate::common::lock::PyRwLock;
 use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
 use crate::function::{ArgumentError, FromArgs, FuncArgs, OptionalArg};
@@ -143,6 +143,7 @@ impl FsPath {
             Self::Bytes(_) => OutputMode::Bytes,
         }
     }
+    #[cfg(not(target_os = "redox"))]
     pub(crate) fn as_bytes(&self) -> &[u8] {
         // TODO: FS encodings
         match self {
@@ -262,27 +263,7 @@ impl IntoPyException for &'_ io::Error {
 #[cfg(unix)]
 impl IntoPyException for nix::Error {
     fn into_pyexception(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
-        match self {
-            nix::Error::InvalidPath => {
-                let exc_type = vm.ctx.exceptions.file_not_found_error.clone();
-                vm.new_exception_msg(exc_type, self.to_string())
-            }
-            nix::Error::InvalidUtf8 => {
-                let exc_type = vm.ctx.exceptions.unicode_error.clone();
-                vm.new_exception_msg(exc_type, self.to_string())
-            }
-            nix::Error::UnsupportedOperation => vm.new_runtime_error(self.to_string()),
-            nix::Error::Sys(errno) => {
-                let exc_type = posix::convert_nix_errno(vm, errno);
-                vm.new_exception(
-                    exc_type,
-                    vec![
-                        vm.ctx.new_int(errno as i32),
-                        vm.ctx.new_str(self.to_string()),
-                    ],
-                )
-            }
-        }
+        io::Error::from(self).into_pyexception(vm)
     }
 }
 
@@ -517,34 +498,73 @@ mod _os {
         fd.map(|fd| fd.0).map_err(|e| e.into_pyexception(vm))
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[derive(FromArgs)]
+    struct SendFileArgs {
+        #[pyarg(any)]
+        out_fd: i32,
+        #[pyarg(any)]
+        in_fd: i32,
+        #[pyarg(any)]
+        offset: i64,
+        #[pyarg(any)]
+        count: i64,
+        #[cfg(target_os = "macos")]
+        #[pyarg(any, optional)]
+        headers: OptionalArg<PyObjectRef>,
+        #[cfg(target_os = "macos")]
+        #[pyarg(any, optional)]
+        trailers: OptionalArg<PyObjectRef>,
+        #[cfg(target_os = "macos")]
+        #[allow(dead_code)]
+        #[pyarg(any, default)]
+        // TODO: not implemented
+        flags: OptionalArg<i32>,
+    }
+
     #[cfg(target_os = "linux")]
     #[pyfunction]
-    fn sendfile(out_fd: i32, in_fd: i32, offset: i64, count: u64, vm: &VirtualMachine) -> PyResult {
-        let mut file_offset = offset;
+    fn sendfile(args: SendFileArgs, vm: &VirtualMachine) -> PyResult {
+        let mut file_offset = args.offset;
 
-        let res =
-            nix::sys::sendfile::sendfile(out_fd, in_fd, Some(&mut file_offset), count as usize)
-                .map_err(|err| err.into_pyexception(vm))?;
+        let res = nix::sys::sendfile::sendfile(
+            args.out_fd,
+            args.in_fd,
+            Some(&mut file_offset),
+            args.count as usize,
+        )
+        .map_err(|err| err.into_pyexception(vm))?;
         Ok(vm.ctx.new_int(res as u64))
     }
 
     #[cfg(target_os = "macos")]
-    #[pyfunction]
-    #[allow(clippy::too_many_arguments)]
-    fn sendfile(
-        out_fd: i32,
-        in_fd: i32,
-        offset: i64,
-        count: i64,
-        headers: OptionalArg<PyObjectRef>,
-        trailers: OptionalArg<PyObjectRef>,
-        _flags: OptionalArg<i32>,
+    fn _extract_vec_bytes(
+        x: OptionalArg,
         vm: &VirtualMachine,
-    ) -> PyResult {
-        let headers = match headers.into_option() {
-            Some(x) => Some(vm.extract_elements::<PyBytesLike>(&x)?),
+    ) -> PyResult<Option<Vec<ArgBytesLike>>> {
+        let inner = match x.into_option() {
+            Some(v) => {
+                let v = vm.extract_elements::<ArgBytesLike>(&v)?;
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
             None => None,
         };
+        Ok(inner)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[pyfunction]
+    fn sendfile(args: SendFileArgs, vm: &VirtualMachine) -> PyResult {
+        let headers = _extract_vec_bytes(args.headers, vm)?;
+        let count = headers
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.len()).sum())
+            .unwrap_or(0) as i64
+            + args.count;
 
         let headers = headers
             .as_ref()
@@ -554,11 +574,7 @@ mod _os {
             .map(|v| v.iter().map(|borrowed| &**borrowed).collect::<Vec<_>>());
         let headers = headers.as_deref();
 
-        let trailers = match trailers.into_option() {
-            Some(x) => Some(vm.extract_elements::<PyBytesLike>(&x)?),
-            None => None,
-        };
-
+        let trailers = _extract_vec_bytes(args.trailers, vm)?;
         let trailers = trailers
             .as_ref()
             .map(|v| v.iter().map(|b| b.borrow_buf()).collect::<Vec<_>>());
@@ -567,8 +583,14 @@ mod _os {
             .map(|v| v.iter().map(|borrowed| &**borrowed).collect::<Vec<_>>());
         let trailers = trailers.as_deref();
 
-        let (res, written) =
-            nix::sys::sendfile::sendfile(in_fd, out_fd, offset, Some(count), headers, trailers);
+        let (res, written) = nix::sys::sendfile::sendfile(
+            args.in_fd,
+            args.out_fd,
+            args.offset,
+            Some(count),
+            headers,
+            trailers,
+        );
         res.map_err(|err| err.into_pyexception(vm))?;
         Ok(vm.ctx.new_int(written as u64))
     }
@@ -591,7 +613,7 @@ mod _os {
     }
 
     #[pyfunction]
-    fn write(fd: i32, data: PyBytesLike, vm: &VirtualMachine) -> PyResult {
+    fn write(fd: i32, data: ArgBytesLike, vm: &VirtualMachine) -> PyResult {
         let mut file = Fd(fd);
         let written = data
             .with_ref(|b| file.write(b))
@@ -2014,12 +2036,10 @@ pub(crate) use _os::os_open as open;
 mod posix {
     use super::*;
 
-    use crate::builtins::dict::PyMapping;
     use crate::builtins::list::PyListRef;
-    use crate::PyIterable;
     use bitflags::bitflags;
-    use nix::errno::{errno, Errno};
     use nix::unistd::{self, Gid, Pid, Uid};
+    #[allow(unused_imports)] // TODO: use will be unnecessary in edition 2021
     use std::convert::TryFrom;
     use std::os::unix::io::RawFd;
 
@@ -2089,13 +2109,6 @@ mod posix {
         }
     }
 
-    pub(super) fn convert_nix_errno(vm: &VirtualMachine, errno: Errno) -> PyTypeRef {
-        match errno {
-            Errno::EPERM => vm.ctx.exceptions.permission_error.clone(),
-            _ => vm.ctx.exceptions.os_error.clone(),
-        }
-    }
-
     struct Permissions {
         is_readable: bool,
         is_writable: bool,
@@ -2139,6 +2152,7 @@ mod posix {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn getgroups_impl() -> nix::Result<Vec<Gid>> {
         use libc::{c_int, gid_t};
+        use nix::errno::Errno;
         use std::ptr;
         let ret = unsafe { libc::getgroups(0, ptr::null_mut()) };
         let mut groups = Vec::<Gid>::with_capacity(Errno::result(ret)? as usize);
@@ -2160,7 +2174,7 @@ mod posix {
 
     #[cfg(target_os = "redox")]
     fn getgroups_impl() -> nix::Result<Vec<Gid>> {
-        Err(nix::Error::UnsupportedOperation)
+        Err(nix::Error::EOPNOTSUPP)
     }
 
     #[pyfunction]
@@ -2769,7 +2783,7 @@ mod posix {
     // cfg from nix
     #[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "redox")))]
     #[pyfunction]
-    fn setgroups(group_ids: PyIterable<u32>, vm: &VirtualMachine) -> PyResult<()> {
+    fn setgroups(group_ids: crate::PyIterable<u32>, vm: &VirtualMachine) -> PyResult<()> {
         let gids = group_ids
             .iter(vm)?
             .map(|entry| match entry {
@@ -2816,13 +2830,13 @@ mod posix {
         #[pyarg(positional)]
         path: PyPathLike,
         #[pyarg(positional)]
-        args: PyIterable<PyPathLike>,
+        args: crate::PyIterable<PyPathLike>,
         #[pyarg(positional)]
-        env: PyMapping,
+        env: crate::builtins::dict::PyMapping,
         #[pyarg(named, default)]
-        file_actions: Option<PyIterable<PyTupleRef>>,
+        file_actions: Option<crate::PyIterable<PyTupleRef>>,
         #[pyarg(named, default)]
-        setsigdef: Option<PyIterable<i32>>,
+        setsigdef: Option<crate::PyIterable<i32>>,
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
@@ -3007,7 +3021,7 @@ mod posix {
     fn waitpid(pid: libc::pid_t, opt: i32, vm: &VirtualMachine) -> PyResult<(libc::pid_t, i32)> {
         let mut status = 0;
         let pid = unsafe { libc::waitpid(pid, &mut status, opt) };
-        let pid = Errno::result(pid).map_err(|err| err.into_pyexception(vm))?;
+        let pid = nix::Error::result(pid).map_err(|err| err.into_pyexception(vm))?;
         Ok((pid, status))
     }
     #[pyfunction]
@@ -3185,6 +3199,7 @@ mod posix {
         who: PriorityWhoType,
         vm: &VirtualMachine,
     ) -> PyResult {
+        use nix::errno::{errno, Errno};
         Errno::clear();
         let retval = unsafe { libc::getpriority(which, who) };
         if errno() != 0 {

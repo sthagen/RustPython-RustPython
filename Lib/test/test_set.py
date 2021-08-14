@@ -258,8 +258,6 @@ class TestJointOps:
             it = pickle.loads(d)
             self.assertEqual(self.thetype(it), data - self.thetype((drop,)))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_deepcopy(self):
         class Tracer:
             def __init__(self, value):
@@ -379,8 +377,6 @@ class TestSet(TestJointOps, unittest.TestCase):
     thetype = set
     basetype = set
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_contains(self):
         super().test_contains()
 
@@ -440,8 +436,6 @@ class TestSet(TestJointOps, unittest.TestCase):
         self.assertEqual(self.s, dup)
         self.assertRaises(TypeError, self.s.add, [])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_remove(self):
         self.s.remove('a')
         self.assertNotIn('a', self.s)
@@ -464,8 +458,6 @@ class TestSet(TestJointOps, unittest.TestCase):
             else:
                 self.fail()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_remove_keyerror_set(self):
         key = self.thetype([3, 4])
         try:
@@ -477,8 +469,6 @@ class TestSet(TestJointOps, unittest.TestCase):
         else:
             self.fail()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_discard(self):
         self.s.discard('a')
         self.assertNotIn('a', self.s)
@@ -681,8 +671,6 @@ class TestSetSubclass(TestSet):
     thetype = SetSubclass
     basetype = set
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickling(self):
         super().test_pickling()
 
@@ -696,8 +684,6 @@ class SetSubclassWithKeywordArgs(set):
         set.__init__(self, iterable)
 
 class TestSetSubclassWithKeywordArgs(TestSet):
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_keywords_in_subclass(self):
         'SF bug #1486663 -- this used to erroneously raise a TypeError'
         SetSubclassWithKeywordArgs(newarg=1)
@@ -795,8 +781,6 @@ class TestFrozenSetSubclass(TestFrozenSet):
     thetype = FrozenSetSubclass
     basetype = frozenset
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickling(self):
         super().test_pickling()
 
@@ -1599,8 +1583,6 @@ class TestCopyingSingleton(TestCopying, unittest.TestCase):
     def setUp(self):
         self.set = set(["hello"])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_deep_copy(self):
         super().test_deep_copy()
 
@@ -1610,8 +1592,6 @@ class TestCopyingTriple(TestCopying, unittest.TestCase):
     def setUp(self):
         self.set = set(["zero", 0, None])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_deep_copy(self):
         super().test_deep_copy()
 
@@ -1621,8 +1601,6 @@ class TestCopyingTuple(TestCopying, unittest.TestCase):
     def setUp(self):
         self.set = set([(1, 2)])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_deep_copy(self):
         super().test_deep_copy()
 
@@ -1632,8 +1610,6 @@ class TestCopyingNested(TestCopying, unittest.TestCase):
     def setUp(self):
         self.set = set([((1, 2), (3, 4))])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_deep_copy(self):
         super().test_deep_copy()
 

@@ -125,7 +125,7 @@ impl PyTuple {
         !self.elements.is_empty()
     }
 
-    #[pymethod(name = "count")]
+    #[pymethod]
     fn count(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
         let mut count: usize = 0;
         for element in self.elements.iter() {
@@ -196,7 +196,7 @@ impl PyTuple {
         Ok(result)
     }
 
-    #[pymethod(name = "index")]
+    #[pymethod]
     fn index(
         &self,
         needle: PyObjectRef,
@@ -336,7 +336,7 @@ impl PyValue for PyTupleIterator {
 
 #[pyimpl(with(PyIter))]
 impl PyTupleIterator {
-    #[pymethod(name = "__length_hint__")]
+    #[pymethod(magic)]
     fn length_hint(&self) -> usize {
         match self.status.load() {
             Active => self.tuple.len().saturating_sub(self.position.load()),

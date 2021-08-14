@@ -29,8 +29,6 @@ class MutateCmp:
 
 class TestBasic(unittest.TestCase):
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_basics(self):
         d = deque(range(-5125, -5000))
         d.__init__(range(200))
@@ -50,8 +48,6 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(right, list(range(150, 400)))
         self.assertEqual(list(d), list(range(50, 150)))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_maxlen(self):
         self.assertRaises(ValueError, deque, 'abc', -1)
         self.assertRaises(ValueError, deque, 'abc', -2)
@@ -109,8 +105,6 @@ class TestBasic(unittest.TestCase):
         d.extendleft(it)
         self.assertEqual(list(it), [])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_maxlen_attribute(self):
         self.assertEqual(deque().maxlen, None)
         self.assertEqual(deque('abc').maxlen, None)
@@ -205,7 +199,6 @@ class TestBasic(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _ = d.count(3)
 
-    @unittest.skip("TODO: RUSTPYTHON hangs")
     def test_extend(self):
         d = deque('a')
         self.assertRaises(TypeError, d.extend, 1)
@@ -328,8 +321,6 @@ class TestBasic(unittest.TestCase):
         with self.assertRaises(ValueError):
             i = d.index("Hello world", 0, 4)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_insert(self):
         # Test to make sure insert behaves like lists
         elements = 'ABCDEFGHI'
@@ -854,8 +845,6 @@ class DequeWithBadIter(deque):
 
 class TestSubclass(unittest.TestCase):
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_basics(self):
         d = Deque(range(25))
         d.__init__(range(200))
@@ -976,7 +965,6 @@ class SubclassWithKwargs(deque):
         deque.__init__(self)
 
 class TestSubclassWithKwargs(unittest.TestCase):
-    @unittest.skip("TODO: RUSTPYTHON TypeError: Unexpected keyword argument newarg")
     def test_subclass_with_kwargs(self):
         # SF bug #1486663 -- this used to erroneously raise a TypeError
         SubclassWithKwargs(newarg=1)

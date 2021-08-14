@@ -89,12 +89,12 @@ impl PyComplex {
         self.value
     }
 
-    #[pyproperty(name = "real")]
+    #[pyproperty]
     fn real(&self) -> f64 {
         self.value.re
     }
 
-    #[pyproperty(name = "imag")]
+    #[pyproperty]
     fn imag(&self) -> f64 {
         self.value.im
     }
@@ -149,7 +149,7 @@ impl PyComplex {
         self.op(other, |a, b| Ok(b - a), vm)
     }
 
-    #[pymethod(name = "conjugate")]
+    #[pymethod]
     fn conjugate(&self) -> Complex64 {
         self.value.conj()
     }

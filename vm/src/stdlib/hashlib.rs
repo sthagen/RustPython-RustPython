@@ -60,27 +60,27 @@ mod hashlib {
                 .into_object())
         }
 
-        #[pyproperty(name = "name")]
+        #[pyproperty]
         fn name(&self) -> String {
             self.name.clone()
         }
 
-        #[pyproperty(name = "digest_size")]
+        #[pyproperty]
         fn digest_size(&self, vm: &VirtualMachine) -> PyResult {
             Ok(vm.ctx.new_int(self.read().digest_size()))
         }
 
-        #[pymethod(name = "update")]
+        #[pymethod]
         fn update(&self, data: PyBytesRef) {
             self.write().input(data.as_bytes());
         }
 
-        #[pymethod(name = "digest")]
+        #[pymethod]
         fn digest(&self) -> PyBytes {
             self.get_digest().into()
         }
 
-        #[pymethod(name = "hexdigest")]
+        #[pymethod]
         fn hexdigest(&self) -> String {
             let result = self.get_digest();
             hex::encode(result)

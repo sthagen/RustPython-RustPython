@@ -313,12 +313,12 @@ impl PyPattern {
         do_match(self, text)
     }
 
-    #[pymethod(name = "search")]
+    #[pymethod]
     fn search(&self, text: PyStrRef) -> Option<PyMatch> {
         do_search(self, text)
     }
 
-    #[pymethod(name = "sub")]
+    #[pymethod]
     fn sub(&self, repl: PyStrRef, text: PyStrRef, vm: &VirtualMachine) -> PyResult {
         let replaced_text = self
             .regex
@@ -327,12 +327,12 @@ impl PyPattern {
         Ok(vm.ctx.new_str(replaced_text))
     }
 
-    #[pymethod(name = "subn")]
+    #[pymethod]
     fn subn(&self, repl: PyStrRef, text: PyStrRef, vm: &VirtualMachine) -> PyResult {
         self.sub(repl, text, vm)
     }
 
-    #[pyproperty(name = "pattern")]
+    #[pyproperty]
     fn pattern(&self, vm: &VirtualMachine) -> PyResult {
         Ok(vm.ctx.new_str(self.pattern.clone()))
     }
