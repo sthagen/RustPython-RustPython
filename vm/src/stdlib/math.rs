@@ -131,8 +131,21 @@ fn math_log1p(x: IntoPyFloat) -> f64 {
 make_math_func!(math_log2, log2);
 make_math_func!(math_log10, log10);
 
-fn math_pow(x: IntoPyFloat, y: IntoPyFloat) -> f64 {
-    x.to_f64().powf(y.to_f64())
+fn math_pow(x: IntoPyFloat, y: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
+    let x = x.to_f64();
+    let y = y.to_f64();
+
+    if x < 0.0 && x.is_finite() && y.fract() != 0.0 && y.is_finite() {
+        return Err(vm.new_value_error("math domain error".to_owned()));
+    }
+
+    if x == 0.0 && y < 0.0 {
+        return Err(vm.new_value_error("math domain error".to_owned()));
+    }
+
+    let value = x.powf(y);
+
+    Ok(value)
 }
 
 fn math_sqrt(value: IntoPyFloat, vm: &VirtualMachine) -> PyResult<f64> {
@@ -657,6 +670,31 @@ fn math_remainder(x: IntoPyFloat, y: IntoPyFloat, vm: &VirtualMachine) -> PyResu
     Ok(x)
 }
 
+#[derive(FromArgs)]
+struct ProdArgs {
+    #[pyarg(positional)]
+    iterable: PyIterable<PyObjectRef>,
+    #[pyarg(named, optional)]
+    start: OptionalArg<PyObjectRef>,
+}
+fn math_prod(args: ProdArgs, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+    let iter = args.iterable;
+
+    let mut result = args.start.unwrap_or_else(|| vm.new_pyobj(1));
+
+    // TODO: CPython has optimized implementation for this
+    // refer: https://github.com/python/cpython/blob/main/Modules/mathmodule.c#L3093-L3193
+    for obj in iter.iter(vm)? {
+        let obj = obj?;
+
+        result = vm
+            ._mul(&result, &obj)
+            .map_err(|_| vm.new_type_error("math type error".to_owned()))?;
+    }
+
+    Ok(result)
+}
+
 pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let ctx = &vm.ctx;
 
@@ -713,6 +751,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         "fmod" => named_function!(ctx, math, fmod),
         "fsum" => named_function!(ctx, math, fsum),
         "remainder" => named_function!(ctx, math, remainder),
+        "prod" => named_function!(ctx, math, prod),
 
         // Rounding functions:
         "trunc" => named_function!(ctx, math, trunc),
