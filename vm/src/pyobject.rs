@@ -685,14 +685,20 @@ where
     T: IntoPyObject,
 {
     fn get_item(&self, key: T, vm: &VirtualMachine) -> PyResult {
-        vm.get_special_method(self.clone(), "__getitem__")?
-            .map_err(|obj| {
-                vm.new_type_error(format!(
-                    "'{}' object is not subscriptable",
-                    obj.class().name
-                ))
-            })?
-            .invoke((key,), vm)
+        match vm.get_special_method(self.clone(), "__getitem__")? {
+            Ok(special_method) => return special_method.invoke((key,), vm),
+            Err(obj) => {
+                if obj.isinstance(&vm.ctx.types.type_type) {
+                    if let Some(class_getitem) = vm.get_attribute_opt(obj, "__class_getitem__")? {
+                        return vm.invoke(&class_getitem, (key,));
+                    }
+                }
+            }
+        }
+        Err(vm.new_type_error(format!(
+            "'{}' object is not subscriptable",
+            self.class().name
+        )))
     }
 
     fn set_item(&self, key: T, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
@@ -848,7 +854,7 @@ pub trait TryFromObject: Sized {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self>;
 }
 
-/// Rust-side only version of TryFromObject to reduce unnessessary Rc::clone
+/// Rust-side only version of TryFromObject to reduce unnecessary Rc::clone
 impl<T: TryFromBorrowedObject> TryFromObject for T {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
         TryFromBorrowedObject::try_from_borrowed_object(vm, &obj)

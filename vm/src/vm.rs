@@ -377,7 +377,7 @@ impl VirtualMachine {
 
         let res = inner_init();
 
-        self.expect_pyresult(res, "initializiation failed");
+        self.expect_pyresult(res, "initialization failed");
 
         self.initialized = true;
     }
@@ -594,6 +594,9 @@ impl VirtualMachine {
         vm_trace!("New exception created: {}", exc_type.name);
 
         PyRef::new_ref(
+            // TODO: this costructor might be invalid, because multiple
+            // exception (even builtin ones) are using custom constructors,
+            // see `OSError` as an example:
             PyBaseException::new(args, self),
             exc_type,
             Some(self.ctx.new_dict()),
@@ -1658,7 +1661,7 @@ impl VirtualMachine {
                 .unwrap();
             Ok(match cmp(obj, other, op, self)? {
                 Either::A(obj) => PyArithmaticValue::from_object(self, obj).map(Either::A),
-                Either::B(arithmatic) => arithmatic.map(Either::B),
+                Either::B(arithmetic) => arithmetic.map(Either::B),
             })
         };
 

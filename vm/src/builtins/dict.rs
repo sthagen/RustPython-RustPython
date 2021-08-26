@@ -13,9 +13,9 @@ use crate::iterator;
 use crate::slots::{Comparable, Hashable, Iterable, PyComparisonOp, PyIter, Unhashable};
 use crate::vm::{ReprGuard, VirtualMachine};
 use crate::{
-    IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue::*, PyAttributes, PyClassImpl,
-    PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
-    TypeProtocol,
+    IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue::*, PyAttributes, PyClassDef,
+    PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue,
+    TryFromObject, TypeProtocol,
 };
 
 pub type DictContentType = dictdatatype::Dict;
@@ -462,7 +462,7 @@ impl PyDictRef {
         key: K,
         vm: &VirtualMachine,
     ) -> PyResult<Option<PyObjectRef>> {
-        // Test if this object is a true dict, or mabye a subclass?
+        // Test if this object is a true dict, or maybe a subclass?
         // If it is a dict, we can directly invoke inner_get_item_option,
         // and prevent the creation of the KeyError exception.
         // Also note, that we prevent the creation of a full PyStr object
@@ -587,45 +587,67 @@ impl Iterator for DictIter {
     }
 }
 
+#[pyimpl]
+trait DictIterator: PyValue + PyClassDef
+where
+    Self::ReverseIter: PyValue,
+{
+    type ReverseIter;
+
+    fn dict(&self) -> &PyDictRef;
+    fn item(vm: &VirtualMachine, key: PyObjectRef, value: PyObjectRef) -> PyObjectRef;
+
+    #[pymethod(magic)]
+    fn len(&self) -> usize {
+        self.dict().len()
+    }
+
+    #[allow(clippy::redundant_closure_call)]
+    #[pymethod(magic)]
+    fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
+        let s = if let Some(_guard) = ReprGuard::enter(vm, zelf.as_object()) {
+            let mut str_parts = vec![];
+            for (key, value) in zelf.dict().clone() {
+                let s = vm.to_repr(&Self::item(vm, key, value))?;
+                str_parts.push(s.as_str().to_owned());
+            }
+            format!("{}([{}])", Self::NAME, str_parts.join(", "))
+        } else {
+            "{...}".to_owned()
+        };
+        Ok(s)
+    }
+
+    #[pymethod(magic)]
+    fn reversed(&self) -> Self::ReverseIter;
+}
+
 macro_rules! dict_iterator {
     ( $name: ident, $iter_name: ident, $reverse_iter_name: ident,
       $class: ident, $iter_class: ident, $reverse_iter_class: ident,
       $class_name: literal, $iter_class_name: literal, $reverse_iter_class_name: literal,
       $result_fn: expr) => {
-        #[pyclass(module=false,name = $class_name)]
+        #[pyclass(module = false, name = $class_name)]
         #[derive(Debug)]
         pub(crate) struct $name {
             pub dict: PyDictRef,
         }
 
-        #[pyimpl(with(Comparable, Iterable))]
         impl $name {
             fn new(dict: PyDictRef) -> Self {
                 $name { dict }
             }
+        }
 
-            #[pymethod(magic)]
-            fn len(&self) -> usize {
-                self.dict.clone().len()
+        impl DictIterator for $name {
+            type ReverseIter = $reverse_iter_name;
+            fn dict(&self) -> &PyDictRef {
+                &self.dict
             }
-
-            #[allow(clippy::redundant_closure_call)]
-            #[pymethod(magic)]
-            fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
-                let s = if let Some(_guard) = ReprGuard::enter(vm, zelf.as_object()) {
-                    let mut str_parts = vec![];
-                    for (key, value) in zelf.dict.clone() {
-                        let s = vm.to_repr(&($result_fn)(vm, key, value))?;
-                        str_parts.push(s.as_str().to_owned());
-                    }
-                    format!("{}([{}])", $class_name, str_parts.join(", "))
-                } else {
-                    "{...}".to_owned()
-                };
-                Ok(s)
+            fn item(vm: &VirtualMachine, key: PyObjectRef, value: PyObjectRef) -> PyObjectRef {
+                $result_fn(vm, key, value)
             }
-            #[pymethod(magic)]
-            fn reversed(&self) -> $reverse_iter_name {
+            fn reversed(&self) -> Self::ReverseIter {
                 $reverse_iter_name::new(self.dict.clone())
             }
         }
@@ -670,7 +692,7 @@ macro_rules! dict_iterator {
             }
         }
 
-        #[pyclass(module=false,name = $iter_class_name)]
+        #[pyclass(module = false, name = $iter_class_name)]
         #[derive(Debug)]
         pub(crate) struct $iter_name {
             pub dict: PyDictRef,
@@ -718,12 +740,8 @@ macro_rules! dict_iterator {
                                 "dictionary changed size during iteration".to_owned(),
                             ));
                         }
-                        let mut position = zelf.position.load();
-                        match zelf.dict.entries.next_entry(&mut position) {
-                            Some((key, value)) => {
-                                zelf.position.store(position);
-                                Ok(($result_fn)(vm, key, value))
-                            }
+                        match zelf.dict.entries.next_entry_atomic(&zelf.position) {
+                            Some((key, value)) => Ok(($result_fn)(vm, key, value)),
                             None => {
                                 zelf.status.store(IterStatus::Exhausted);
                                 Err(vm.new_stop_iteration())
@@ -734,7 +752,7 @@ macro_rules! dict_iterator {
             }
         }
 
-        #[pyclass(module=false,name = $reverse_iter_class_name)]
+        #[pyclass(module = false, name = $reverse_iter_class_name)]
         #[derive(Debug)]
         pub(crate) struct $reverse_iter_name {
             pub dict: PyDictRef,
@@ -753,7 +771,7 @@ macro_rules! dict_iterator {
         impl $reverse_iter_name {
             fn new(dict: PyDictRef) -> Self {
                 $reverse_iter_name {
-                    position: AtomicCell::new(1),
+                    position: AtomicCell::new(0),
                     size: dict.size(),
                     dict,
                     status: AtomicCell::new(IterStatus::Active),
@@ -782,12 +800,8 @@ macro_rules! dict_iterator {
                                 "dictionary changed size during iteration".to_owned(),
                             ));
                         }
-                        let count = zelf.position.fetch_add(1);
-                        match zelf.dict.len().checked_sub(count) {
-                            Some(mut pos) => {
-                                let (key, value) = zelf.dict.entries.next_entry(&mut pos).unwrap();
-                                Ok(($result_fn)(vm, key, value))
-                            }
+                        match zelf.dict.entries.next_entry_atomic_reversed(&zelf.position) {
+                            Some((key, value)) => Ok(($result_fn)(vm, key, value)),
                             None => {
                                 zelf.status.store(IterStatus::Exhausted);
                                 Err(vm.new_stop_iteration())
@@ -839,6 +853,15 @@ dict_iterator! {
     |vm: &VirtualMachine, key: PyObjectRef, value: PyObjectRef|
         vm.ctx.new_tuple(vec![key, value])
 }
+
+#[pyimpl(with(DictIterator, Comparable, Iterable))]
+impl PyDictKeys {}
+
+#[pyimpl(with(DictIterator, Comparable, Iterable))]
+impl PyDictValues {}
+
+#[pyimpl(with(DictIterator, Comparable, Iterable))]
+impl PyDictItems {}
 
 pub(crate) fn init(context: &PyContext) {
     PyDict::extend_class(context, &context.types.dict_type);
