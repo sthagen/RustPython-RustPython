@@ -407,18 +407,8 @@ mod decl {
     }
 
     #[pyfunction]
-    pub fn isinstance(obj: PyObjectRef, typ: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
-        single_or_tuple_any(
-            typ,
-            &|cls: &PyTypeRef| vm.isinstance(&obj, cls),
-            &|o| {
-                format!(
-                    "isinstance() arg 2 must be a type or tuple of types, not {}",
-                    o.class()
-                )
-            },
-            vm,
-        )
+    fn isinstance(obj: PyObjectRef, typ: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
+        vm.isinstance(&obj, &typ)
     }
 
     #[pyfunction]
@@ -923,7 +913,7 @@ mod decl {
     }
 }
 
-pub use decl::{ascii, isinstance, print};
+pub use decl::{ascii, print};
 
 pub fn make_module(vm: &VirtualMachine, module: PyObjectRef) {
     let ctx = &vm.ctx;
