@@ -472,6 +472,16 @@ mod _collections {
         }
 
         #[pymethod(magic)]
+        fn imul(zelf: PyRef<Self>, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+            let mul_deque = zelf.mul(value, vm)?;
+            std::mem::swap(
+                &mut *zelf.borrow_deque_mut(),
+                &mut *mul_deque.borrow_deque_mut(),
+            );
+            Ok(zelf)
+        }
+
+        #[pymethod(magic)]
         fn len(&self) -> usize {
             self.borrow_deque().len()
         }
@@ -502,7 +512,7 @@ mod _collections {
             } else {
                 Err(vm.new_type_error(format!(
                     "can only concatenate deque (not \"{}\") to deque",
-                    other.class().name
+                    other.class().name()
                 )))
             }
         }
