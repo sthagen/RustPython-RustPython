@@ -394,7 +394,7 @@ impl PyStr {
                 ch if (ch as u32) < 0x10000 => 6, // \uHHHH
                 _ => 10,                          // \uHHHHHHHH
             };
-            if out_len > (std::isize::MAX as usize) - incr {
+            if out_len > (isize::MAX as usize) - incr {
                 return Err(vm.new_overflow_error("string is too long to generate repr".to_owned()));
             }
             out_len += incr;
@@ -909,14 +909,13 @@ impl PyStr {
         pad: fn(&str, usize, char, usize) -> String,
         vm: &VirtualMachine,
     ) -> PyResult<String> {
-        let fillchar = match fillchar {
-            OptionalArg::Present(ref s) => s.value.chars().exactly_one().map_err(|_| {
+        let fillchar = fillchar.map_or(Ok(' '), |ref s| {
+            s.value.chars().exactly_one().map_err(|_| {
                 vm.new_type_error(
                     "The fill character must be exactly one character long".to_owned(),
                 )
-            }),
-            OptionalArg::Missing => Ok(' '),
-        }?;
+            })
+        })?;
         Ok(if self.len() as isize >= width {
             String::from(self.as_str())
         } else {
