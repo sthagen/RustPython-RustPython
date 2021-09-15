@@ -1,6 +1,6 @@
 use super::Diagnostic;
 use crate::util::{
-    get_func_sig, path_eq, pyclass_ident_and_attrs, ClassItemMeta, ContentItem, ContentItemInner,
+    get_sig, path_eq, pyclass_ident_and_attrs, ClassItemMeta, ContentItem, ContentItemInner,
     ErrorVec, ItemMeta, ItemMetaInner, ItemNursery, SimpleItemMeta, ALL_ALLOWED_NAMES,
 };
 use proc_macro2::TokenStream;
@@ -369,18 +369,12 @@ where
         let item_meta = MethodItemMeta::from_attr(ident.clone(), &item_attr)?;
 
         let py_name = item_meta.method_name()?;
-        let sig_doc = args
-            .item
-            .function_or_method_impl()
-            .ok()
-            .map(|f| get_func_sig(f.sig(), &py_name));
+        let sig_doc = get_sig(args.item, &py_name);
 
         let tokens = {
             let doc = args.attrs.doc().map_or_else(TokenStream::new, |mut doc| {
-                if let Some(sig_doc) = sig_doc {
-                    doc = format!("{}\n--\n\n{}", sig_doc, doc);
-                }
-                quote!(.with_doc(#doc.to_owned(), ctx))
+                doc = format!("{}\n--\n\n{}", sig_doc, doc);
+                quote!(.with_doc(#doc.to_owned(), &ctx))
             });
             let build_func = match self.method_type.as_str() {
                 "method" => quote!(.build_method(ctx, class.clone())),
@@ -890,12 +884,16 @@ fn extract_impl_attrs(attr: AttributeArgs) -> std::result::Result<ExtractedImplA
     })
 }
 
-fn new_impl_item<Item>(index: usize, attr_name: String) -> Box<dyn ImplItem<Item>>
+fn new_impl_item<Item>(
+    attr: &Attribute,
+    index: usize,
+    attr_name: String,
+) -> Result<Box<dyn ImplItem<Item>>>
 where
     Item: ItemLike + ToTokens + GetIdent,
 {
     assert!(ALL_ALLOWED_NAMES.contains(&attr_name.as_str()));
-    match attr_name.as_str() {
+    Ok(match attr_name.as_str() {
         attr_name @ "pymethod" | attr_name @ "pyclassmethod" => Box::new(MethodItem {
             inner: ContentItemInner {
                 index,
@@ -915,8 +913,13 @@ where
         "extend_class" => Box::new(ExtendClassItem {
             inner: ContentItemInner { index, attr_name },
         }),
-        other => unreachable!("#[pyimpl] doesn't accept #[{}]", other),
-    }
+        other => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                format!("#[pyimpl] doesn't accept #[{}]", other),
+            ))
+        }
+    })
 }
 
 fn attrs_to_content_items<F, R>(
@@ -924,7 +927,7 @@ fn attrs_to_content_items<F, R>(
     new_item: F,
 ) -> Result<(Vec<R>, Vec<Attribute>)>
 where
-    F: Fn(usize, String) -> R,
+    F: Fn(&Attribute, usize, String) -> Result<R>,
 {
     let mut cfgs: Vec<Attribute> = Vec::new();
     let mut result = Vec::new();
@@ -963,7 +966,7 @@ where
             continue;
         }
 
-        result.push(new_item(i, attr_name));
+        result.push(new_item(attr, i, attr_name)?);
     }
     Ok((result, cfgs))
 }
