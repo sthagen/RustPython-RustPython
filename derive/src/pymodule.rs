@@ -1,7 +1,8 @@
 use crate::error::Diagnostic;
 use crate::util::{
-    get_sig, iter_use_idents, pyclass_ident_and_attrs, AttributeExt, ClassItemMeta, ContentItem,
-    ContentItemInner, ErrorVec, ItemMeta, ItemNursery, SimpleItemMeta, ALL_ALLOWED_NAMES,
+    iter_use_idents, pyclass_ident_and_attrs, text_signature, AttributeExt, ClassItemMeta,
+    ContentItem, ContentItemInner, ErrorVec, ItemMeta, ItemNursery, SimpleItemMeta,
+    ALL_ALLOWED_NAMES,
 };
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
@@ -109,7 +110,6 @@ fn new_module_item(
             inner: ContentItemInner { index, attr_name },
             pyattrs: pyattrs.unwrap_or_else(Vec::new),
         }),
-        "pyexception" => unreachable!("#[pyexception] {:?}", pyattrs.unwrap_or_else(Vec::new)),
         other => unreachable!("#[pymodule] doesn't accept #[{}]", other),
     }
 }
@@ -248,16 +248,17 @@ trait ModuleItem: ContentItem {
 
 impl ModuleItem for FunctionItem {
     fn gen_module_item(&self, args: ModuleItemArgs<'_>) -> Result<()> {
-        let ident = match args.item {
-            Item::Fn(syn::ItemFn { sig, .. }) => sig.ident.clone(),
-            other => return Err(self.new_syn_error(other.span(), "can only be on a function")),
-        };
+        let func = args
+            .item
+            .function_or_method()
+            .map_err(|_| self.new_syn_error(args.item.span(), "can only be on a function"))?;
+        let ident = &func.sig().ident;
 
         let item_attr = args.attrs.remove(self.index());
         let item_meta = SimpleItemMeta::from_attr(ident.clone(), &item_attr)?;
 
         let py_name = item_meta.simple_name()?;
-        let sig_doc = get_sig(args.item, &py_name);
+        let sig_doc = text_signature(func.sig(), &py_name);
 
         let item = {
             let doc = args.attrs.doc().map_or_else(TokenStream::new, |mut doc| {
@@ -269,7 +270,7 @@ impl ModuleItem for FunctionItem {
                 vm.ctx.make_funcdef(#py_name, #ident)
                     #doc
                     .into_function()
-                    .with_module(vm.ctx.new_str(#module.to_owned()))
+                    .with_module(vm.ctx.new_utf8_str(#module.to_owned()))
                     .build(&vm.ctx)
             );
             quote! {
@@ -325,7 +326,7 @@ impl ModuleItem for ClassItem {
                 );
                 let item = quote! {
                     let new_class = #new_class;
-                    new_class.set_str_attr("__module__", vm.ctx.new_str(#module_name));
+                    new_class.set_str_attr("__module__", vm.ctx.new_utf8_str(#module_name));
                     vm.__module_set_attr(&module, #py_name, new_class).unwrap();
                 };
 
