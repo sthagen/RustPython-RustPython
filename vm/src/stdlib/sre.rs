@@ -2,26 +2,26 @@ pub(crate) use _sre::make_module;
 
 #[pymodule]
 mod _sre {
-    use crate::buffer::PyBuffer;
-    use crate::builtins::list::PyListRef;
-    use crate::builtins::tuple::PyTupleRef;
-    use crate::builtins::{
-        PyCallableIterator, PyDictRef, PyInt, PyList, PyStr, PyStrRef, PyTypeRef,
-    };
-    use crate::function::{Args, OptionalArg};
-    use crate::slots::{Comparable, Hashable};
-    use crate::VirtualMachine;
     use crate::{
-        IntoPyObject, ItemProtocol, PyCallable, PyComparisonValue, PyObjectRef, PyRef, PyResult,
-        PyValue, StaticType, TryFromBorrowedObject, TryFromObject,
+        buffer::PyBuffer,
+        builtins::{
+            PyCallableIterator, PyDictRef, PyInt, PyList, PyListRef, PyStr, PyStrRef, PyTupleRef,
+            PyTypeRef,
+        },
+        common::hash::PyHash,
+        function::{ArgCallable, Args, OptionalArg},
+        slots::{Comparable, Hashable},
+        IntoPyObject, ItemProtocol, PyComparisonValue, PyObjectRef, PyRef, PyResult, PyValue,
+        StaticType, TryFromBorrowedObject, TryFromObject, VirtualMachine,
     };
     use core::str;
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
     use num_traits::ToPrimitive;
-    use rustpython_common::hash::PyHash;
-    use sre_engine::constants::SreFlag;
-    use sre_engine::engine::{lower_ascii, lower_unicode, upper_unicode, State, StrDrive};
+    use sre_engine::{
+        constants::SreFlag,
+        engine::{lower_ascii, lower_unicode, upper_unicode, State, StrDrive},
+    };
 
     #[pyattr]
     pub use sre_engine::{constants::SRE_MAGIC as MAGIC, CODESIZE, MAXGROUPS, MAXREPEAT};
@@ -104,7 +104,7 @@ mod _sre {
     #[derive(FromArgs)]
     struct SubArgs {
         #[pyarg(any)]
-        // repl: Either<PyCallable, PyStrRef>,
+        // repl: Either<ArgCallable, PyStrRef>,
         repl: PyObjectRef,
         #[pyarg(any)]
         string: PyObjectRef,
@@ -122,7 +122,7 @@ mod _sre {
 
     #[pyattr]
     #[pyclass(name = "Pattern")]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     pub(crate) struct Pattern {
         pub pattern: PyObjectRef,
         pub flags: SreFlag,
@@ -131,12 +131,6 @@ mod _sre {
         pub groupindex: PyDictRef,
         pub indexgroup: Vec<Option<PyStrRef>>,
         pub isbytes: bool,
-    }
-
-    impl PyValue for Pattern {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
     }
 
     #[pyimpl(with(Hashable, Comparable))]
@@ -274,8 +268,13 @@ mod _sre {
                             m.get_slice(zelf.groups, state.string, vm)
                                 .unwrap_or_else(|| vm.ctx.none())
                         } else {
-                            m.groups(OptionalArg::Present(vm.ctx.new_ascii_str(b"")), vm)?
-                                .into_object()
+                            m.groups(
+                                OptionalArg::Present(
+                                    vm.ctx.new_ascii_literal(crate::utils::ascii!("")),
+                                ),
+                                vm,
+                            )?
+                            .into_object()
                         };
 
                         matchlist.push(item);
@@ -304,7 +303,7 @@ mod _sre {
             }
             .into_ref(vm);
             let search = vm.get_method(scanner.into_object(), "search").unwrap()?;
-            let search = PyCallable::try_from_object(vm, search)?;
+            let search = ArgCallable::try_from_object(vm, search)?;
             let iterator = PyCallableIterator::new(search, vm.ctx.none());
             Ok(iterator)
         }
@@ -510,7 +509,7 @@ mod _sre {
                 let join_type = if zelf.isbytes {
                     vm.ctx.new_bytes(vec![])
                 } else {
-                    vm.ctx.new_ascii_str(b"")
+                    vm.ctx.new_ascii_literal(crate::utils::ascii!(""))
                 };
                 let ret = vm.call_method(&join_type, "join", (list,))?;
 
@@ -561,7 +560,7 @@ mod _sre {
 
     #[pyattr]
     #[pyclass(name = "Match")]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     pub(crate) struct Match {
         string: PyObjectRef,
         pattern: PyRef<Pattern>,
@@ -569,11 +568,6 @@ mod _sre {
         endpos: usize,
         lastindex: isize,
         regs: Vec<(isize, isize)>,
-    }
-    impl PyValue for Match {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
     }
 
     #[pyimpl]
@@ -804,18 +798,13 @@ mod _sre {
 
     #[pyattr]
     #[pyclass(name = "SRE_Scanner")]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     struct SreScanner {
         pattern: PyRef<Pattern>,
         string: PyObjectRef,
         start: AtomicCell<usize>,
         end: usize,
         must_advance: AtomicCell<bool>,
-    }
-    impl PyValue for SreScanner {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
     }
 
     #[pyimpl]

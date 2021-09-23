@@ -3,8 +3,7 @@
 *
 */
 
-use crate::vm::VirtualMachine;
-use crate::PyObjectRef;
+use crate::{PyObjectRef, VirtualMachine};
 
 pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let module = _pyexpat::make_module(vm);
@@ -48,7 +47,7 @@ mod _pyexpat {
 
     #[pyattr]
     #[pyclass(name = "xmlparser", module = false)]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     pub struct PyExpatLikeXmlParser {
         start_element: MutableObject,
         end_element: MutableObject,
@@ -57,12 +56,6 @@ mod _pyexpat {
         buffer_text: MutableObject,
     }
     type PyExpatLikeXmlParserRef = PyRef<PyExpatLikeXmlParser>;
-
-    impl PyValue for PyExpatLikeXmlParser {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
-    }
 
     #[inline]
     fn invoke_handler<T>(vm: &VirtualMachine, handler: &MutableObject, args: T)

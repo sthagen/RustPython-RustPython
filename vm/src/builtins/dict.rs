@@ -8,13 +8,13 @@ use super::set::PySet;
 use super::IterStatus;
 use crate::dictdatatype::{self, DictKey};
 use crate::exceptions::PyBaseExceptionRef;
-use crate::function::{FuncArgs, KwArgs, OptionalArg};
+use crate::function::{ArgIterable, FuncArgs, KwArgs, OptionalArg};
 use crate::iterator;
 use crate::slots::{Comparable, Hashable, Iterable, PyComparisonOp, PyIter, Unhashable};
 use crate::vm::{ReprGuard, VirtualMachine};
 use crate::{
     IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue::*, PyAttributes, PyClassDef,
-    PyClassImpl, PyComparisonValue, PyContext, PyIterable, PyObjectRef, PyRef, PyResult, PyValue,
+    PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
     TryFromObject, TypeProtocol,
 };
 
@@ -132,7 +132,7 @@ impl PyDict {
     #[pyclassmethod]
     fn fromkeys(
         class: PyTypeRef,
-        iterable: PyIterable,
+        iterable: ArgIterable,
         value: OptionalArg<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult<PyRef<Self>> {
@@ -364,7 +364,9 @@ impl PyDict {
         if let Some((key, value)) = self.entries.pop_back() {
             Ok(vm.ctx.new_tuple(vec![key, value]))
         } else {
-            let err_msg = vm.ctx.new_ascii_str(b"popitem(): dictionary is empty");
+            let err_msg = vm
+                .ctx
+                .new_ascii_literal(crate::utils::ascii!("popitem(): dictionary is empty"));
             Err(vm.new_key_error(err_msg))
         }
     }

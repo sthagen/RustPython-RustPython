@@ -1,3 +1,23 @@
+use super::errno::errors;
+use crate::common::lock::PyRwLock;
+use crate::crt_fd::{Fd, Offset};
+use crate::{
+    buffer::PyBuffer,
+    builtins::{
+        int, PyBytes, PyBytesRef, PyDictRef, PySet, PyStr, PyStrRef, PyTuple, PyTupleRef, PyTypeRef,
+    },
+    byteslike::ArgBytesLike,
+    exceptions::{IntoPyException, PyBaseExceptionRef},
+    function::{ArgumentError, FromArgs, FuncArgs, OptionalArg},
+    slots::PyIter,
+    utils::Either,
+    vm::{ReprGuard, VirtualMachine},
+    IntoPyObject, ItemProtocol, PyObjectRef, PyRef, PyResult, PyStructSequence, PyValue,
+    StaticType, TryFromBorrowedObject, TryFromObject, TypeProtocol,
+};
+use crossbeam_utils::atomic::AtomicCell;
+use itertools::Itertools;
+use num_bigint::BigInt;
 use std::ffi;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, Read, Write};
@@ -6,34 +26,8 @@ use std::os::unix::fs::DirEntryExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{env, fs};
-
-use crate::crt_fd::{Fd, Offset};
-use crossbeam_utils::atomic::AtomicCell;
-use itertools::Itertools;
-use num_bigint::BigInt;
 #[cfg(unix)]
 use strum_macros::EnumString;
-
-use super::errno::errors;
-use crate::buffer::PyBuffer;
-use crate::builtins::bytes::{PyBytes, PyBytesRef};
-use crate::builtins::dict::PyDictRef;
-use crate::builtins::int;
-use crate::builtins::pystr::{PyStr, PyStrRef};
-use crate::builtins::pytype::PyTypeRef;
-use crate::builtins::set::PySet;
-use crate::builtins::tuple::{PyTuple, PyTupleRef};
-use crate::byteslike::ArgBytesLike;
-use crate::common::lock::PyRwLock;
-use crate::exceptions::{IntoPyException, PyBaseExceptionRef};
-use crate::function::{ArgumentError, FromArgs, FuncArgs, OptionalArg};
-use crate::slots::PyIter;
-use crate::utils::Either;
-use crate::vm::{ReprGuard, VirtualMachine};
-use crate::{
-    IntoPyObject, ItemProtocol, PyObjectRef, PyRef, PyResult, PyStructSequence, PyValue,
-    StaticType, TryFromBorrowedObject, TryFromObject, TypeProtocol,
-};
 
 #[cfg(unix)]
 use std::os::unix::ffi as ffi_ext;
@@ -787,7 +781,7 @@ mod _os {
 
     #[pyattr]
     #[pyclass(name)]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     struct DirEntry {
         entry: fs::DirEntry,
         mode: OutputMode,
@@ -795,12 +789,6 @@ mod _os {
         lstat: OnceCell<PyObjectRef>,
         #[cfg(not(unix))]
         ino: AtomicCell<Option<u64>>,
-    }
-
-    impl PyValue for DirEntry {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
     }
 
     #[pyimpl]
@@ -959,17 +947,11 @@ mod _os {
 
     #[pyattr]
     #[pyclass(name = "ScandirIter")]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     struct ScandirIterator {
         entries: PyRwLock<fs::ReadDir>,
         exhausted: AtomicCell<bool>,
         mode: OutputMode,
-    }
-
-    impl PyValue for ScandirIterator {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
     }
 
     #[pyimpl(with(PyIter))]
@@ -2083,9 +2065,7 @@ pub(crate) use _os::os_open as open;
 mod posix {
     use super::*;
 
-    use crate::builtins::list::PyListRef;
-    use crate::slots::SlotConstructor;
-    use crate::utils::ToCString;
+    use crate::{builtins::PyListRef, slots::SlotConstructor, utils::ToCString};
     use bitflags::bitflags;
     use nix::unistd::{self, Gid, Pid, Uid};
     #[allow(unused_imports)] // TODO: use will be unnecessary in edition 2021
@@ -2486,15 +2466,9 @@ mod posix {
 
     #[pyattr]
     #[pyclass(name = "sched_param")]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     struct SchedParam {
         sched_priority: PyObjectRef,
-    }
-
-    impl PyValue for SchedParam {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
     }
 
     impl TryFromObject for SchedParam {
@@ -2957,7 +2931,10 @@ mod posix {
     // cfg from nix
     #[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "redox")))]
     #[pyfunction]
-    fn setgroups(group_ids: crate::PyIterable<u32>, vm: &VirtualMachine) -> PyResult<()> {
+    fn setgroups(
+        group_ids: crate::function::ArgIterable<u32>,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
         let gids = group_ids
             .iter(vm)?
             .map(|entry| match entry {
@@ -3004,13 +2981,13 @@ mod posix {
         #[pyarg(positional)]
         path: PyPathLike,
         #[pyarg(positional)]
-        args: crate::PyIterable<PyPathLike>,
+        args: crate::function::ArgIterable<PyPathLike>,
         #[pyarg(positional)]
         env: crate::builtins::dict::PyMapping,
         #[pyarg(named, default)]
-        file_actions: Option<crate::PyIterable<PyTupleRef>>,
+        file_actions: Option<crate::function::ArgIterable<PyTupleRef>>,
         #[pyarg(named, default)]
-        setsigdef: Option<crate::PyIterable<i32>>,
+        setsigdef: Option<crate::function::ArgIterable<i32>>,
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
@@ -3739,7 +3716,7 @@ mod nt {
                 }
             }
         }
-        return Err(err.into_pyexception(vm));
+        Err(err.into_pyexception(vm))
     }
 
     #[pyfunction]

@@ -1,18 +1,15 @@
+use crate::common::lock::PyMutex;
+use crate::{
+    builtins::{PyStr, PyStrRef, PyTypeRef},
+    function::{ArgIterable, ArgumentError, FromArgs, FuncArgs},
+    iterator,
+    slots::PyIter,
+    types::create_simple_type,
+    PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject, TypeProtocol,
+    VirtualMachine,
+};
 use itertools::{self, Itertools};
 use std::fmt;
-
-use crate::builtins::pystr::{PyStr, PyStrRef};
-use crate::builtins::pytype::PyTypeRef;
-use crate::common::lock::PyMutex;
-use crate::function::{ArgumentError, FromArgs, FuncArgs};
-use crate::iterator;
-use crate::slots::PyIter;
-use crate::types::create_simple_type;
-use crate::VirtualMachine;
-use crate::{
-    PyClassImpl, PyIterable, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject,
-    TypeProtocol,
-};
 
 #[repr(i32)]
 pub enum QuoteStyle {
@@ -86,6 +83,7 @@ struct ReadState {
 }
 
 #[pyclass(module = "_csv", name = "reader")]
+#[derive(PyValue)]
 struct Reader {
     iter: PyObjectRef,
     state: PyMutex<ReadState>,
@@ -94,12 +92,6 @@ struct Reader {
 impl fmt::Debug for Reader {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "_csv.reader")
-    }
-}
-
-impl PyValue for Reader {
-    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-        Self::static_type()
     }
 }
 
@@ -193,6 +185,7 @@ struct WriteState {
 }
 
 #[pyclass(module = "_csv", name = "writer")]
+#[derive(PyValue)]
 struct Writer {
     write: PyObjectRef,
     state: PyMutex<WriteState>,
@@ -201,12 +194,6 @@ struct Writer {
 impl fmt::Debug for Writer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "_csv.writer")
-    }
-}
-
-impl PyValue for Writer {
-    fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-        Self::static_type()
     }
 }
 
@@ -230,7 +217,7 @@ impl Writer {
             }};
         }
 
-        let row = PyIterable::try_from_object(vm, row)?;
+        let row = ArgIterable::try_from_object(vm, row)?;
         for field in row.iter(vm)? {
             let field: PyObjectRef = field?;
             let stringified;
@@ -268,7 +255,7 @@ impl Writer {
     }
 
     #[pymethod]
-    fn writerows(&self, rows: PyIterable, vm: &VirtualMachine) -> PyResult<()> {
+    fn writerows(&self, rows: ArgIterable, vm: &VirtualMachine) -> PyResult<()> {
         for row in rows.iter(vm)? {
             self.writerow(row?, vm)?;
         }

@@ -11,27 +11,28 @@
 
 #[pymodule]
 pub(crate) mod _struct {
+    use crate::{
+        builtins::{
+            bytes::PyBytesRef, float, int::try_to_primitive, pybool::IntoPyBool, pystr::PyStr,
+            pystr::PyStrRef, pytype::PyTypeRef, tuple::PyTupleRef,
+        },
+        byteslike::{ArgBytesLike, ArgMemoryBuffer},
+        common::str::wchar_t,
+        exceptions::PyBaseExceptionRef,
+        function::Args,
+        slots::{PyIter, SlotConstructor},
+        utils::Either,
+        IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject,
+        VirtualMachine,
+    };
     use crossbeam_utils::atomic::AtomicCell;
+    use half::f16;
     use itertools::Itertools;
     use num_bigint::BigInt;
     use num_traits::{PrimInt, ToPrimitive};
     use std::convert::TryFrom;
     use std::iter::Peekable;
     use std::{fmt, mem, os::raw};
-
-    use crate::builtins::{
-        bytes::PyBytesRef, float, int::try_to_primitive, pybool::IntoPyBool, pystr::PyStr,
-        pystr::PyStrRef, pytype::PyTypeRef, tuple::PyTupleRef,
-    };
-    use crate::byteslike::{ArgBytesLike, ArgMemoryBuffer};
-    use crate::exceptions::PyBaseExceptionRef;
-    use crate::function::Args;
-    use crate::slots::{PyIter, SlotConstructor};
-    use crate::stdlib::array::wchar_t;
-    use crate::utils::Either;
-    use crate::VirtualMachine;
-    use crate::{IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject};
-    use half::f16;
 
     #[derive(Debug, Copy, Clone, PartialEq)]
     enum Endianness {
@@ -789,7 +790,7 @@ pub(crate) mod _struct {
 
     #[pyattr]
     #[pyclass(name = "unpack_iterator")]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     struct UnpackIterator {
         format_spec: FormatSpec,
         buffer: ArgBytesLike,
@@ -822,12 +823,6 @@ pub(crate) mod _struct {
                     offset: AtomicCell::new(0),
                 })
             }
-        }
-    }
-
-    impl PyValue for UnpackIterator {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
         }
     }
 
@@ -870,16 +865,10 @@ pub(crate) mod _struct {
 
     #[pyattr]
     #[pyclass(name = "Struct")]
-    #[derive(Debug)]
+    #[derive(Debug, PyValue)]
     struct PyStruct {
         spec: FormatSpec,
         fmt_str: PyStrRef,
-    }
-
-    impl PyValue for PyStruct {
-        fn class(_vm: &VirtualMachine) -> &PyTypeRef {
-            Self::static_type()
-        }
     }
 
     impl SlotConstructor for PyStruct {
