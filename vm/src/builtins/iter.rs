@@ -2,16 +2,14 @@
  * iterator types
  */
 
-use crossbeam_utils::atomic::AtomicCell;
-
-use super::pytype::PyTypeRef;
-use super::{int, PyInt};
-use crate::slots::PyIter;
-use crate::vm::VirtualMachine;
+use super::{int, PyInt, PyTypeRef};
 use crate::{
-    function::ArgCallable, ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult,
-    PyValue, TypeProtocol,
+    function::ArgCallable,
+    slots::{IteratorIterable, PyIter},
+    ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
+    VirtualMachine,
 };
+use crossbeam_utils::atomic::AtomicCell;
 
 /// Marks status of iterator.
 #[derive(Debug, Clone, Copy)]
@@ -92,6 +90,7 @@ impl PySequenceIterator {
     }
 }
 
+impl IteratorIterable for PySequenceIterator {}
 impl PyIter for PySequenceIterator {
     fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
         if let IterStatus::Exhausted = zelf.status.load() {
@@ -134,6 +133,7 @@ impl PyCallableIterator {
     }
 }
 
+impl IteratorIterable for PyCallableIterator {}
 impl PyIter for PyCallableIterator {
     fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
         if let IterStatus::Exhausted = zelf.status.load() {

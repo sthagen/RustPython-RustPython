@@ -1,22 +1,19 @@
+use super::{IterStatus, PySet, PyStrRef, PyTypeRef};
+use crate::{
+    dictdatatype::{self, DictKey},
+    exceptions::PyBaseExceptionRef,
+    function::{ArgIterable, FuncArgs, KwArgs, OptionalArg},
+    iterator,
+    slots::{Comparable, Hashable, Iterable, IteratorIterable, PyComparisonOp, PyIter, Unhashable},
+    vm::{ReprGuard, VirtualMachine},
+    IdProtocol, IntoPyObject, ItemProtocol,
+    PyArithmaticValue::*,
+    PyAttributes, PyClassDef, PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef,
+    PyResult, PyValue, TryFromObject, TypeProtocol,
+};
 use crossbeam_utils::atomic::AtomicCell;
 use std::fmt;
 use std::mem::size_of;
-
-use super::pystr::PyStrRef;
-use super::pytype::PyTypeRef;
-use super::set::PySet;
-use super::IterStatus;
-use crate::dictdatatype::{self, DictKey};
-use crate::exceptions::PyBaseExceptionRef;
-use crate::function::{ArgIterable, FuncArgs, KwArgs, OptionalArg};
-use crate::iterator;
-use crate::slots::{Comparable, Hashable, Iterable, PyComparisonOp, PyIter, Unhashable};
-use crate::vm::{ReprGuard, VirtualMachine};
-use crate::{
-    IdProtocol, IntoPyObject, ItemProtocol, PyArithmaticValue::*, PyAttributes, PyClassDef,
-    PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol,
-};
 
 pub type DictContentType = dictdatatype::Dict;
 
@@ -731,6 +728,7 @@ macro_rules! dict_iterator {
             }
         }
 
+        impl IteratorIterable for $iter_name {}
         impl PyIter for $iter_name {
             #[allow(clippy::redundant_closure_call)]
             fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
@@ -791,6 +789,7 @@ macro_rules! dict_iterator {
             }
         }
 
+        impl IteratorIterable for $reverse_iter_name {}
         impl PyIter for $reverse_iter_name {
             #[allow(clippy::redundant_closure_call)]
             fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {

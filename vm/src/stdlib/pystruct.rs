@@ -19,11 +19,10 @@ pub(crate) mod _struct {
         byteslike::{ArgBytesLike, ArgMemoryBuffer},
         common::str::wchar_t,
         exceptions::PyBaseExceptionRef,
-        function::Args,
-        slots::{PyIter, SlotConstructor},
+        function::PosArgs,
+        slots::{IteratorIterable, PyIter, SlotConstructor},
         utils::Either,
-        IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject,
-        VirtualMachine,
+        IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use half::f16;
@@ -722,7 +721,7 @@ pub(crate) mod _struct {
     #[pyfunction]
     fn pack(
         fmt: Either<PyStrRef, PyBytesRef>,
-        args: Args,
+        args: PosArgs,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<u8>> {
         let format_spec = FormatSpec::decode_and_parse(vm, &fmt)?;
@@ -734,7 +733,7 @@ pub(crate) mod _struct {
         fmt: Either<PyStrRef, PyBytesRef>,
         buffer: ArgMemoryBuffer,
         offset: isize,
-        args: Args,
+        args: PosArgs,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let format_spec = FormatSpec::decode_and_parse(vm, &fmt)?;
@@ -833,6 +832,7 @@ pub(crate) mod _struct {
             self.buffer.len().saturating_sub(self.offset.load()) / self.format_spec.size
         }
     }
+    impl IteratorIterable for UnpackIterator {}
     impl PyIter for UnpackIterator {
         fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
             let size = zelf.format_spec.size;
@@ -899,7 +899,7 @@ pub(crate) mod _struct {
         }
 
         #[pymethod]
-        fn pack(&self, args: Args, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        fn pack(&self, args: PosArgs, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
             self.spec.pack(args.into_vec(), vm)
         }
 
@@ -908,7 +908,7 @@ pub(crate) mod _struct {
             &self,
             buffer: ArgMemoryBuffer,
             offset: isize,
-            args: Args,
+            args: PosArgs,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
             let offset = get_buffer_offset(buffer.len(), offset, self.size(), true, vm)?;

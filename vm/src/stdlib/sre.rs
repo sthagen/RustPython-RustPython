@@ -3,16 +3,15 @@ pub(crate) use _sre::make_module;
 #[pymodule]
 mod _sre {
     use crate::{
-        buffer::PyBuffer,
         builtins::{
             PyCallableIterator, PyDictRef, PyInt, PyList, PyListRef, PyStr, PyStrRef, PyTupleRef,
-            PyTypeRef,
         },
         common::hash::PyHash,
-        function::{ArgCallable, Args, OptionalArg},
+        function::{ArgCallable, OptionalArg, PosArgs},
+        protocol::PyBuffer,
         slots::{Comparable, Hashable},
         IntoPyObject, ItemProtocol, PyComparisonValue, PyObjectRef, PyRef, PyResult, PyValue,
-        StaticType, TryFromBorrowedObject, TryFromObject, VirtualMachine,
+        TryFromBorrowedObject, TryFromObject, VirtualMachine,
     };
     use core::str;
     use crossbeam_utils::atomic::AtomicCell;
@@ -663,7 +662,7 @@ mod _sre {
         }
 
         #[pymethod]
-        fn group(&self, args: Args<PyObjectRef>, vm: &VirtualMachine) -> PyResult {
+        fn group(&self, args: PosArgs<PyObjectRef>, vm: &VirtualMachine) -> PyResult {
             self.pattern
                 .with_str_drive(self.string.clone(), vm, |str_drive| {
                     let args = args.into_vec();

@@ -1,8 +1,9 @@
-use super::pytype::PyTypeRef;
-use crate::iterator;
-use crate::slots::{PyIter, SlotConstructor};
-use crate::vm::VirtualMachine;
-use crate::{PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue};
+use super::PyTypeRef;
+use crate::{
+    iterator,
+    slots::{IteratorIterable, PyIter, SlotConstructor},
+    PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+};
 
 /// filter(function or None, iterable) --> filter object
 ///
@@ -50,6 +51,7 @@ impl SlotConstructor for PyFilter {
 #[pyimpl(with(PyIter, SlotConstructor), flags(BASETYPE))]
 impl PyFilter {}
 
+impl IteratorIterable for PyFilter {}
 impl PyIter for PyFilter {
     fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
         let predicate = &zelf.predicate;

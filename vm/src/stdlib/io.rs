@@ -9,8 +9,6 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(unix)]
-use crate::stdlib::os::{errno_err, PathOrFd};
 use crate::{PyObjectRef, PyResult, TryFromObject, VirtualMachine};
 pub(crate) use _io::io_open as open;
 
@@ -76,7 +74,6 @@ mod _io {
     use std::io::{self, prelude::*, Cursor, SeekFrom};
     use std::ops::Range;
 
-    use crate::buffer::{BufferOptions, PyBuffer, PyBufferInternal, ResizeGuard};
     use crate::builtins::memory::PyMemoryView;
     use crate::builtins::{
         bytes::{PyBytes, PyBytesRef},
@@ -89,9 +86,10 @@ mod _io {
         PyThreadMutex, PyThreadMutexGuard,
     };
     use crate::common::rc::PyRc;
-    use crate::exceptions::{self, IntoPyException, PyBaseExceptionRef};
+    use crate::exceptions::{self, PyBaseExceptionRef};
     use crate::function::{ArgIterable, FuncArgs, OptionalArg, OptionalOption};
-    use crate::slots::SlotConstructor;
+    use crate::protocol::{BufferInternal, BufferOptions, PyBuffer, ResizeGuard};
+    use crate::slots::{Iterable, PyIter, SlotConstructor};
     use crate::utils::Either;
     use crate::vm::{ReprGuard, VirtualMachine};
     use crate::{
@@ -159,6 +157,7 @@ mod _io {
     fn os_err(vm: &VirtualMachine, err: io::Error) -> PyBaseExceptionRef {
         #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
+            use crate::exceptions::IntoPyException;
             err.into_pyexception(vm)
         }
         #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
@@ -341,9 +340,10 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "_IOBase")]
+    #[derive(Debug, PyValue)]
     struct _IOBase;
 
-    #[pyimpl(flags(BASETYPE, HAS_DICT))]
+    #[pyimpl(with(PyIter), flags(BASETYPE, HAS_DICT))]
     impl _IOBase {
         #[pymethod]
         fn seek(
@@ -509,25 +509,31 @@ mod _io {
         fn check_seekable(instance: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             check_seekable(&instance, vm)
         }
+    }
 
-        #[pyslot]
-        #[pymethod(name = "__iter__")]
-        fn tp_iter(instance: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-            check_closed(&instance, vm)?;
-            Ok(instance)
+    impl Iterable for _IOBase {
+        fn tp_iter(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+            check_closed(&zelf, vm)?;
+            Ok(zelf)
         }
-        #[pyslot]
-        fn tp_iternext(instance: &PyObjectRef, vm: &VirtualMachine) -> PyResult {
-            let line = vm.call_method(instance, "readline", ())?;
+
+        fn iter(_zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyResult {
+            unreachable!("tp_iter is implemented")
+        }
+    }
+
+    impl PyIter for _IOBase {
+        fn tp_iternext(zelf: &PyObjectRef, vm: &VirtualMachine) -> PyResult {
+            let line = vm.call_method(zelf, "readline", ())?;
             if !line.clone().try_to_bool(vm)? {
                 Err(vm.new_stop_iteration())
             } else {
                 Ok(line)
             }
         }
-        #[pymethod(magic)]
-        fn next(instance: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-            Self::tp_iternext(&instance, vm)
+
+        fn next(_zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult {
+            unreachable!("tp_iternext is implemented")
         }
     }
 
@@ -1319,7 +1325,7 @@ mod _io {
         data: PyMutex<Vec<u8>>,
         range: Range<usize>,
     }
-    impl PyBufferInternal for BufferedRawBuffer {
+    impl BufferInternal for BufferedRawBuffer {
         fn obj_bytes(&self) -> BorrowedValue<[u8]> {
             BorrowedValue::map(self.data.lock().into(), |data| &data[self.range.clone()])
         }
@@ -3320,7 +3326,7 @@ mod _io {
         }
     }
 
-    impl PyBufferInternal for PyRef<BytesIO> {
+    impl BufferInternal for PyRef<BytesIO> {
         fn obj_bytes(&self) -> BorrowedValue<[u8]> {
             PyRwLockReadGuard::map(self.buffer.read(), |x| x.cursor.get_ref().as_slice()).into()
         }
@@ -3530,8 +3536,11 @@ mod _io {
 
         // check file descriptor validity
         #[cfg(unix)]
-        if let Ok(PathOrFd::Fd(fd)) = PathOrFd::try_from_object(vm, file.clone()) {
-            nix::fcntl::fcntl(fd, nix::fcntl::F_GETFD).map_err(|_| errno_err(vm))?;
+        if let Ok(crate::stdlib::os::PathOrFd::Fd(fd)) =
+            TryFromObject::try_from_object(vm, file.clone())
+        {
+            nix::fcntl::fcntl(fd, nix::fcntl::F_GETFD)
+                .map_err(|_| crate::stdlib::os::errno_err(vm))?;
         }
 
         // Construct a FileIO (subclass of RawIOBase)
@@ -3680,7 +3689,7 @@ mod fileio {
     use crate::function::{FuncArgs, OptionalArg};
     use crate::stdlib::os;
     use crate::vm::VirtualMachine;
-    use crate::{PyObjectRef, PyRef, PyResult, PyValue, StaticType, TryFromObject, TypeProtocol};
+    use crate::{PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol};
     use crossbeam_utils::atomic::AtomicCell;
     use std::io::{Read, Write};
 
