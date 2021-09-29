@@ -1,7 +1,7 @@
 #[macro_export]
 macro_rules! py_module {
     ( $vm:expr, $module_name:expr, { $($name:expr => $value:expr),* $(,)? }) => {{
-        let module = $vm.new_module($module_name, $vm.ctx.new_dict());
+        let module = $vm.new_module($module_name, $vm.ctx.new_dict(), None);
         $crate::extend_module!($vm, module, { $($name => $value),* });
         module
     }};
@@ -249,13 +249,3 @@ cfg_if::cfg_if! {
         }
     }
 }
-
-macro_rules! ascii {
-    ($x:literal) => {{
-        const _: () = {
-            ["not ascii"][!rustpython_vm::utils::bytes_is_ascii($x) as usize];
-        };
-        unsafe { ascii::AsciiStr::from_ascii_unchecked($x.as_bytes()) }
-    }};
-}
-pub use ascii;

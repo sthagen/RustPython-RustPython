@@ -1,12 +1,16 @@
-use super::socket::{self, PySocketRef};
-use crate::common::lock::{PyRwLock, PyRwLockWriteGuard};
+use super::socket::{self, PySocket};
+use crate::common::{
+    ascii,
+    lock::{PyRwLock, PyRwLockWriteGuard},
+};
 use crate::{
-    builtins::{pytype, weakref::PyWeak, PyStrRef, PyTypeRef},
+    builtins::{PyStrRef, PyType, PyTypeRef, PyWeak},
     byteslike::{ArgBytesLike, ArgMemoryBuffer, ArgStrOrBytesLike},
-    exceptions::{create_exception_type, IntoPyException, PyBaseExceptionRef},
+    exceptions::{self, IntoPyException, PyBaseException, PyBaseExceptionRef},
     function::{ArgCallable, OptionalArg},
     slots::SlotConstructor,
     stdlib::os::PyPathLike,
+    types::create_simple_type,
     utils::{Either, ToCString},
     IntoPyObject, ItemProtocol, PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
@@ -22,6 +26,7 @@ use openssl::{
 use std::convert::TryFrom;
 use std::ffi::CStr;
 use std::fmt;
+use std::io::{Read, Write};
 use std::time::Instant;
 
 mod sys {
@@ -105,9 +110,9 @@ fn nid2obj(nid: Nid) -> Option<Asn1Object> {
     unsafe { ptr2obj(sys::OBJ_nid2obj(nid.as_raw())) }
 }
 fn obj2txt(obj: &Asn1ObjectRef, no_name: bool) -> Option<String> {
-    unsafe {
-        let no_name = if no_name { 1 } else { 0 };
-        let ptr = obj.as_ptr();
+    let no_name = if no_name { 1 } else { 0 };
+    let ptr = obj.as_ptr();
+    let s = unsafe {
         let buflen = sys::OBJ_obj2txt(std::ptr::null_mut(), 0, ptr, no_name);
         assert!(buflen >= 0);
         if buflen == 0 {
@@ -116,10 +121,10 @@ fn obj2txt(obj: &Asn1ObjectRef, no_name: bool) -> Option<String> {
         let mut buf = vec![0u8; buflen as usize];
         let ret = sys::OBJ_obj2txt(buf.as_mut_ptr() as *mut libc::c_char, buflen, ptr, no_name);
         assert!(ret >= 0);
-        let s = String::from_utf8(buf)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        Some(s)
-    }
+        String::from_utf8(buf)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    };
+    Some(s)
 }
 
 type PyNid = (libc::c_int, String, String, Option<String>);
@@ -152,12 +157,8 @@ fn _ssl_enum_certificates(store_name: PyStrRef, vm: &VirtualMachine) -> PyResult
             (*ptr).dwCertEncodingType
         };
         let enc_type = match enc_type {
-            wincrypt::X509_ASN_ENCODING => {
-                vm.ctx.new_ascii_literal(crate::utils::ascii!("x509_asn"))
-            }
-            wincrypt::PKCS_7_ASN_ENCODING => {
-                vm.ctx.new_ascii_literal(crate::utils::ascii!("pkcs_7_asn"))
-            }
+            wincrypt::X509_ASN_ENCODING => vm.ctx.new_ascii_literal(ascii!("x509_asn")),
+            wincrypt::PKCS_7_ASN_ENCODING => vm.ctx.new_ascii_literal(ascii!("pkcs_7_asn")),
             other => vm.ctx.new_int(other),
         };
         let usage = match c.valid_uses()? {
@@ -232,9 +233,8 @@ fn _ssl_rand_bytes(n: i32, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
         return Err(vm.new_value_error("num must be positive".to_owned()));
     }
     let mut buf = vec![0; n as usize];
-    openssl::rand::rand_bytes(&mut buf)
-        .map(|()| buf)
-        .map_err(|e| convert_openssl_error(vm, e))
+    openssl::rand::rand_bytes(&mut buf).map_err(|e| convert_openssl_error(vm, e))?;
+    Ok(buf)
 }
 
 fn _ssl_rand_pseudo_bytes(n: i32, vm: &VirtualMachine) -> PyResult<(Vec<u8>, bool)> {
@@ -343,7 +343,7 @@ impl PySslContext {
     fn set_ciphers(&self, cipherlist: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
         let ciphers = cipherlist.as_str();
         if ciphers.contains('\0') {
-            return Err(crate::exceptions::cstring_error(vm));
+            return Err(exceptions::cstring_error(vm));
         }
         self.builder().set_cipher_list(ciphers).map_err(|_| {
             vm.new_exception_msg(ssl_error(vm), "No cipher can be selected.".to_owned())
@@ -592,7 +592,7 @@ impl PySslContext {
             }
         }
 
-        let stream = ssl::SslStream::new(ssl, args.sock.clone())
+        let stream = ssl::SslStream::new(ssl, SocketStream(args.sock.clone()))
             .map_err(|e| convert_openssl_error(vm, e))?;
 
         // TODO: use this
@@ -611,7 +611,7 @@ impl PySslContext {
 #[derive(FromArgs)]
 struct WrapSocketArgs {
     #[pyarg(any)]
-    sock: PySocketRef,
+    sock: PyRef<PySocket>,
     #[pyarg(any)]
     server_side: bool,
     #[pyarg(any, default)]
@@ -642,16 +642,9 @@ struct LoadCertChainArgs {
     password: Option<Either<PyStrRef, ArgCallable>>,
 }
 
-struct SocketTimeout {
-    // Err is true if the socket is blocking
-    deadline: Result<Instant, bool>,
-}
-impl SocketTimeout {
-    fn get(s: &socket::PySocket) -> Self {
-        let deadline = s.get_timeout().map(|d| Instant::now() + d);
-        Self { deadline }
-    }
-}
+// Err is true if the socket is blocking
+type SocketDeadline = Result<Instant, bool>;
+
 enum SelectRet {
     Nonblocking,
     TimedOut,
@@ -659,50 +652,60 @@ enum SelectRet {
     Closed,
     Ok,
 }
-fn ssl_select(sock: &socket::PySocket, needs: SslNeeds, timeout: &SocketTimeout) -> SelectRet {
-    let sock = match sock.sock_opt() {
-        Some(s) => s,
-        None => return SelectRet::Closed,
-    };
-    let timeout = match &timeout.deadline {
-        Ok(deadline) => match deadline.checked_duration_since(Instant::now()) {
-            Some(timeout) => timeout,
-            None => return SelectRet::TimedOut,
-        },
-        Err(true) => return SelectRet::IsBlocking,
-        Err(false) => return SelectRet::Nonblocking,
-    };
-    let res = socket::sock_select(
-        &sock,
-        match needs {
-            SslNeeds::Read => socket::SelectKind::Read,
-            SslNeeds::Write => socket::SelectKind::Write,
-        },
-        Some(timeout),
-    );
-    match res {
-        Ok(true) => SelectRet::TimedOut,
-        _ => SelectRet::Ok,
-    }
-}
+
 #[derive(Clone, Copy)]
 enum SslNeeds {
     Read,
     Write,
 }
 
-fn socket_needs(
-    err: &ssl::Error,
-    sock: &socket::PySocket,
-    timeout: &SocketTimeout,
-) -> (Option<SslNeeds>, SelectRet) {
-    let needs = match err.code() {
-        ssl::ErrorCode::WANT_READ => Some(SslNeeds::Read),
-        ssl::ErrorCode::WANT_WRITE => Some(SslNeeds::Write),
-        _ => None,
-    };
-    let state = needs.map_or(SelectRet::Ok, |needs| ssl_select(sock, needs, timeout));
-    (needs, state)
+struct SocketStream(PyRef<PySocket>);
+
+impl SocketStream {
+    fn timeout_deadline(&self) -> SocketDeadline {
+        self.0.get_timeout().map(|d| Instant::now() + d)
+    }
+
+    fn select(&self, needs: SslNeeds, deadline: &SocketDeadline) -> SelectRet {
+        let sock = match self.0.sock_opt() {
+            Some(s) => s,
+            None => return SelectRet::Closed,
+        };
+        let deadline = match &deadline {
+            Ok(deadline) => match deadline.checked_duration_since(Instant::now()) {
+                Some(deadline) => deadline,
+                None => return SelectRet::TimedOut,
+            },
+            Err(true) => return SelectRet::IsBlocking,
+            Err(false) => return SelectRet::Nonblocking,
+        };
+        let res = socket::sock_select(
+            &sock,
+            match needs {
+                SslNeeds::Read => socket::SelectKind::Read,
+                SslNeeds::Write => socket::SelectKind::Write,
+            },
+            Some(deadline),
+        );
+        match res {
+            Ok(true) => SelectRet::TimedOut,
+            _ => SelectRet::Ok,
+        }
+    }
+
+    fn socket_needs(
+        &self,
+        err: &ssl::Error,
+        deadline: &SocketDeadline,
+    ) -> (Option<SslNeeds>, SelectRet) {
+        let needs = match err.code() {
+            ssl::ErrorCode::WANT_READ => Some(SslNeeds::Read),
+            ssl::ErrorCode::WANT_WRITE => Some(SslNeeds::Write),
+            _ => None,
+        };
+        let state = needs.map_or(SelectRet::Ok, |needs| self.select(needs, deadline));
+        (needs, state)
+    }
 }
 
 fn socket_closed_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
@@ -716,7 +719,7 @@ fn socket_closed_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
 #[derive(PyValue)]
 struct PySslSocket {
     ctx: PyRef<PySslContext>,
-    stream: PyRwLock<ssl::SslStream<PySocketRef>>,
+    stream: PyRwLock<ssl::SslStream<SocketStream>>,
     socket_type: SslServerOrClient,
     server_hostname: Option<PyStrRef>,
     owner: PyRwLock<Option<PyWeak>>,
@@ -788,38 +791,37 @@ impl PySslSocket {
             .map(cipher_to_tuple)
     }
 
+    #[cfg(osslconf = "OPENSSL_NO_COMP")]
     #[pymethod]
     fn compression(&self) -> Option<&'static str> {
-        #[cfg(osslconf = "OPENSSL_NO_COMP")]
-        {
-            None
+        None
+    }
+    #[cfg(not(osslconf = "OPENSSL_NO_COMP"))]
+    #[pymethod]
+    fn compression(&self) -> Option<&'static str> {
+        let stream = self.stream.read();
+        let comp_method = unsafe { sys::SSL_get_current_compression(stream.ssl().as_ptr()) };
+        if comp_method.is_null() {
+            return None;
         }
-        #[cfg(not(osslconf = "OPENSSL_NO_COMP"))]
-        {
-            let stream = self.stream.read();
-            let comp_method = unsafe { sys::SSL_get_current_compression(stream.ssl().as_ptr()) };
-            if comp_method.is_null() {
-                return None;
-            }
-            let typ = unsafe { sys::COMP_get_type(comp_method) };
-            let nid = Nid::from_raw(typ);
-            if nid == Nid::UNDEF {
-                return None;
-            }
-            nid.short_name().ok()
+        let typ = unsafe { sys::COMP_get_type(comp_method) };
+        let nid = Nid::from_raw(typ);
+        if nid == Nid::UNDEF {
+            return None;
         }
+        nid.short_name().ok()
     }
 
     #[pymethod]
     fn do_handshake(&self, vm: &VirtualMachine) -> PyResult<()> {
         let mut stream = self.stream.write();
-        let timeout = SocketTimeout::get(stream.get_ref());
+        let timeout = stream.get_ref().timeout_deadline();
         loop {
             let err = match stream.do_handshake() {
                 Ok(()) => return Ok(()),
                 Err(e) => e,
             };
-            let (needs, state) = socket_needs(&err, stream.get_ref(), &timeout);
+            let (needs, state) = stream.get_ref().socket_needs(&err, &timeout);
             match state {
                 SelectRet::TimedOut => {
                     return Err(socket::timeout_error_msg(
@@ -844,8 +846,8 @@ impl PySslSocket {
         let mut stream = self.stream.write();
         let data = data.borrow_buf();
         let data = &*data;
-        let timeout = SocketTimeout::get(stream.get_ref());
-        let state = ssl_select(stream.get_ref(), SslNeeds::Write, &timeout);
+        let timeout = stream.get_ref().timeout_deadline();
+        let state = stream.get_ref().select(SslNeeds::Write, &timeout);
         match state {
             SelectRet::TimedOut => {
                 return Err(socket::timeout_error_msg(
@@ -861,7 +863,7 @@ impl PySslSocket {
                 Ok(len) => return Ok(len),
                 Err(e) => e,
             };
-            let (needs, state) = socket_needs(&err, stream.get_ref(), &timeout);
+            let (needs, state) = stream.get_ref().socket_needs(&err, &timeout);
             match state {
                 SelectRet::TimedOut => {
                     return Err(socket::timeout_error_msg(
@@ -902,7 +904,7 @@ impl PySslSocket {
             Some(b) => b,
             None => buf,
         };
-        let timeout = SocketTimeout::get(stream.get_ref());
+        let timeout = stream.get_ref().timeout_deadline();
         let count = loop {
             let err = match stream.ssl_read(buf) {
                 Ok(count) => break count,
@@ -913,7 +915,7 @@ impl PySslSocket {
             {
                 break 0;
             }
-            let (needs, state) = socket_needs(&err, stream.get_ref(), &timeout);
+            let (needs, state) = stream.get_ref().socket_needs(&err, &timeout);
             match state {
                 SelectRet::TimedOut => {
                     return Err(socket::timeout_error_msg(
@@ -996,10 +998,9 @@ fn cipher_to_tuple(cipher: &ssl::SslCipherRef) -> CipherTuple {
 }
 
 fn cert_to_py(vm: &VirtualMachine, cert: &X509Ref, binary: bool) -> PyResult {
-    if binary {
-        cert.to_der()
-            .map(|b| vm.ctx.new_bytes(b))
-            .map_err(|e| convert_openssl_error(vm, e))
+    let r = if binary {
+        let b = cert.to_der().map_err(|e| convert_openssl_error(vm, e))?;
+        vm.ctx.new_bytes(b)
     } else {
         let dict = vm.ctx.new_dict();
 
@@ -1050,17 +1051,17 @@ fn cert_to_py(vm: &VirtualMachine, cert: &X509Ref, binary: bool) -> PyResult {
                 .filter_map(|gen_name| {
                     if let Some(email) = gen_name.email() {
                         Some(vm.ctx.new_tuple(vec![
-                            vm.ctx.new_ascii_literal(crate::utils::ascii!("email")),
+                            vm.ctx.new_ascii_literal(ascii!("email")),
                             vm.ctx.new_utf8_str(email),
                         ]))
                     } else if let Some(dnsname) = gen_name.dnsname() {
                         Some(vm.ctx.new_tuple(vec![
-                            vm.ctx.new_ascii_literal(crate::utils::ascii!("DNS")),
+                            vm.ctx.new_ascii_literal(ascii!("DNS")),
                             vm.ctx.new_utf8_str(dnsname),
                         ]))
                     } else if let Some(ip) = gen_name.ipaddress() {
                         Some(vm.ctx.new_tuple(vec![
-                            vm.ctx.new_ascii_literal(crate::utils::ascii!("IP Address")),
+                            vm.ctx.new_ascii_literal(ascii!("IP Address")),
                             vm.ctx.new_utf8_str(String::from_utf8_lossy(ip).into_owned()),
                         ]))
                     } else {
@@ -1073,8 +1074,9 @@ fn cert_to_py(vm: &VirtualMachine, cert: &X509Ref, binary: bool) -> PyResult {
             dict.set_item("subjectAltName", vm.ctx.new_tuple(san), vm)?;
         };
 
-        Ok(dict.into_object())
-    }
+        dict.into_object()
+    };
+    Ok(r)
 }
 
 #[allow(non_snake_case)]
@@ -1110,22 +1112,22 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
 
     let ctx = &vm.ctx;
 
-    let ssl_error = create_exception_type("SSLError", &vm.ctx.exceptions.os_error);
+    let ssl_error = create_simple_type("SSLError", &vm.ctx.exceptions.os_error);
 
-    let ssl_cert_verification_error = pytype::new(
+    let ssl_cert_verification_error = PyType::new(
         ctx.types.type_type.clone(),
         "SSLCertVerificationError",
         ssl_error.clone(),
         vec![ssl_error.clone(), ctx.exceptions.value_error.clone()],
         Default::default(),
-        crate::exceptions::exception_slots(),
+        PyBaseException::make_slots(),
     )
     .unwrap();
-    let ssl_zero_return_error = create_exception_type("SSLZeroReturnError", &ssl_error);
-    let ssl_want_read_error = create_exception_type("SSLWantReadError", &ssl_error);
-    let ssl_want_write_error = create_exception_type("SSLWantWriteError", &ssl_error);
-    let ssl_syscall_error = create_exception_type("SSLSyscallError", &ssl_error);
-    let ssl_eof_error = create_exception_type("SSLEOFError", &ssl_error);
+    let ssl_zero_return_error = create_simple_type("SSLZeroReturnError", &ssl_error);
+    let ssl_want_read_error = create_simple_type("SSLWantReadError", &ssl_error);
+    let ssl_want_write_error = create_simple_type("SSLWantWriteError", &ssl_error);
+    let ssl_syscall_error = create_simple_type("SSLSyscallError", &ssl_error);
+    let ssl_eof_error = create_simple_type("SSLEOFError", &ssl_error);
 
     let module = py_module!(vm, "_ssl", {
         "_SSLContext" => PySslContext::make_class(ctx),
@@ -1237,3 +1239,21 @@ fn extend_module_platform_specific(module: &PyObjectRef, vm: &VirtualMachine) {
 
 #[cfg(not(windows))]
 fn extend_module_platform_specific(_module: &PyObjectRef, _vm: &VirtualMachine) {}
+
+impl Read for SocketStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut socket: &PySocket = &self.0;
+        socket.read(buf)
+    }
+}
+
+impl Write for SocketStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut socket: &PySocket = &self.0;
+        socket.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut socket: &PySocket = &self.0;
+        socket.flush()
+    }
+}

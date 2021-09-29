@@ -16,13 +16,14 @@ use crate::{
     },
     bytecode,
     codecs::CodecsRegistry,
-    common::{hash::HashSecret, lock::PyMutex, rc::PyRc},
+    common::{ascii, hash::HashSecret, lock::PyMutex, rc::PyRc},
     exceptions::{self, PyBaseException, PyBaseExceptionRef},
     frame::{ExecutionResult, Frame, FrameRef},
     frozen,
     function::{FuncArgs, IntoFuncArgs},
     import, iterator,
     scope::Scope,
+    signal::NSIG,
     slots::PyComparisonOp,
     stdlib, sysmodule,
     utils::Either,
@@ -124,8 +125,6 @@ pub struct PyGlobalState {
     pub atexit_funcs: PyMutex<Vec<(PyObjectRef, FuncArgs)>>,
     pub codec_registry: CodecsRegistry,
 }
-
-pub const NSIG: usize = 64;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum InitParameter {
@@ -306,13 +305,13 @@ impl VirtualMachine {
         module::init_module_dict(
             &vm,
             &builtins_dict,
-            vm.ctx.new_ascii_literal(crate::utils::ascii!("builtins")),
+            vm.ctx.new_ascii_literal(ascii!("builtins")),
             vm.ctx.none(),
         );
         module::init_module_dict(
             &vm,
             &sysmod_dict,
-            vm.ctx.new_ascii_literal(crate::utils::ascii!("sys")),
+            vm.ctx.new_ascii_literal(ascii!("sys")),
             vm.ctx.none(),
         );
         vm
@@ -575,12 +574,13 @@ impl VirtualMachine {
         self.ctx.new_code_object(code.into_codeobj(self))
     }
 
-    pub fn new_module(&self, name: &str, dict: PyDictRef) -> PyObjectRef {
+    pub fn new_module(&self, name: &str, dict: PyDictRef, doc: Option<&str>) -> PyObjectRef {
         module::init_module_dict(
             self,
             &dict,
             self.new_pyobj(name.to_owned()),
-            self.ctx.none(),
+            doc.map(|doc| self.new_pyobj(doc.to_owned()))
+                .unwrap_or_else(|| self.ctx.none()),
         );
         PyObject::new(PyModule {}, self.ctx.types.module_type.clone(), Some(dict))
     }
@@ -1549,7 +1549,7 @@ impl VirtualMachine {
     pub fn check_signals(&self) -> PyResult<()> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            crate::stdlib::signal::check_signals(self)
+            crate::signal::check_signals(self)
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -2228,7 +2228,7 @@ mod tests {
     #[test]
     fn test_multiply_str() {
         Interpreter::default().enter(|vm| {
-            let a = vm.ctx.new_ascii_literal(crate::utils::ascii!("Hello "));
+            let a = vm.ctx.new_ascii_literal(crate::common::ascii!("Hello "));
             let b = vm.ctx.new_int(4_i32);
             let res = vm._mul(&a, &b).unwrap();
             let value = res.payload::<PyStr>().unwrap();

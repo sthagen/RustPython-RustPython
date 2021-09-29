@@ -53,7 +53,7 @@ impl TryFromObject for Fildes {
                     .map_err(|_| vm.new_type_error("fileno() returned a non-integer".to_owned()))?
             }
         };
-        let fd = int::try_to_primitive(int.as_bigint(), vm)?;
+        let fd = int.try_to_primitive(vm)?;
         if fd < 0 {
             return Err(vm.new_value_error(format!(
                 "file descriptor cannot be a negative integer ({})",
@@ -78,7 +78,7 @@ mod _io {
     };
     use crate::{
         builtins::{
-            pytype, PyByteArray, PyBytes, PyBytesRef, PyMemoryView, PyStr, PyStrRef, PyTypeRef,
+            PyByteArray, PyBytes, PyBytesRef, PyMemoryView, PyStr, PyStrRef, PyType, PyTypeRef,
         },
         byteslike::{ArgBytesLike, ArgMemoryBuffer},
         exceptions::{self, PyBaseExceptionRef},
@@ -2883,7 +2883,7 @@ mod _io {
                     ))
                 })?;
                 let flags = flags.payload::<int::PyInt>().ok_or_else(state_err)?;
-                let flags = int::try_to_primitive(flags.as_bigint(), vm)?;
+                let flags = flags.try_to_primitive(vm)?;
                 Ok((buf, flags))
             }
             _ => Err(state_err()),
@@ -3621,7 +3621,7 @@ mod _io {
     }
 
     pub(super) fn make_unsupportedop(ctx: &PyContext) -> PyTypeRef {
-        pytype::new(
+        PyType::new(
             ctx.types.type_type.clone(),
             "UnsupportedOperation",
             ctx.exceptions.os_error.clone(),
@@ -3846,7 +3846,7 @@ mod fileio {
                 }
                 fd
             } else if let Some(i) = name.payload::<crate::builtins::PyInt>() {
-                crate::builtins::int::try_to_primitive(i.as_bigint(), vm)?
+                i.try_to_primitive(vm)?
             } else {
                 let path = os::PyPathLike::try_from_object(vm, name.clone())?;
                 if !args.closefd {
