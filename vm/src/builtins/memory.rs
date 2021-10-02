@@ -11,7 +11,7 @@ use crate::{
     protocol::{BufferInternal, BufferOptions, PyBuffer},
     sliceable::{convert_slice, wrap_index, SequenceIndex},
     slots::{AsBuffer, Comparable, Hashable, PyComparisonOp, SlotConstructor},
-    stdlib::pystruct::_struct::FormatSpec,
+    stdlib::pystruct::FormatSpec,
     utils::Either,
     IdProtocol, IntoPyObject, PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef,
     PyResult, PyValue, TryFromBorrowedObject, TryFromObject, TypeProtocol, VirtualMachine,
@@ -24,7 +24,6 @@ use std::ops::Deref;
 
 #[derive(FromArgs)]
 pub struct PyMemoryViewNewArgs {
-    #[pyarg(any)]
     object: PyObjectRef,
 }
 

@@ -35,7 +35,7 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
 #[allow(unused)]
 #[derive(Copy, Clone)]
 #[repr(transparent)]
-pub(crate) struct Fildes(pub i32);
+pub struct Fildes(pub i32);
 
 impl TryFromObject for Fildes {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
@@ -78,13 +78,15 @@ mod _io {
     };
     use crate::{
         builtins::{
-            PyByteArray, PyBytes, PyBytesRef, PyMemoryView, PyStr, PyStrRef, PyType, PyTypeRef,
+            PyBaseExceptionRef, PyByteArray, PyBytes, PyBytesRef, PyMemoryView, PyStr, PyStrRef,
+            PyType, PyTypeRef,
         },
-        byteslike::{ArgBytesLike, ArgMemoryBuffer},
-        exceptions::{self, PyBaseExceptionRef},
-        function::{ArgIterable, FuncArgs, OptionalArg, OptionalOption},
-        protocol::{BufferInternal, BufferOptions, PyBuffer, ResizeGuard},
-        slots::{Iterable, PyIter, SlotConstructor},
+        exceptions,
+        function::{
+            ArgBytesLike, ArgIterable, ArgMemoryBuffer, FuncArgs, OptionalArg, OptionalOption,
+        },
+        protocol::{BufferInternal, BufferOptions, PyBuffer, PyIterReturn, ResizeGuard},
+        slots::{Iterable, SlotConstructor, SlotIterator},
         utils::Either,
         vm::{ReprGuard, VirtualMachine},
         IdProtocol, IntoPyObject, PyContext, PyObjectRef, PyRef, PyResult, PyValue, StaticType,
@@ -342,7 +344,7 @@ mod _io {
     #[derive(Debug, PyValue)]
     struct _IOBase;
 
-    #[pyimpl(with(PyIter), flags(BASETYPE, HAS_DICT))]
+    #[pyimpl(with(SlotIterator), flags(BASETYPE, HAS_DICT))]
     impl _IOBase {
         #[pymethod]
         fn seek(
@@ -378,14 +380,14 @@ mod _io {
         }
 
         #[pyslot]
-        fn tp_del(instance: &PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        fn slot_del(instance: &PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let _ = vm.call_method(instance, "close", ());
             Ok(())
         }
 
         #[pymethod(magic)]
         fn del(instance: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
-            Self::tp_del(&instance, vm)
+            Self::slot_del(&instance, vm)
         }
 
         #[pymethod(magic)]
@@ -511,28 +513,28 @@ mod _io {
     }
 
     impl Iterable for _IOBase {
-        fn tp_iter(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        fn slot_iter(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
             check_closed(&zelf, vm)?;
             Ok(zelf)
         }
 
         fn iter(_zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyResult {
-            unreachable!("tp_iter is implemented")
+            unreachable!("slot_iter is implemented")
         }
     }
 
-    impl PyIter for _IOBase {
-        fn tp_iternext(zelf: &PyObjectRef, vm: &VirtualMachine) -> PyResult {
+    impl SlotIterator for _IOBase {
+        fn slot_iternext(zelf: &PyObjectRef, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
             let line = vm.call_method(zelf, "readline", ())?;
-            if !line.clone().try_to_bool(vm)? {
-                Err(vm.new_stop_iteration())
+            Ok(if !line.clone().try_to_bool(vm)? {
+                PyIterReturn::StopIteration(None)
             } else {
-                Ok(line)
-            }
+                PyIterReturn::Return(line)
+            })
         }
 
-        fn next(_zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult {
-            unreachable!("tp_iternext is implemented")
+        fn next(_zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+            unreachable!("slot_iternext is implemented")
         }
     }
 
@@ -1368,7 +1370,7 @@ mod _io {
                 } else {
                     Err(vm.new_runtime_error(format!(
                         "reentrant call inside {}.__repr__",
-                        obj.class().tp_name()
+                        obj.class().slot_name()
                     )))
                 }
             }
@@ -1518,11 +1520,11 @@ mod _io {
         fn repr(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<String> {
             let name_repr = repr_fileobj_name(&zelf, vm)?;
             let cls = zelf.class();
-            let tp_name = cls.tp_name();
+            let slot_name = cls.slot_name();
             let repr = if let Some(name_repr) = name_repr {
-                format!("<{} name={}>", tp_name, name_repr)
+                format!("<{} name={}>", slot_name, name_repr)
             } else {
-                format!("<{}>", tp_name)
+                format!("<{}>", slot_name)
             };
             Ok(repr)
         }
@@ -1663,7 +1665,7 @@ mod _io {
     #[pyimpl(with(BufferedMixin, BufferedReadable), flags(BASETYPE, HAS_DICT))]
     impl BufferedReader {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Self::default().into_pyresult_with_type(vm, cls)
         }
     }
@@ -1712,7 +1714,7 @@ mod _io {
     #[pyimpl(with(BufferedMixin, BufferedWritable), flags(BASETYPE, HAS_DICT))]
     impl BufferedWriter {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Self::default().into_pyresult_with_type(vm, cls)
         }
     }
@@ -1750,7 +1752,7 @@ mod _io {
     )]
     impl BufferedRandom {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Self::default().into_pyresult_with_type(vm, cls)
         }
     }
@@ -1777,7 +1779,7 @@ mod _io {
     #[pyimpl(with(BufferedReadable, BufferedWritable), flags(BASETYPE, HAS_DICT))]
     impl BufferedRWPair {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Self::default().into_pyresult_with_type(vm, cls)
         }
         #[pymethod(magic)]
@@ -1833,7 +1835,6 @@ mod _io {
 
     #[derive(FromArgs)]
     struct TextIOWrapperArgs {
-        #[pyarg(any)]
         buffer: PyObjectRef,
         #[pyarg(any, default)]
         encoding: Option<PyStrRef>,
@@ -2174,7 +2175,7 @@ mod _io {
     #[pyimpl(flags(BASETYPE))]
     impl TextIOWrapper {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Self::default().into_pyresult_with_type(vm, cls)
         }
 
@@ -3455,7 +3456,6 @@ mod _io {
 
     #[derive(FromArgs)]
     struct IoOpenArgs {
-        #[pyarg(any)]
         file: PyObjectRef,
         #[pyarg(any, optional)]
         mode: OptionalArg<PyStrRef>,
@@ -3682,10 +3682,10 @@ mod fileio {
     use super::_io::*;
     use crate::{
         builtins::{PyStr, PyStrRef, PyTypeRef},
-        byteslike::{ArgBytesLike, ArgMemoryBuffer},
         crt_fd::Fd,
         exceptions::IntoPyException,
         function::OptionalOption,
+        function::{ArgBytesLike, ArgMemoryBuffer},
         function::{FuncArgs, OptionalArg},
         stdlib::os,
         PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
@@ -3817,7 +3817,7 @@ mod fileio {
     #[pyimpl(flags(BASETYPE, HAS_DICT))]
     impl FileIO {
         #[pyslot]
-        fn tp_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             FileIO {
                 fd: AtomicCell::new(-1),
                 closefd: AtomicCell::new(false),

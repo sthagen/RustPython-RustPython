@@ -13,14 +13,13 @@
 pub(crate) mod _struct {
     use crate::{
         builtins::{
-            bytes::PyBytesRef, float, pybool::IntoPyBool, pystr::PyStr, pystr::PyStrRef,
-            pytype::PyTypeRef, tuple::PyTupleRef,
+            float, IntoPyBool, PyBaseExceptionRef, PyBytesRef, PyStr, PyStrRef, PyTupleRef,
+            PyTypeRef,
         },
-        byteslike::{ArgBytesLike, ArgMemoryBuffer},
         common::str::wchar_t,
-        exceptions::PyBaseExceptionRef,
-        function::PosArgs,
-        slots::{IteratorIterable, PyIter, SlotConstructor},
+        function::{ArgBytesLike, ArgMemoryBuffer, PosArgs},
+        protocol::PyIterReturn,
+        slots::{IteratorIterable, SlotConstructor, SlotIterator},
         utils::Either,
         IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, VirtualMachine,
     };
@@ -825,7 +824,7 @@ pub(crate) mod _struct {
         }
     }
 
-    #[pyimpl(with(PyIter))]
+    #[pyimpl(with(SlotIterator))]
     impl UnpackIterator {
         #[pymethod(magic)]
         fn length_hint(&self) -> usize {
@@ -833,15 +832,17 @@ pub(crate) mod _struct {
         }
     }
     impl IteratorIterable for UnpackIterator {}
-    impl PyIter for UnpackIterator {
-        fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult {
+    impl SlotIterator for UnpackIterator {
+        fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
             let size = zelf.format_spec.size;
             let offset = zelf.offset.fetch_add(size);
             zelf.buffer.with_ref(|buf| {
                 if let Some(buf) = buf.get(offset..offset + size) {
-                    zelf.format_spec.unpack(buf, vm).map(|x| x.into_object())
+                    zelf.format_spec
+                        .unpack(buf, vm)
+                        .map(|x| PyIterReturn::Return(x.into_object()))
                 } else {
-                    Err(vm.new_stop_iteration())
+                    Ok(PyIterReturn::StopIteration(None))
                 }
             })
         }
@@ -968,4 +969,4 @@ pub(crate) mod _struct {
     }
 }
 
-pub(crate) use _struct::make_module;
+pub(crate) use _struct::{make_module, FormatSpec};

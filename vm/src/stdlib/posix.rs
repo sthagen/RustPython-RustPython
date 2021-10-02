@@ -2,7 +2,7 @@ use crate::{PyObjectRef, PyResult, VirtualMachine};
 use nix;
 use std::os::unix::io::RawFd;
 
-pub(crate) fn raw_set_inheritable(fd: RawFd, inheritable: bool) -> nix::Result<()> {
+pub fn raw_set_inheritable(fd: RawFd, inheritable: bool) -> nix::Result<()> {
     use nix::fcntl;
     let flags = fcntl::FdFlag::from_bits_truncate(fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFD)?);
     let mut new_flags = flags;
@@ -36,7 +36,7 @@ pub mod module {
         slots::SlotConstructor,
         stdlib::os::{
             errno_err, DirFd, FollowSymlinks, PathOrFd, PyPathLike, SupportFunc, TargetIsDirectory,
-            _os, fs_metadata,
+            _os, fs_metadata, IOErrorBuilder,
         },
         utils::{Either, ToCString},
         IntoPyObject, ItemProtocol, PyObjectRef, PyResult, PyValue, TryFromObject, VirtualMachine,
@@ -291,9 +291,7 @@ pub mod module {
 
     #[derive(FromArgs)]
     pub(super) struct SimlinkArgs {
-        #[pyarg(any)]
         src: PyPathLike,
-        #[pyarg(any)]
         dst: PyPathLike,
         #[pyarg(flatten)]
         _target_is_directory: TargetIsDirectory,
@@ -331,7 +329,14 @@ pub mod module {
     #[cfg(not(target_os = "redox"))]
     #[pyfunction]
     fn chroot(path: PyPathLike, vm: &VirtualMachine) -> PyResult<()> {
-        nix::unistd::chroot(&*path.path).map_err(|err| err.into_pyexception(vm))
+        use crate::stdlib::os::IOErrorBuilder;
+
+        nix::unistd::chroot(&*path.path).map_err(|err| {
+            // Use `From<nix::Error> for io::Error` when it is available
+            IOErrorBuilder::new(io::Error::from_raw_os_error(err as i32))
+                .filename(path)
+                .into_pyexception(vm)
+        })
     }
 
     // As of now, redox does not seems to support chown command (cf. https://gitlab.redox-os.org/redox-os/coreutils , last checked on 05/07/2020)
@@ -369,10 +374,17 @@ pub mod module {
 
         let dir_fd = dir_fd.get_opt();
         match path {
-            PathOrFd::Path(p) => nix::unistd::fchownat(dir_fd, p.path.as_os_str(), uid, gid, flag),
+            PathOrFd::Path(ref p) => {
+                nix::unistd::fchownat(dir_fd, p.path.as_os_str(), uid, gid, flag)
+            }
             PathOrFd::Fd(fd) => nix::unistd::fchown(fd, uid, gid),
         }
-        .map_err(|err| err.into_pyexception(vm))
+        .map_err(|err| {
+            // Use `From<nix::Error> for io::Error` when it is available
+            IOErrorBuilder::new(io::Error::from_raw_os_error(err as i32))
+                .filename(path)
+                .into_pyexception(vm)
+        })
     }
 
     #[cfg(not(target_os = "redox"))]
@@ -496,7 +508,6 @@ pub mod module {
 
     #[derive(FromArgs)]
     pub struct SchedParamArg {
-        #[pyarg(any)]
         sched_priority: PyObjectRef,
     }
     impl SlotConstructor for SchedParam {
@@ -694,6 +705,7 @@ pub mod module {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let [] = dir_fd.0;
+        let err_path = path.clone();
         let body = move || {
             use std::os::unix::fs::PermissionsExt;
             let meta = fs_metadata(&path, follow_symlinks.0)?;
@@ -701,7 +713,11 @@ pub mod module {
             permissions.set_mode(mode);
             fs::set_permissions(&path, permissions)
         };
-        body().map_err(|err| err.into_pyexception(vm))
+        body().map_err(|err| {
+            IOErrorBuilder::new(err)
+                .filename(err_path)
+                .into_pyexception(vm)
+        })
     }
 
     #[pyfunction]
@@ -1689,13 +1705,9 @@ pub mod module {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[derive(FromArgs)]
     struct SendFileArgs {
-        #[pyarg(any)]
         out_fd: i32,
-        #[pyarg(any)]
         in_fd: i32,
-        #[pyarg(any)]
         offset: crate::crt_fd::Offset,
-        #[pyarg(any)]
         count: i64,
         #[cfg(target_os = "macos")]
         #[pyarg(any, optional)]
@@ -1729,10 +1741,10 @@ pub mod module {
     fn _extract_vec_bytes(
         x: OptionalArg,
         vm: &VirtualMachine,
-    ) -> PyResult<Option<Vec<crate::byteslike::ArgBytesLike>>> {
+    ) -> PyResult<Option<Vec<crate::function::ArgBytesLike>>> {
         let inner = match x.into_option() {
             Some(v) => {
-                let v = vm.extract_elements::<crate::byteslike::ArgBytesLike>(&v)?;
+                let v = vm.extract_elements::<crate::function::ArgBytesLike>(&v)?;
                 if v.is_empty() {
                     None
                 } else {
