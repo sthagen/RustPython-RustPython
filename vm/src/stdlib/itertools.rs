@@ -8,12 +8,11 @@ mod decl {
     };
     use crate::{
         builtins::{int, PyInt, PyIntRef, PyTupleRef, PyTypeRef},
-        function::{ArgCallable, FuncArgs, OptionalArg, OptionalOption, PosArgs},
+        function::{ArgCallable, FuncArgs, IntoPyObject, OptionalArg, OptionalOption, PosArgs},
         protocol::{PyIter, PyIterReturn},
         slots::{IteratorIterable, SlotConstructor, SlotIterator},
         stdlib::sys,
-        IdProtocol, IntoPyObject, PyObjectRef, PyRef, PyResult, PyValue, PyWeakRef, TypeProtocol,
-        VirtualMachine,
+        IdProtocol, PyObjectRef, PyRef, PyResult, PyValue, PyWeakRef, TypeProtocol, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use num_bigint::BigInt;
@@ -269,10 +268,7 @@ mod decl {
         ) -> PyResult {
             let times = match times.into_option() {
                 Some(int) => {
-                    let val = int.as_bigint();
-                    if *val > BigInt::from(sys::MAXSIZE) {
-                        return Err(vm.new_overflow_error("Cannot fit in isize.".to_owned()));
-                    }
+                    let val: isize = int.try_to_primitive(vm)?;
                     // times always >= 0.
                     Some(PyRwLock::new(val.to_usize().unwrap_or(0)))
                 }

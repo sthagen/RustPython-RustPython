@@ -1,13 +1,11 @@
 use super::errno::errors;
 use crate::crt_fd::Fd;
 use crate::{
-    builtins::PyBaseExceptionRef,
-    builtins::{PyBytes, PyBytesRef, PyInt, PySet, PyStr, PyStrRef},
-    exceptions::IntoPyException,
-    function::{ArgumentError, FromArgs, FuncArgs},
+    builtins::{PyBaseExceptionRef, PyBytes, PyBytesRef, PyInt, PySet, PyStr, PyStrRef},
+    function::{ArgumentError, FromArgs, FuncArgs, IntoPyException, IntoPyObject},
     protocol::PyBuffer,
-    IntoPyObject, PyObjectRef, PyResult, PyValue, TryFromBorrowedObject, TryFromObject,
-    TypeProtocol, VirtualMachine,
+    PyObjectRef, PyResult, PyValue, TryFromBorrowedObject, TryFromObject, TypeProtocol,
+    VirtualMachine,
 };
 use std::ffi;
 use std::fs;
@@ -210,10 +208,11 @@ pub(crate) enum PathOrFd {
 
 impl TryFromObject for PathOrFd {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-        match obj.downcast::<PyInt>() {
-            Ok(int) => int.try_to_primitive(vm).map(Self::Fd),
-            Err(obj) => PyPathLike::try_from_object(vm, obj).map(Self::Path),
-        }
+        let r = match obj.downcast::<PyInt>() {
+            Ok(int) => Self::Fd(int.try_to_primitive(vm)?),
+            Err(obj) => Self::Path(obj.try_into_value(vm)?),
+        };
+        Ok(r)
     }
 }
 
@@ -428,15 +427,14 @@ pub(super) mod _os {
     use crate::{
         builtins::{PyBytesRef, PyIntRef, PyStrRef, PyTuple, PyTupleRef, PyTypeRef},
         crt_fd::{Fd, Offset},
-        exceptions::IntoPyException,
-        function::{ArgBytesLike, FuncArgs, OptionalArg},
+        function::{ArgBytesLike, FuncArgs, IntoPyException, IntoPyObject, OptionalArg},
         protocol::PyIterReturn,
         slots::{IteratorIterable, SlotIterator},
         suppress_iph,
         utils::Either,
         vm::{ReprGuard, VirtualMachine},
-        IntoPyObject, IntoPyRef, PyObjectRef, PyRef, PyResult, PyStructSequence, PyValue,
-        TryFromBorrowedObject, TryFromObject, TypeProtocol,
+        IntoPyRef, PyObjectRef, PyRef, PyResult, PyStructSequence, PyValue, TryFromObject,
+        TypeProtocol,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
@@ -1343,10 +1341,7 @@ pub(super) mod _os {
                         "utime: 'times' must be either a tuple of two ints or None".to_owned(),
                     )
                 })?;
-                (
-                    Duration::try_from_object(vm, a)?,
-                    Duration::try_from_object(vm, m)?,
-                )
+                (a.try_into_value(vm)?, m.try_into_value(vm)?)
             }
             (None, Some(ns)) => {
                 let (a, m) = parse_tup(&ns).ok_or_else(|| {
@@ -1612,7 +1607,7 @@ pub(super) mod _os {
 
     #[pyfunction]
     fn truncate(path: PyObjectRef, length: Offset, vm: &VirtualMachine) -> PyResult<()> {
-        if let Ok(fd) = i32::try_from_borrowed_object(vm, &path) {
+        if let Ok(fd) = path.try_borrow_to_object(vm) {
             return ftruncate(fd, length, vm);
         }
         let path = PyPathLike::try_from_object(vm, path)?;

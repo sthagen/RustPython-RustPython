@@ -16,22 +16,22 @@ mod array {
             PyStr, PyStrRef, PyTypeRef,
         },
         class_or_notimplemented,
-        function::{ArgBytesLike, ArgIterable, OptionalArg},
+        function::{ArgBytesLike, ArgIterable, IntoPyObject, IntoPyResult, OptionalArg},
         protocol::{
-            BufferInternal, BufferOptions, PyBuffer, PyIterReturn, PyMappingMethods, ResizeGuard,
+            BufferInternal, BufferOptions, BufferResizeGuard, PyBuffer, PyIterReturn,
+            PyMappingMethods,
         },
         sliceable::{saturate_index, PySliceableSequence, PySliceableSequenceMut, SequenceIndex},
         slots::{
             AsBuffer, AsMapping, Comparable, Iterable, IteratorIterable, PyComparisonOp,
             SlotConstructor, SlotIterator,
         },
-        IdProtocol, IntoPyObject, IntoPyResult, PyComparisonValue, PyObjectRef, PyRef, PyResult,
-        PyValue, TryFromObject, TypeProtocol, VirtualMachine,
+        IdProtocol, PyComparisonValue, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+        TypeProtocol, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
     use lexical_core::Integer;
-    use num_traits::ToPrimitive;
     use std::cmp::Ordering;
     use std::convert::{TryFrom, TryInto};
     use std::{fmt, os::raw};
@@ -1207,7 +1207,7 @@ mod array {
         }
     }
 
-    impl<'a> ResizeGuard<'a> for PyArray {
+    impl<'a> BufferResizeGuard<'a> for PyArray {
         type Resizable = PyRwLockWriteGuard<'a, ArrayContentType>;
 
         fn try_resizable(&'a self, vm: &VirtualMachine) -> PyResult<Self::Resizable> {
@@ -1320,11 +1320,7 @@ mod array {
                         obj.class().name()
                     ))
                 })?
-                .as_bigint()
-                .to_i32()
-                .ok_or_else(|| {
-                    vm.new_overflow_error("Python int too large to convert to C int".into())
-                })?
+                .try_to_primitive::<i32>(vm)?
                 .try_u8_or_max()
                 .try_into()
                 .map_err(|_| {

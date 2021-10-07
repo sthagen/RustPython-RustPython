@@ -20,7 +20,7 @@ use crate::{
     exceptions,
     frame::{ExecutionResult, Frame, FrameRef},
     frozen,
-    function::{FuncArgs, IntoFuncArgs},
+    function::{FuncArgs, IntoFuncArgs, IntoPyObject},
     import,
     protocol::{PyIterIter, PyIterReturn},
     scope::Scope,
@@ -28,9 +28,8 @@ use crate::{
     slots::PyComparisonOp,
     stdlib,
     utils::Either,
-    IdProtocol, IntoPyObject, ItemProtocol, PyArithmeticValue, PyContext, PyLease, PyMethod,
-    PyObject, PyObjectRef, PyRef, PyRefExact, PyResult, PyValue, TryFromObject, TryIntoRef,
-    TypeProtocol,
+    IdProtocol, ItemProtocol, PyArithmeticValue, PyContext, PyLease, PyMethod, PyObject,
+    PyObjectRef, PyRef, PyRefExact, PyResult, PyValue, TryFromObject, TryIntoRef, TypeProtocol,
 };
 use crossbeam_utils::atomic::AtomicCell;
 use num_traits::{Signed, ToPrimitive};
@@ -879,13 +878,13 @@ impl VirtualMachine {
             Ok(obj.clone().downcast().unwrap())
         } else {
             let s = self.call_special_method(obj.clone(), "__str__", ())?;
-            PyStrRef::try_from_object(self, s)
+            s.try_into_value(self)
         }
     }
 
     pub fn to_repr(&self, obj: &PyObjectRef) -> PyResult<PyStrRef> {
         let repr = self.call_special_method(obj.clone(), "__repr__", ())?;
-        PyStrRef::try_from_object(self, repr)
+        repr.try_into_value(self)
     }
 
     pub fn to_index_opt(&self, obj: PyObjectRef) -> Option<PyResult<PyIntRef>> {
