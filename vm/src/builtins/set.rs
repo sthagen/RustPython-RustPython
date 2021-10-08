@@ -26,7 +26,7 @@ pub type SetContentType = dictdatatype::Dict<()>;
 #[pyclass(module = false, name = "set")]
 #[derive(Default)]
 pub struct PySet {
-    inner: PySetInner,
+    pub(super) inner: PySetInner,
 }
 pub type PySetRef = PyRef<PySet>;
 
@@ -67,14 +67,17 @@ impl PyValue for PyFrozenSet {
 }
 
 #[derive(Default, Clone)]
-struct PySetInner {
+pub(super) struct PySetInner {
     content: PyRc<SetContentType>,
 }
 
 impl PySetInner {
-    fn new(iterable: ArgIterable, vm: &VirtualMachine) -> PyResult<PySetInner> {
+    pub(super) fn from_iter<T>(iter: T, vm: &VirtualMachine) -> PyResult<Self>
+    where
+        T: IntoIterator<Item = PyResult<PyObjectRef>>,
+    {
         let set = PySetInner::default();
-        for item in iterable.iter(vm)? {
+        for item in iter {
             set.add(item?, vm)?;
         }
         Ok(set)
@@ -151,7 +154,7 @@ impl PySetInner {
         Ok(set)
     }
 
-    fn symmetric_difference(
+    pub(super) fn symmetric_difference(
         &self,
         other: ArgIterable,
         vm: &VirtualMachine,
@@ -159,7 +162,7 @@ impl PySetInner {
         let new_inner = self.clone();
 
         // We want to remove duplicates in other
-        let other_set = Self::new(other, vm)?;
+        let other_set = Self::from_iter(other.iter(vm)?, vm)?;
 
         for item in other_set.elements() {
             new_inner.content.delete_or_insert(vm, &item, ())?
@@ -178,7 +181,7 @@ impl PySetInner {
     }
 
     fn issubset(&self, other: ArgIterable, vm: &VirtualMachine) -> PyResult<bool> {
-        let other_set = PySetInner::new(other, vm)?;
+        let other_set = PySetInner::from_iter(other.iter(vm)?, vm)?;
         self.compare(&other_set, PyComparisonOp::Le, vm)
     }
 
@@ -310,7 +313,7 @@ impl PySetInner {
     ) -> PyResult<()> {
         for iterable in others {
             // We want to remove duplicates in iterable
-            let iterable_set = Self::new(iterable, vm)?;
+            let iterable_set = Self::from_iter(iterable.iter(vm)?, vm)?;
             for item in iterable_set.elements() {
                 self.content.delete_or_insert(vm, &item, ())?;
             }
@@ -606,7 +609,7 @@ impl PySet {
         zelf: PyRef<Self>,
         vm: &VirtualMachine,
     ) -> PyResult<(PyTypeRef, PyObjectRef, Option<PyDictRef>)> {
-        reduce_set(&zelf.into_object(), vm)
+        reduce_set(&zelf.into(), vm)
     }
 }
 
@@ -648,7 +651,7 @@ impl SlotConstructor for PyFrozenSet {
         let elements = if let OptionalArg::Present(iterable) = iterable {
             let iterable = if cls.is(&vm.ctx.types.frozenset_type) {
                 match iterable.downcast_exact::<Self>(vm) {
-                    Ok(fs) => return Ok(fs.into_object()),
+                    Ok(fs) => return Ok(fs.into()),
                     Err(iterable) => iterable,
                 }
             } else {
@@ -661,7 +664,7 @@ impl SlotConstructor for PyFrozenSet {
 
         // Return empty fs if iterable passed is empty and only for exact fs types.
         if elements.is_empty() && cls.is(&vm.ctx.types.frozenset_type) {
-            Ok(vm.ctx.empty_frozenset.clone().into_object())
+            Ok(vm.ctx.empty_frozenset.clone().into())
         } else {
             Self::from_iter(vm, elements).and_then(|o| o.into_pyresult_with_type(vm, cls))
         }
@@ -795,7 +798,7 @@ impl PyFrozenSet {
         zelf: PyRef<Self>,
         vm: &VirtualMachine,
     ) -> PyResult<(PyTypeRef, PyObjectRef, Option<PyDictRef>)> {
-        reduce_set(&zelf.into_object(), vm)
+        reduce_set(&zelf.into(), vm)
     }
 }
 
