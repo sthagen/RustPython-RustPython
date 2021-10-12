@@ -226,14 +226,12 @@ pub mod module {
     }
 
     #[pyfunction]
-    fn getgroups(vm: &VirtualMachine) -> PyResult {
+    fn getgroups(vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
         let group_ids = getgroups_impl().map_err(|e| e.into_pyexception(vm))?;
-        Ok(vm.ctx.new_list(
-            group_ids
-                .into_iter()
-                .map(|gid| vm.ctx.new_int(gid.as_raw()).into())
-                .collect(),
-        ))
+        Ok(group_ids
+            .into_iter()
+            .map(|gid| vm.ctx.new_int(gid.as_raw()).into())
+            .collect())
     }
 
     #[pyfunction]
@@ -276,13 +274,9 @@ pub mod module {
 
         let environ = vm.ctx.new_dict();
         for (key, value) in env::vars_os() {
-            environ
-                .set_item(
-                    vm.ctx.new_bytes(key.into_vec()),
-                    vm.ctx.new_bytes(value.into_vec()),
-                    vm,
-                )
-                .unwrap();
+            let key: PyObjectRef = vm.ctx.new_bytes(key.into_vec()).into();
+            let value: PyObjectRef = vm.ctx.new_bytes(value.into_vec()).into();
+            environ.set_item(key, value, vm).unwrap();
         }
 
         environ
@@ -971,7 +965,7 @@ pub mod module {
             Err(errno_err(vm))
         } else {
             let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
-            Ok(vm.ctx.new_utf8_str(name))
+            Ok(vm.ctx.new_str(name).into())
         }
     }
 
@@ -1480,16 +1474,14 @@ pub mod module {
         target_os = "openbsd"
     ))]
     #[pyfunction]
-    fn getgrouplist(user: PyStrRef, group: u32, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+    fn getgrouplist(user: PyStrRef, group: u32, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
         let user = CString::new(user.as_str()).unwrap();
         let gid = Gid::from_raw(group);
         let group_ids = unistd::getgrouplist(&user, gid).map_err(|err| err.into_pyexception(vm))?;
-        Ok(vm.ctx.new_list(
-            group_ids
-                .into_iter()
-                .map(|gid| vm.new_pyobj(gid.as_raw()))
-                .collect(),
-        ))
+        Ok(group_ids
+            .into_iter()
+            .map(|gid| vm.new_pyobj(gid.as_raw()))
+            .collect())
     }
 
     #[cfg(not(target_os = "redox"))]

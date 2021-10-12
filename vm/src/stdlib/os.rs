@@ -34,16 +34,16 @@ impl OutputMode {
                 })
             };
             match mode {
-                OutputMode::String => path_as_string(path).map(|s| vm.ctx.new_utf8_str(s)),
+                OutputMode::String => path_as_string(path).map(|s| vm.ctx.new_str(s).into()),
                 OutputMode::Bytes => {
                     #[cfg(any(unix, target_os = "wasi"))]
                     {
                         use ffi_ext::OsStringExt;
-                        Ok(vm.ctx.new_bytes(path.into_os_string().into_vec()))
+                        Ok(vm.ctx.new_bytes(path.into_os_string().into_vec()).into())
                     }
                     #[cfg(windows)]
                     {
-                        path_as_string(path).map(|s| vm.ctx.new_bytes(s.into_bytes()))
+                        path_as_string(path).map(|s| vm.ctx.new_bytes(s.into_bytes()).into())
                     }
                 }
             }
@@ -254,7 +254,7 @@ impl IntoPyException for &'_ io::Error {
             },
         };
         let errno = self.raw_os_error().into_pyobject(vm);
-        let msg = vm.ctx.new_utf8_str(self.to_string());
+        let msg = vm.ctx.new_str(self.to_string()).into();
         vm.new_exception(exc_type, vec![errno, msg])
     }
 }
@@ -537,7 +537,7 @@ pub(super) mod _os {
     }
 
     #[pyfunction]
-    fn read(fd: i32, n: usize, vm: &VirtualMachine) -> PyResult {
+    fn read(fd: i32, n: usize, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
         let mut buffer = vec![0u8; n];
         let mut file = Fd(fd);
         let n = file
@@ -614,7 +614,7 @@ pub(super) mod _os {
     const LISTDIR_FD: bool = cfg!(all(unix, not(target_os = "redox")));
 
     #[pyfunction]
-    fn listdir(path: OptionalArg<PathOrFd>, vm: &VirtualMachine) -> PyResult {
+    fn listdir(path: OptionalArg<PathOrFd>, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
         let path = path.unwrap_or_else(|| PathOrFd::Path(PyPathLike::new_str(".")));
         let list = match path {
             PathOrFd::Path(path) => {
@@ -662,7 +662,7 @@ pub(super) mod _os {
                 }
             }
         };
-        Ok(vm.ctx.new_list(list))
+        Ok(list)
     }
 
     #[pyfunction]

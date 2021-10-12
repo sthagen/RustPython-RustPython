@@ -384,7 +384,7 @@ impl PyType {
         let attributes: Vec<PyObjectRef> = zelf
             .get_attributes()
             .drain()
-            .map(|(k, _)| vm.ctx.new_utf8_str(k))
+            .map(|(k, _)| vm.ctx.new_str(k).into())
             .collect();
         PyList::from(attributes)
     }
@@ -451,7 +451,7 @@ impl PyType {
                     Some(found)
                 }
             })
-            .unwrap_or_else(|| vm.ctx.new_utf8_str(self.name().deref()))
+            .unwrap_or_else(|| vm.ctx.new_str(self.name().deref()).into())
     }
 
     #[pyproperty(magic)]
@@ -469,7 +469,7 @@ impl PyType {
                     Some(found)
                 }
             })
-            .unwrap_or_else(|| vm.ctx.new_ascii_literal(ascii!("builtins")))
+            .unwrap_or_else(|| vm.ctx.new_str(ascii!("builtins")).into())
     }
 
     #[pyproperty(magic, setter)]
@@ -503,9 +503,8 @@ impl PyType {
     }
 
     #[pymethod]
-    fn mro(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyObjectRef {
-        vm.ctx
-            .new_list(zelf.iter_mro().map(|cls| cls.clone().into()).collect())
+    fn mro(zelf: PyRef<Self>) -> Vec<PyObjectRef> {
+        zelf.iter_mro().map(|cls| cls.clone().into()).collect()
     }
     #[pyslot]
     fn slot_new(metatype: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
@@ -595,12 +594,14 @@ impl PyType {
         if !attributes.contains_key("__dict__") {
             attributes.insert(
                 "__dict__".to_owned(),
-                vm.ctx.new_getset(
-                    "__dict__",
-                    vm.ctx.types.object_type.clone(),
-                    subtype_get_dict,
-                    subtype_set_dict,
-                ),
+                vm.ctx
+                    .new_getset(
+                        "__dict__",
+                        vm.ctx.types.object_type.clone(),
+                        subtype_get_dict,
+                        subtype_set_dict,
+                    )
+                    .into(),
             );
         }
 

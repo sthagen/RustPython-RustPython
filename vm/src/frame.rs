@@ -614,18 +614,18 @@ impl ExecutingFrame<'_> {
                     .iter()
                     .map(|pyobj| pyobj.payload::<PyStr>().unwrap().as_ref())
                     .collect::<String>();
-                let str_obj = vm.ctx.new_utf8_str(s);
-                self.push_value(str_obj);
+                let str_obj = vm.ctx.new_str(s);
+                self.push_value(str_obj.into());
                 Ok(None)
             }
             bytecode::Instruction::BuildList { size, unpack } => {
                 let elements = self.get_elements(vm, *size as usize, *unpack)?;
                 let list_obj = vm.ctx.new_list(elements);
-                self.push_value(list_obj);
+                self.push_value(list_obj.into());
                 Ok(None)
             }
             bytecode::Instruction::BuildSet { size, unpack } => {
-                let set = vm.ctx.new_set();
+                let set = set::PySet::new_ref(&vm.ctx);
                 {
                     let elements = self.pop_multiple(*size as usize);
                     if *unpack {
@@ -662,7 +662,7 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::SetAdd { i } => {
                 let set_obj = self.nth_value(*i);
                 let item = self.pop_value();
-                set::PySetRef::try_from_object(vm, set_obj)?.add(item, vm)?;
+                PyRef::<set::PySet>::try_from_object(vm, set_obj)?.add(item, vm)?;
                 Ok(None)
             }
             bytecode::Instruction::MapAdd { i } => {
@@ -1016,7 +1016,7 @@ impl ExecutingFrame<'_> {
                 let value = match conversion {
                     ConversionFlag::Str => vm.to_str(&value)?.into(),
                     ConversionFlag::Repr => vm.to_repr(&value)?.into(),
-                    ConversionFlag::Ascii => vm.ctx.new_utf8_str(builtins::ascii(value, vm)?),
+                    ConversionFlag::Ascii => vm.ctx.new_str(builtins::ascii(value, vm)?).into(),
                     ConversionFlag::None => value,
                 };
 
@@ -1464,7 +1464,7 @@ impl ExecutingFrame<'_> {
 
         let middle_elements = elements.drain(before..).collect();
         let t = vm.ctx.new_list(middle_elements);
-        self.push_value(t);
+        self.push_value(t.into());
 
         // Lastly the first reversed values:
         self.state.stack.extend(elements.into_iter().rev());
@@ -1566,7 +1566,7 @@ impl ExecutingFrame<'_> {
         vm.set_attr(&func_obj, "__doc__", vm.ctx.none())?;
 
         let name = qualified_name.as_str().split('.').next_back().unwrap();
-        vm.set_attr(&func_obj, "__name__", vm.ctx.new_utf8_str(name))?;
+        vm.set_attr(&func_obj, "__name__", vm.new_pyobj(name))?;
         vm.set_attr(&func_obj, "__qualname__", qualified_name)?;
         let module = vm.unwrap_or_none(self.globals.get_item_option("__name__", vm)?);
         vm.set_attr(&func_obj, "__module__", module)?;

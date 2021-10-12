@@ -25,7 +25,7 @@ macro_rules! create_property {
             move |this: &PyExpatLikeXmlParser, func: PyObjectRef| *this.$element.write() = func,
         );
 
-        $attributes.insert($name.to_owned(), attr);
+        $attributes.insert($name.to_owned(), attr.into());
     };
 }
 
@@ -131,7 +131,7 @@ mod _pyexpat {
                         for attribute in attributes {
                             dict.set_item(
                                 attribute.name.local_name.as_str(),
-                                vm.ctx.new_utf8_str(attribute.value),
+                                vm.ctx.new_str(attribute.value).into(),
                                 vm,
                             )
                             .unwrap();

@@ -28,7 +28,6 @@ pub type SetContentType = dictdatatype::Dict<()>;
 pub struct PySet {
     pub(super) inner: PySetInner,
 }
-pub type PySetRef = PyRef<PySet>;
 
 /// frozenset() -> empty frozenset object
 /// frozenset(iterable) -> frozenset object
@@ -272,7 +271,7 @@ impl PySetInner {
         if let Some((key, _)) = self.content.pop_back() {
             Ok(key)
         } else {
-            let err_msg = vm.ctx.new_ascii_literal(ascii!("pop from an empty set"));
+            let err_msg = vm.ctx.new_str(ascii!("pop from an empty set")).into();
             Err(vm.new_key_error(err_msg))
         }
     }
@@ -384,11 +383,9 @@ fn reduce_set(
 ) -> PyResult<(PyTypeRef, PyTupleRef, Option<PyDictRef>)> {
     Ok((
         zelf.clone_class(),
-        vm.ctx.new_tuple(vec![vm.ctx.new_list(
-            extract_set(zelf)
-                .unwrap_or(&PySetInner::default())
-                .elements(),
-        )]),
+        vm.new_tuple((extract_set(zelf)
+            .unwrap_or(&PySetInner::default())
+            .elements(),)),
         zelf.dict(),
     ))
 }
@@ -401,6 +398,14 @@ macro_rules! multi_args_set {
         }
         Ok(Self { inner: res })
     }};
+}
+
+impl PySet {
+    pub fn new_ref(ctx: &PyContext) -> PyRef<Self> {
+        // Initialized empty, as calling __hash__ is required for adding each object to the set
+        // which requires a VM context - this is done in the set code itself.
+        PyRef::new_ref(Self::default(), ctx.types.set_type.clone(), None)
+    }
 }
 
 #[pyimpl(with(Hashable, Comparable, Iterable), flags(BASETYPE))]
@@ -527,7 +532,7 @@ impl PySet {
         } else {
             format!("{}(...)", class_name)
         };
-        Ok(vm.ctx.new_utf8_str(s))
+        Ok(vm.ctx.new_str(s).into())
     }
 
     #[pymethod]
@@ -692,6 +697,7 @@ impl PyFrozenSet {
         for elem in it {
             inner.add(elem, vm)?;
         }
+        // FIXME: empty set check
         Ok(Self { inner })
     }
 
@@ -801,7 +807,7 @@ impl PyFrozenSet {
         } else {
             format!("{}(...)", class_name)
         };
-        Ok(vm.ctx.new_utf8_str(s))
+        Ok(vm.ctx.new_str(s).into())
     }
 
     #[pymethod(magic)]
@@ -890,12 +896,14 @@ impl PySetIterator {
         let internal = zelf.internal.lock();
         Ok((
             builtins_iter(vm).clone(),
-            (vm.ctx.new_list(match &internal.status {
-                IterStatus::Exhausted => vec![],
-                IterStatus::Active(dict) => {
-                    dict.keys().into_iter().skip(internal.position).collect()
-                }
-            }),),
+            (vm.ctx
+                .new_list(match &internal.status {
+                    IterStatus::Exhausted => vec![],
+                    IterStatus::Active(dict) => {
+                        dict.keys().into_iter().skip(internal.position).collect()
+                    }
+                })
+                .into(),),
         ))
     }
 }

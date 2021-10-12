@@ -447,10 +447,10 @@ mod _io {
             instance: PyObjectRef,
             hint: OptionalOption<isize>,
             vm: &VirtualMachine,
-        ) -> PyResult {
+        ) -> PyResult<Vec<PyObjectRef>> {
             let hint = hint.flatten().unwrap_or(-1);
             if hint <= 0 {
-                return Ok(vm.ctx.new_list(vm.extract_elements(&instance)?));
+                return vm.extract_elements(&instance);
             }
             let hint = hint as usize;
             let mut ret = Vec::new();
@@ -465,7 +465,7 @@ mod _io {
                     break;
                 }
             }
-            Ok(vm.ctx.new_list(ret))
+            Ok(ret)
         }
 
         #[pymethod]
@@ -3116,7 +3116,7 @@ mod _io {
         #[pymethod]
         fn getvalue(self, vm: &VirtualMachine) -> PyResult {
             match String::from_utf8(self.buffer(vm)?.getvalue()) {
-                Ok(result) => Ok(vm.ctx.new_utf8_str(result)),
+                Ok(result) => Ok(vm.ctx.new_str(result).into()),
                 Err(_) => Err(vm.new_value_error("Error Retrieving Value".to_owned())),
             }
         }
@@ -3146,7 +3146,7 @@ mod _io {
 
             let value = String::from_utf8(data)
                 .map_err(|_| vm.new_value_error("Error Retrieving Value".to_owned()))?;
-            Ok(vm.ctx.new_utf8_str(value))
+            Ok(vm.ctx.new_str(value).into())
         }
 
         #[pymethod]
@@ -3237,7 +3237,7 @@ mod _io {
 
         //Retrieves the entire bytes object value from the underlying buffer
         #[pymethod]
-        fn getvalue(self, vm: &VirtualMachine) -> PyResult {
+        fn getvalue(self, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
             Ok(vm.ctx.new_bytes(self.buffer(vm)?.getvalue()))
         }
 
@@ -3609,7 +3609,7 @@ mod _io {
                         line_buffering,
                     ),
                 )?;
-                vm.set_attr(&wrapper, "mode", vm.ctx.new_utf8_str(mode_string))?;
+                vm.set_attr(&wrapper, "mode", vm.new_pyobj(mode_string))?;
                 Ok(wrapper)
             }
             EncodeMode::Bytes => Ok(buffered),
