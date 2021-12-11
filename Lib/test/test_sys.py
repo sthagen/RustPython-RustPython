@@ -1,4 +1,5 @@
 from test import support
+from test.support import os_helper
 from test.support.script_helper import assert_python_ok, assert_python_failure
 import builtins
 import codecs
@@ -81,7 +82,8 @@ class ExceptHookTest(unittest.TestCase):
 
         self.assertRaises(TypeError, sys.__excepthook__)
 
-    @unittest.skip("TODO: RUSTPYTHON; SyntaxError formatting in arbitrary tracebacks")
+    # TODO: RUSTPYTHON, SyntaxError formatting in arbitrary tracebacks
+    @unittest.expectedFailure
     def test_excepthook_bytes_filename(self):
         # bpo-37467: sys.excepthook() must not crash if a filename
         # is a bytes string
@@ -99,7 +101,8 @@ class ExceptHookTest(unittest.TestCase):
         self.assertIn("""    text\n""", err)
         self.assertTrue(err.endswith("SyntaxError: msg\n"))
 
-    @unittest.skip("TODO: RUSTPYTHON; print argument error to stderr in sys.excepthook instead of throwing")
+    # TODO: RUSTPYTHON, print argument error to stderr in sys.excepthook instead of throwing
+    @unittest.expectedFailure
     def test_excepthook(self):
         with test.support.captured_output("stderr") as stderr:
             sys.excepthook(1, '1', 1)
@@ -191,7 +194,8 @@ class SysModuleTest(unittest.TestCase):
     # testing sys.settrace() is done in test_sys_settrace.py
     # testing sys.setprofile() is done in test_sys_setprofile.py
 
-    @unittest.skip("RUSTPYTHON: don't have sys.setcheckinterval")
+    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'setcheckinterval'
+    @unittest.expectedFailure
     def test_setcheckinterval(self):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -201,7 +205,8 @@ class SysModuleTest(unittest.TestCase):
                 sys.setcheckinterval(n)
                 self.assertEqual(sys.getcheckinterval(), n)
 
-    @unittest.skip("RUSTPYTHON: don't have sys.setswitchinterval")
+    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'setswitchinterval'
+    @unittest.expectedFailure
     def test_switchinterval(self):
         self.assertRaises(TypeError, sys.setswitchinterval)
         self.assertRaises(TypeError, sys.setswitchinterval, "a")
@@ -226,7 +231,7 @@ class SysModuleTest(unittest.TestCase):
         self.assertEqual(sys.getrecursionlimit(), 10000)
         sys.setrecursionlimit(oldlimit)
 
-    @unittest.skipIf(getattr(sys, "_rustpython_debugbuild", False), "stack overflow on debug build")
+    @unittest.skipIf(getattr(sys, "_rustpython_debugbuild", False), "TODO: RUSTPYTHON, stack overflow on debug build")
     def test_recursionlimit_recovery(self):
         if hasattr(sys, 'gettrace') and sys.gettrace():
             self.skipTest('fatal error if run with a trace function')
@@ -340,7 +345,8 @@ class SysModuleTest(unittest.TestCase):
         #  still has 5 elements
         maj, min, buildno, plat, csd = sys.getwindowsversion()
 
-    @unittest.skip("TODO: RUSTPYTHON; sys.call_tracing")
+    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'call_tracing'
+    @unittest.expectedFailure
     def test_call_tracing(self):
         self.assertRaises(TypeError, sys.call_tracing, type, 2)
 
@@ -528,7 +534,8 @@ class SysModuleTest(unittest.TestCase):
         if not sys.platform.startswith('win'):
             self.assertIsInstance(sys.abiflags, str)
 
-    @unittest.skip("TODO: RUSTPYTHON; sys.thread_info")
+    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'thread_info'
+    @unittest.expectedFailure
     def test_thread_info(self):
         info = sys.thread_info
         self.assertEqual(len(info), 3)
@@ -600,7 +607,8 @@ class SysModuleTest(unittest.TestCase):
     def test_clear_type_cache(self):
         sys._clear_type_cache()
 
-    @unittest.skip("TODO: RUSTPYTHON; PYTHONIOENCODING var")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_ioencoding(self):
         env = dict(os.environ)
 
@@ -644,7 +652,7 @@ class SysModuleTest(unittest.TestCase):
         out = p.communicate()[0].strip()
         self.assertEqual(out, b'\xbd')
 
-    @unittest.skipUnless(test.support.FS_NONASCII,
+    @unittest.skipUnless(os_helper.FS_NONASCII,
                          'requires OS support of non-ASCII encodings')
     @unittest.skipUnless(sys.getfilesystemencoding() == locale.getpreferredencoding(False),
                          'requires FS encoding to match locale')
@@ -653,10 +661,10 @@ class SysModuleTest(unittest.TestCase):
 
         env["PYTHONIOENCODING"] = ""
         p = subprocess.Popen([sys.executable, "-c",
-                                'print(%a)' % test.support.FS_NONASCII],
+                                'print(%a)' % os_helper.FS_NONASCII],
                                 stdout=subprocess.PIPE, env=env)
         out = p.communicate()[0].strip()
-        self.assertEqual(out, os.fsencode(test.support.FS_NONASCII))
+        self.assertEqual(out, os.fsencode(os_helper.FS_NONASCII))
 
     @unittest.skipIf(sys.base_prefix != sys.prefix,
                      'Test is not venv-compatible')
@@ -723,7 +731,6 @@ class SysModuleTest(unittest.TestCase):
         stdout, stderr = p.communicate()
         return stdout
 
-    @unittest.skip("TODO: RUSTPYTHON; surrogates in strings")
     def check_locale_surrogateescape(self, locale):
         out = self.c_locale_get_error_handler(locale, isolated=True)
         self.assertEqual(out,
@@ -762,9 +769,13 @@ class SysModuleTest(unittest.TestCase):
                          'stdout: surrogateescape\n'
                          'stderr: backslashreplace\n')
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_c_locale_surrogateescape(self):
         self.check_locale_surrogateescape('C')
 
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_posix_locale_surrogateescape(self):
         self.check_locale_surrogateescape('POSIX')
 
@@ -842,7 +853,8 @@ class SysModuleTest(unittest.TestCase):
         c = sys.getallocatedblocks()
         self.assertIn(c, range(b - 50, b + 50))
 
-    @unittest.skip("TODO: RUSTPYTHON; destructors + interpreter finalization")
+    # TODO: RUSTPYTHON, AttributeError: module 'sys' has no attribute 'is_finalizing'
+    @unittest.expectedFailure
     @test.support.requires_type_collecting
     def test_is_finalizing(self):
         self.assertIs(sys.is_finalizing(), False)
@@ -865,7 +877,8 @@ class SysModuleTest(unittest.TestCase):
         rc, stdout, stderr = assert_python_ok('-c', code)
         self.assertEqual(stdout.rstrip(), b'True')
 
-    @unittest.skip("TODO: RUSTPYTHON; __del__ destructors/interpreter shutdown")
+    # TODO: RUSTPYTHON, IndexError: list index out of range
+    @unittest.expectedFailure
     @test.support.requires_type_collecting
     def test_issue20602(self):
         # sys.flags and sys.float_info were wiped during shutdown.
@@ -889,7 +902,8 @@ class SysModuleTest(unittest.TestCase):
         self.assertIsInstance(level, int)
         self.assertGreater(level, 0)
 
-    @unittest.skip("TODO: RUSTPYTHON; sys.tracebacklimit")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_sys_tracebacklimit(self):
         code = """if 1:
             import sys

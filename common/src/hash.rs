@@ -2,7 +2,6 @@ use num_bigint::BigInt;
 use num_complex::Complex64;
 use num_traits::ToPrimitive;
 use siphasher::sip::SipHasher24;
-use std::convert::TryInto;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::num::Wrapping;
 
@@ -170,7 +169,7 @@ pub fn hash_bigint(value: &BigInt) -> PyHash {
 }
 
 #[inline(always)]
-fn fix_sentinel(x: PyHash) -> PyHash {
+pub fn fix_sentinel(x: PyHash) -> PyHash {
     if x == SENTINEL {
         -2
     } else {

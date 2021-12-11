@@ -15,9 +15,8 @@ mod _csv {
         function::{ArgIterable, ArgumentError, FromArgs, FuncArgs},
         match_class,
         protocol::{PyIter, PyIterReturn},
-        slots::{IteratorIterable, SlotIterator},
-        types::create_simple_type,
-        PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
+        types::{IterNext, IterNextIterable},
+        PyObjectRef, PyObjectView, PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
     };
     use itertools::{self, Itertools};
     use std::fmt;
@@ -31,9 +30,13 @@ mod _csv {
     #[pyattr]
     const QUOTE_NONE: i32 = QuoteStyle::None as i32;
 
-    #[pyattr(name = "Error")]
+    #[pyattr(name = "Error", once)]
     fn error(vm: &VirtualMachine) -> PyTypeRef {
-        create_simple_type("Error", &vm.ctx.exceptions.exception_type)
+        vm.ctx.new_exception_type(
+            "_csv",
+            "Error",
+            Some(vec![vm.ctx.exceptions.exception_type.clone()]),
+        )
     }
 
     #[pyfunction]
@@ -169,11 +172,11 @@ mod _csv {
         }
     }
 
-    #[pyimpl(with(SlotIterator))]
+    #[pyimpl(with(IterNext))]
     impl Reader {}
-    impl IteratorIterable for Reader {}
-    impl SlotIterator for Reader {
-        fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    impl IterNextIterable for Reader {}
+    impl IterNext for Reader {
+        fn next(zelf: &PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
             let string = match zelf.iter.next(vm)? {
                 PyIterReturn::Return(obj) => obj,
                 PyIterReturn::StopIteration(v) => return Ok(PyIterReturn::StopIteration(v)),
@@ -287,7 +290,7 @@ mod _csv {
                     ref s @ PyStr => s.as_str().as_bytes(),
                     crate::builtins::PyNone => b"",
                     ref obj => {
-                        stringified = vm.to_str(obj)?;
+                        stringified = obj.str(vm)?;
                         stringified.as_str().as_bytes()
                     }
                 });

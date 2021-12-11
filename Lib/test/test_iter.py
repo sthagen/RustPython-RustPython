@@ -2,8 +2,9 @@
 
 import sys
 import unittest
-from test.support import run_unittest, TESTFN, unlink, cpython_only
+from test.support import run_unittest, cpython_only
 # from test.support import check_free_after_iterating
+from test.support.os_helper import TESTFN, unlink
 import pickle
 import collections.abc
 
@@ -309,8 +310,6 @@ class TestCase(unittest.TestCase):
         self.check_for_loop(iter("abcde"), ["a", "b", "c", "d", "e"])
 
     # Test a directory
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_iter_dict(self):
         dict = {}
         for i in range(10):

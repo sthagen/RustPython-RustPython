@@ -1,10 +1,10 @@
-use super::{PyDict, PyList, PyStrRef, PyTuple, PyTypeRef};
+use super::{PyDict, PyGenericAlias, PyList, PyStrRef, PyTuple, PyTypeRef};
 use crate::{
     function::{IntoPyObject, OptionalArg},
     protocol::{PyMapping, PyMappingMethods},
-    slots::{AsMapping, Iterable, SlotConstructor},
-    ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
-    TypeProtocol, VirtualMachine,
+    types::{AsMapping, Constructor, Iterable},
+    PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
+    VirtualMachine,
 };
 
 #[pyclass(module = false, name = "mappingproxy")]
@@ -33,11 +33,11 @@ impl PyMappingProxy {
     }
 }
 
-impl SlotConstructor for PyMappingProxy {
+impl Constructor for PyMappingProxy {
     type Args = PyObjectRef;
 
     fn py_new(cls: PyTypeRef, mapping: Self::Args, vm: &VirtualMachine) -> PyResult {
-        if !PyMapping::check(&mapping)
+        if !PyMapping::from(mapping.as_ref()).check(vm)
             || mapping.payload_if_subclass::<PyList>(vm).is_some()
             || mapping.payload_if_subclass::<PyTuple>(vm).is_some()
         {
@@ -54,7 +54,7 @@ impl SlotConstructor for PyMappingProxy {
     }
 }
 
-#[pyimpl(with(AsMapping, Iterable, SlotConstructor))]
+#[pyimpl(with(AsMapping, Iterable, Constructor))]
 impl PyMappingProxy {
     fn get_inner(&self, key: PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<PyObjectRef>> {
         let opt = match &self.mapping {
@@ -146,37 +146,28 @@ impl PyMappingProxy {
                 PyDict::from_attributes(c.attributes.read().clone(), vm)?.into_pyobject(vm)
             }
         };
-        Ok(format!("mappingproxy({})", vm.to_repr(&obj)?))
+        Ok(format!("mappingproxy({})", obj.repr(vm)?))
+    }
+
+    #[pyclassmethod(magic)]
+    fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
+        PyGenericAlias::new(cls, args, vm)
     }
 }
 
+impl PyMappingProxy {
+    const MAPPING_METHODS: PyMappingMethods = PyMappingMethods {
+        length: None,
+        subscript: Some(|mapping, needle, vm| {
+            Self::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
+        }),
+        ass_subscript: None,
+    };
+}
+
 impl AsMapping for PyMappingProxy {
-    fn as_mapping(_zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<PyMappingMethods> {
-        Ok(PyMappingMethods {
-            length: None,
-            subscript: Some(Self::subscript),
-            ass_subscript: None,
-        })
-    }
-
-    #[inline]
-    fn length(zelf: PyObjectRef, _vm: &VirtualMachine) -> PyResult<usize> {
-        unreachable!("length not implemented for {}", zelf.class())
-    }
-
-    #[inline]
-    fn subscript(zelf: PyObjectRef, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        Self::downcast_ref(&zelf, vm).map(|zelf| zelf.getitem(needle, vm))?
-    }
-
-    #[cold]
-    fn ass_subscript(
-        zelf: PyObjectRef,
-        _needle: PyObjectRef,
-        _value: Option<PyObjectRef>,
-        _vm: &VirtualMachine,
-    ) -> PyResult<()> {
-        unreachable!("ass_subscript not implemented for {}", zelf.class())
+    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+        Self::MAPPING_METHODS
     }
 }
 

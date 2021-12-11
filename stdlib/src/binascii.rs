@@ -1,45 +1,28 @@
 pub(crate) use decl::make_module;
 
+pub(super) use decl::crc32;
+
 #[pymodule(name = "binascii")]
 mod decl {
     use crate::vm::{
-        builtins::PyTypeRef,
+        builtins::{PyIntRef, PyTypeRef},
         function::{ArgAsciiBuffer, ArgBytesLike, OptionalArg},
         PyResult, VirtualMachine,
     };
-    use crc::{crc32, Hasher32};
     use itertools::Itertools;
 
-    #[pyattr(name = "Error")]
+    #[pyattr(name = "Error", once)]
     fn error_type(vm: &VirtualMachine) -> PyTypeRef {
-        rustpython_common::static_cell! {
-            static BINASCII_ERROR: PyTypeRef;
-        }
-        BINASCII_ERROR
-            .get_or_init(|| {
-                vm.ctx.new_class(
-                    "binascii.Error",
-                    &vm.ctx.exceptions.value_error,
-                    Default::default(),
-                )
-            })
-            .clone()
+        vm.ctx.new_exception_type(
+            "binascii",
+            "Error",
+            Some(vec![vm.ctx.exceptions.value_error.clone()]),
+        )
     }
 
-    #[pyattr(name = "Incomplete")]
+    #[pyattr(name = "Incomplete", once)]
     fn incomplete_type(vm: &VirtualMachine) -> PyTypeRef {
-        rustpython_common::static_cell! {
-            static BINASCII_INCOMPLTE: PyTypeRef;
-        }
-        BINASCII_INCOMPLTE
-            .get_or_init(|| {
-                vm.ctx.new_class(
-                    "binascii.Incomplete",
-                    &vm.ctx.exceptions.exception_type,
-                    Default::default(),
-                )
-            })
-            .clone()
+        vm.ctx.new_exception_type("binascii", "Incomplete", None)
     }
 
     fn hex_nibble(n: u8) -> u8 {
@@ -94,13 +77,14 @@ mod decl {
     }
 
     #[pyfunction]
-    fn crc32(data: ArgBytesLike, value: OptionalArg<u32>) -> u32 {
-        let crc = value.unwrap_or(0);
+    pub(crate) fn crc32(data: ArgBytesLike, init: OptionalArg<PyIntRef>) -> u32 {
+        let init = init.map_or(0, |i| i.as_u32_mask());
 
-        let mut digest = crc32::Digest::new_with_initial(crc32::IEEE, crc);
-        data.with_ref(|bytes| digest.write(bytes));
-
-        digest.sum32()
+        let mut hasher = crc32fast::Hasher::new_with_initial(init);
+        data.with_ref(|bytes| {
+            hasher.update(bytes);
+            hasher.finalize()
+        })
     }
 
     #[derive(FromArgs)]

@@ -10,10 +10,11 @@ import unittest
 import weakref
 from collections.abc import MutableMapping
 from test import mapping_tests, support
+from test.support import import_helper
 
 
-py_coll = support.import_fresh_module('collections', blocked=['_collections'])
-c_coll = support.import_fresh_module('collections', fresh=['_collections'])
+py_coll = import_helper.import_fresh_module('collections', blocked=['_collections'])
+c_coll = import_helper.import_fresh_module('collections', fresh=['_collections'])
 
 
 @contextlib.contextmanager
@@ -696,9 +697,6 @@ for method in (
     setattr(CPythonBuiltinDictTests, method, getattr(OrderedDictTests, method))
 del method
 
-# TODO: RUSTPYTHON
-import functools
-setattr(CPythonBuiltinDictTests, "test_delitem", functools.partialmethod(OrderedDictTests.test_delitem))
 
 @unittest.skipUnless(c_coll, 'requires the C version of the collections module')
 class CPythonOrderedDictTests(OrderedDictTests, unittest.TestCase):

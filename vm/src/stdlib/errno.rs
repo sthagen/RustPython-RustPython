@@ -1,16 +1,22 @@
+use crate::PyObjectRef;
 use crate::VirtualMachine;
-use crate::{ItemProtocol, PyObjectRef};
+
+#[pymodule]
+mod errno {}
 
 pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
+    let module = errno::make_module(vm);
     let errorcode = vm.ctx.new_dict();
-    let module = py_module!(vm, "errno", {
+    extend_module!(vm, module, {
         "errorcode" => errorcode.clone(),
     });
     for (name, code) in ERROR_CODES {
-        let name = vm.new_pyobj(*name);
+        let name = vm.ctx.new_str(*name);
         let code = vm.new_pyobj(*code);
-        errorcode.set_item(code.clone(), name.clone(), vm).unwrap();
-        vm.set_attr(&module, name, code).unwrap();
+        errorcode
+            .set_item(code.clone(), name.clone().into(), vm)
+            .unwrap();
+        module.set_attr(name, code, vm).unwrap();
     }
     module
 }
@@ -170,8 +176,11 @@ const ERROR_CODES: &[(&str, i32)] = &[
     e!(ENXIO),
     e!(ECANCELED),
     e!(EWOULDBLOCK),
-    e!(cfg(not(windows)), EOWNERDEAD),
-    e!(cfg(not(windows)), ENOTRECOVERABLE),
+    e!(cfg(not(any(windows, target_os = "netbsd"))), EOWNERDEAD),
+    e!(
+        cfg(not(any(windows, target_os = "netbsd"))),
+        ENOTRECOVERABLE
+    ),
     e!(cfg(windows), WSAEHOSTDOWN),
     e!(cfg(windows), WSAENETDOWN),
     e!(cfg(windows), WSAENOTSOCK),

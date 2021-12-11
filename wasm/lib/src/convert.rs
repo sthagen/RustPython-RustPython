@@ -7,8 +7,7 @@ use rustpython_vm::{
     compile::{CompileError, CompileErrorType},
     exceptions,
     function::{ArgBytesLike, FuncArgs},
-    py_serde, ItemProtocol, PyObjectRef, PyResult, PyValue, TryFromBorrowedObject, TypeProtocol,
-    VirtualMachine,
+    py_serde, PyObjectRef, PyResult, PyValue, TryFromBorrowedObject, TypeProtocol, VirtualMachine,
 };
 use wasm_bindgen::{closure::Closure, prelude::*, JsCast};
 
@@ -84,7 +83,7 @@ pub fn py_to_js(vm: &VirtualMachine, py_obj: PyObjectRef) -> JsValue {
             let wasm_vm = WASMVirtualMachine {
                 id: wasm_id.clone(),
             };
-            let weak_py_obj = wasm_vm.push_held_rc(py_obj).unwrap();
+            let weak_py_obj = wasm_vm.push_held_rc(py_obj).unwrap().unwrap();
 
             let closure = move |args: Option<Box<[JsValue]>>,
                                 kwargs: Option<Object>|

@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "wasi", allow(dead_code))]
 use rustpython_vm::builtins::{PyDictRef, PyStrRef};
 use rustpython_vm::VirtualMachine;
 use rustpython_vm::{function::ArgIterable, PyResult, TryFromObject};
@@ -73,13 +74,10 @@ impl<'vm> ShellHelper<'vm> {
             // last: the last word, could be empty if it ends with a dot
             // parents: the words before the dot
 
-            let mut current = self
-                .globals
-                .get_item_option(first.as_str(), self.vm)
-                .ok()??;
+            let mut current = self.globals.get_item_opt(first.as_str(), self.vm).ok()??;
 
             for attr in parents {
-                current = self.vm.get_attribute(current.clone(), attr.as_str()).ok()?;
+                current = current.clone().get_attr(attr.as_str(), self.vm).ok()?;
             }
 
             let current_iter = str_iter_method(current, "__dir__").ok()?;
@@ -88,8 +86,9 @@ impl<'vm> ShellHelper<'vm> {
         } else {
             // we need to get a variable based off of globals/builtins
 
-            let globals = str_iter_method(self.globals.as_object().clone(), "keys").ok()?;
-            let builtins = str_iter_method(self.vm.builtins.clone(), "__dir__").ok()?;
+            let globals = str_iter_method(self.globals.as_object().to_owned(), "keys").ok()?;
+            let builtins =
+                str_iter_method(self.vm.builtins.as_object().to_owned(), "__dir__").ok()?;
             (first, globals, Some(builtins))
         };
         Some((word_start, iter1.chain(iter2.into_iter().flatten())))

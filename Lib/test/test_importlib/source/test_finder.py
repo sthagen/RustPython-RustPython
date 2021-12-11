@@ -9,7 +9,7 @@ import py_compile
 import stat
 import sys
 import tempfile
-from test.support import make_legacy_pyc
+from test.support.import_helper import make_legacy_pyc
 import unittest
 import warnings
 
@@ -178,8 +178,6 @@ class FinderTests(abc.FinderTests):
         found = self._find(finder, 'doesnotexist')
         self.assertEqual(found, self.NOT_FOUND)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_ignore_file(self):
         # If a directory got changed to a file from underneath us, then don't
         # worry about looking for submodules.

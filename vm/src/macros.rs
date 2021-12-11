@@ -1,17 +1,8 @@
 #[macro_export]
-macro_rules! py_module {
-    ( $vm:expr, $module_name:expr, { $($name:expr => $value:expr),* $(,)? }) => {{
-        let module = $vm.new_module($module_name, $vm.ctx.new_dict(), None);
-        $crate::extend_module!($vm, module, { $($name => $value),* });
-        module
-    }};
-}
-
-#[macro_export]
 macro_rules! extend_module {
     ( $vm:expr, $module:expr, { $($name:expr => $value:expr),* $(,)? }) => {{
         #[allow(unused_variables)]
-        let module: &$crate::PyObjectRef = &$module;
+        let module: &$crate::PyObject = &$module;
         $(
             $vm.__module_set_attr(&module, $name, $value).unwrap();
         )*
@@ -21,14 +12,14 @@ macro_rules! extend_module {
 #[macro_export]
 macro_rules! py_class {
     ( $ctx:expr, $class_name:expr, $class_base:expr, { $($name:tt => $value:expr),* $(,)* }) => {
-        py_class!($ctx, $class_name, $class_base, $crate::slots::PyTypeFlags::BASETYPE, { $($name => $value),* })
+        py_class!($ctx, $class_name, $class_base, $crate::types::PyTypeFlags::BASETYPE, { $($name => $value),* })
     };
     ( $ctx:expr, $class_name:expr, $class_base:expr, $flags:expr, { $($name:tt => $value:expr),* $(,)* }) => {
         {
             #[allow(unused_mut)]
-            let mut slots = $crate::slots::PyTypeSlots::from_flags($crate::slots::PyTypeFlags::DEFAULT | $flags);
+            let mut slots = $crate::types::PyTypeSlots::from_flags($crate::types::PyTypeFlags::DEFAULT | $flags);
             $($crate::py_class!(@extract_slots($ctx, &mut slots, $name, $value));)*
-            let py_class = $ctx.new_class($class_name, $class_base, slots);
+            let py_class = $ctx.new_class(None, $class_name, $class_base, slots);
             $($crate::py_class!(@extract_attrs($ctx, &py_class, $name, $value));)*
             py_class
         }
@@ -205,12 +196,13 @@ macro_rules! flame_guard {
 
 #[macro_export]
 macro_rules! class_or_notimplemented {
-    ($t:ty, $obj:expr) => {
-        match $crate::PyObjectRef::downcast_ref::<$t>($obj) {
+    ($t:ty, $obj:expr) => {{
+        let a: &$crate::PyObject = &*$obj;
+        match $crate::PyObject::downcast_ref::<$t>(&a) {
             Some(pyref) => pyref,
             None => return Ok($crate::PyArithmeticValue::NotImplemented),
         }
-    };
+    }};
 }
 
 #[macro_export]

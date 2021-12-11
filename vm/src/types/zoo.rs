@@ -2,10 +2,10 @@ use crate::builtins::{
     asyncgenerator, builtinfunc, bytearray, bytes, classmethod, code, complex, coroutine, dict,
     enumerate, filter, float, frame, function, generator, genericalias, getset, int, iter, list,
     map, mappingproxy, memory, module, namespace, object, property, pybool, pystr, pysuper,
-    pytype::{self, PyType, PyTypeRef},
+    pytype::{self, PyTypeRef},
     range, set, singletons, slice, staticmethod, traceback, tuple, weakproxy, weakref, zip,
 };
-use crate::{slots::PyTypeSlots, PyAttributes, PyContext, StaticType};
+use crate::{PyContext, StaticType};
 
 /// Holder of references to builtin types.
 #[derive(Debug, Clone)]
@@ -85,11 +85,12 @@ pub struct TypeZoo {
 
 impl TypeZoo {
     pub(crate) fn init() -> Self {
-        let (type_type, object_type) = crate::pyobjectrc::init_type_hierarchy();
+        let (type_type, object_type, weakref_type) = crate::pyobjectrc::init_type_hierarchy();
         Self {
-            // the order matters for type, object and int
+            // the order matters for type, object, weakref, and int
             type_type: pytype::PyType::init_manually(type_type).clone(),
             object_type: object::PyBaseObject::init_manually(object_type).clone(),
+            weakref_type: weakref::PyWeak::init_manually(weakref_type).clone(),
             int_type: int::PyInt::init_bare_type().clone(),
 
             // types exposed as builtins
@@ -162,7 +163,6 @@ impl TypeZoo {
             traceback_type: traceback::PyTraceback::init_bare_type().clone(),
             tuple_iterator_type: tuple::PyTupleIterator::init_bare_type().clone(),
             weakproxy_type: weakproxy::PyWeakProxy::init_bare_type().clone(),
-            weakref_type: weakref::PyWeak::init_bare_type().clone(),
             method_descriptor_type: builtinfunc::PyBuiltinMethod::init_bare_type().clone(),
             none_type: singletons::PyNone::init_bare_type().clone(),
             not_implemented_type: singletons::PyNotImplemented::init_bare_type().clone(),
@@ -214,26 +214,4 @@ impl TypeZoo {
         traceback::init(context);
         genericalias::init(context);
     }
-}
-
-pub fn create_simple_type(name: &str, base: &PyTypeRef) -> PyTypeRef {
-    create_type_with_slots(name, PyType::static_type(), base, Default::default())
-}
-
-pub fn create_type_with_slots(
-    name: &str,
-    type_type: &PyTypeRef,
-    base: &PyTypeRef,
-    slots: PyTypeSlots,
-) -> PyTypeRef {
-    let dict = PyAttributes::default();
-    PyType::new(
-        type_type.clone(),
-        name,
-        base.clone(),
-        vec![base.clone()],
-        dict,
-        slots,
-    )
-    .expect("Failed to create a new type in internal code.")
 }

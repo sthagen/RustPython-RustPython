@@ -6,23 +6,25 @@
 import binhex
 import unittest
 from test import support
+from test.support import os_helper
 
 
 class BinHexTestCase(unittest.TestCase):
 
     def setUp(self):
-        self.fname1 = support.TESTFN + "1"
-        self.fname2 = support.TESTFN + "2"
-        self.fname3 = support.TESTFN + "very_long_filename__very_long_filename__very_long_filename__very_long_filename__"
+        self.fname1 = os_helper.TESTFN + "1"
+        self.fname2 = os_helper.TESTFN + "2"
+        self.fname3 = os_helper.TESTFN + "very_long_filename__very_long_filename__very_long_filename__very_long_filename__"
 
     def tearDown(self):
-        support.unlink(self.fname1)
-        support.unlink(self.fname2)
-        support.unlink(self.fname3)
+        os_helper.unlink(self.fname1)
+        os_helper.unlink(self.fname2)
+        os_helper.unlink(self.fname3)
 
     DATA = b'Jack is my hero'
 
-    @unittest.skip("TODO: RUSTPYTHON, AttributeError: module 'binascii' has no attribute 'crc_hqx'")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_binhex(self):
         with open(self.fname1, 'wb') as f:
             f.write(self.DATA)
@@ -46,7 +48,8 @@ class BinHexTestCase(unittest.TestCase):
 
         self.assertRaises(binhex.Error, binhex.binhex, self.fname3, self.fname2)
 
-    @unittest.skip("TODO: RUSTPYTHON, AttributeError: module 'binascii' has no attribute 'crc_hqx'")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_binhex_line_endings(self):
         # bpo-29566: Ensure the line endings are those for macOS 9
         with open(self.fname1, 'wb') as f:

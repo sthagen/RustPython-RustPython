@@ -8,6 +8,7 @@ import unittest
 from functools import cmp_to_key
 
 from test import support, seq_tests
+from test.support import os_helper
 
 
 class CommonTest(seq_tests.CommonTest):
@@ -60,8 +61,6 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(str(a2), "[0, 1, 2, [...], 3]")
         self.assertEqual(repr(a2), "[0, 1, 2, [...], 3]")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_repr_deep(self):
         a = self.type2test([])
         for i in range(sys.getrecursionlimit() + 100):
@@ -75,12 +74,12 @@ class CommonTest(seq_tests.CommonTest):
         d.append(d)
         d.append(400)
         try:
-            with open(support.TESTFN, "w") as fo:
+            with open(os_helper.TESTFN, "w") as fo:
                 fo.write(str(d))
-            with open(support.TESTFN, "r") as fo:
+            with open(os_helper.TESTFN, "r") as fo:
                 self.assertEqual(fo.read(), repr(d))
         finally:
-            os.remove(support.TESTFN)
+            os.remove(os_helper.TESTFN)
 
     def test_set_subscript(self):
         a = self.type2test(range(20))

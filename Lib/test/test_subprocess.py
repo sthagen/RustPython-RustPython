@@ -18,7 +18,8 @@ import shutil
 import threading
 import gc
 import textwrap
-from test.support import FakePath
+from test.support import os_helper, import_helper
+from test.support.os_helper import FakePath
 
 try:
     import _testcapi
@@ -382,7 +383,7 @@ class ProcessTestCase(BaseTestCase):
         # Normalize an expected cwd (for Tru64 support).
         # We can't use os.path.realpath since it doesn't expand Tru64 {memb}
         # strings.  See bug #1063571.
-        with support.change_cwd(cwd):
+        with os_helper.change_cwd(cwd):
             return os.getcwd()
 
     # For use in the test_cwd* tests below.
@@ -433,7 +434,7 @@ class ProcessTestCase(BaseTestCase):
         # is relative.
         python_dir, python_base = self._split_python_path()
         rel_python = os.path.join(os.curdir, python_base)
-        with support.temp_cwd() as wrong_dir:
+        with os_helper.temp_cwd() as wrong_dir:
             # Before calling with the correct cwd, confirm that the call fails
             # without cwd and with the wrong cwd.
             self.assertRaises(FileNotFoundError, subprocess.Popen,
@@ -450,7 +451,7 @@ class ProcessTestCase(BaseTestCase):
         python_dir, python_base = self._split_python_path()
         rel_python = os.path.join(os.curdir, python_base)
         doesntexist = "somethingyoudonthave"
-        with support.temp_cwd() as wrong_dir:
+        with os_helper.temp_cwd() as wrong_dir:
             # Before calling with the correct cwd, confirm that the call fails
             # without cwd and with the wrong cwd.
             self.assertRaises(FileNotFoundError, subprocess.Popen,
@@ -468,7 +469,7 @@ class ProcessTestCase(BaseTestCase):
         python_dir, python_base = self._split_python_path()
         abs_python = os.path.join(python_dir, python_base)
         rel_python = os.path.join(os.curdir, python_base)
-        with support.temp_dir() as wrong_dir:
+        with os_helper.temp_dir() as wrong_dir:
             # Before calling with an absolute path, confirm that using a
             # relative path fails.
             self.assertRaises(FileNotFoundError, subprocess.Popen,
@@ -658,7 +659,6 @@ class ProcessTestCase(BaseTestCase):
         self.assertEqual(p.returncode, 0, err)
         self.assertEqual(out.rstrip(), b'test with stdout=1')
 
-    @unittest.skipIf(sys.platform != "win32", "TODO: RUSTPYTHON, takes a long time")
     def test_stdout_devnull(self):
         p = subprocess.Popen([sys.executable, "-c",
                               'for i in range(10240):'
@@ -667,7 +667,6 @@ class ProcessTestCase(BaseTestCase):
         p.wait()
         self.assertEqual(p.stdout, None)
 
-    @unittest.skipIf(sys.platform != "win32", "TODO: RUSTPYTHON, takes a long time")
     def test_stderr_devnull(self):
         p = subprocess.Popen([sys.executable, "-c",
                               'import sys\n'
@@ -874,7 +873,6 @@ class ProcessTestCase(BaseTestCase):
         self.assertEqual(stdout, None)
         self.assertEqual(stderr, None)
 
-    @unittest.skipIf(sys.platform != "win32", "TODO: RUSTPYTHON, hangs")
     def test_communicate_pipe_buf(self):
         # communicate() with writes larger than pipe_buf
         # This test will probably deadlock rather than fail, if
@@ -1105,7 +1103,7 @@ class ProcessTestCase(BaseTestCase):
         try:
             for i in range(max_handles):
                 try:
-                    tmpfile = os.path.join(tmpdir, support.TESTFN)
+                    tmpfile = os.path.join(tmpdir, os_helper.TESTFN)
                     handles.append(os.open(tmpfile, os.O_WRONLY|os.O_CREAT))
                 except OSError as e:
                     if e.errno != errno.EMFILE:
@@ -1398,8 +1396,6 @@ class ProcessTestCase(BaseTestCase):
         self.assertFalse(os.path.exists(ofname))
         self.assertFalse(os.path.exists(efname))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_communicate_epipe(self):
         # Issue 10963: communicate() should hide EPIPE
         p = subprocess.Popen(ZERO_RETURN_CMD,
@@ -1412,7 +1408,9 @@ class ProcessTestCase(BaseTestCase):
         p.communicate(b"x" * 2**20)
 
     # TODO: RUSTPYTHON
-    @unittest.expectedFailure
+    if sys.platform == "win32":
+        test_communicate_epipe = unittest.expectedFailure(test_communicate_epipe)
+
     def test_communicate_epipe_only_stdin(self):
         # Issue 10963: communicate() should hide EPIPE
         p = subprocess.Popen(ZERO_RETURN_CMD,
@@ -1420,6 +1418,10 @@ class ProcessTestCase(BaseTestCase):
         self.addCleanup(p.stdin.close)
         p.wait()
         p.communicate(b"x" * 2**20)
+
+    # TODO: RUSTPYTHON
+    if sys.platform == "win32":
+        test_communicate_epipe_only_stdin = unittest.expectedFailure(test_communicate_epipe_only_stdin)
 
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
@@ -2756,8 +2758,6 @@ class POSIXProcessTestCase(BaseTestCase):
                                  stderr=inout, stdin=inout)
             p.wait()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_wait_when_sigchild_ignored(self):
         # NOTE: sigchild_ignore.py may not be an effective test on all OSes.
         sigchild_ignore = support.findfile("sigchild_ignore.py",
@@ -2772,7 +2772,7 @@ class POSIXProcessTestCase(BaseTestCase):
     def test_select_unbuffered(self):
         # Issue #11459: bufsize=0 should really set the pipes as
         # unbuffered (and therefore let select() work properly).
-        select = support.import_module("select")
+        select = import_helper.import_module("select")
         p = subprocess.Popen([sys.executable, "-c",
                               'import sys;'
                               'sys.stdout.write("apple")'],

@@ -1,14 +1,15 @@
 // sliceobject.{h,c} in CPython
-
 use super::{PyInt, PyIntRef, PyTupleRef, PyTypeRef};
 use crate::{
     function::{FuncArgs, IntoPyObject, OptionalArg},
-    slots::{Comparable, Hashable, PyComparisonOp, SlotConstructor, Unhashable},
-    PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TryIntoRef,
+    types::{Comparable, Constructor, Hashable, PyComparisonOp, Unhashable},
+    PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
     TypeProtocol, VirtualMachine,
 };
 use num_bigint::{BigInt, ToBigInt};
-use num_traits::{One, Signed, Zero};
+use num_traits::{One, Signed, ToPrimitive, Zero};
+use std::ops::Range;
+use std::option::Option;
 
 #[pyclass(module = false, name = "slice")]
 #[derive(Debug)]
@@ -24,8 +25,6 @@ impl PyValue for PySlice {
     }
 }
 
-pub type PySliceRef = PyRef<PySlice>;
-
 #[pyimpl(with(Hashable, Comparable))]
 impl PySlice {
     #[pyproperty]
@@ -33,7 +32,7 @@ impl PySlice {
         self.start.clone().into_pyobject(vm)
     }
 
-    fn start_ref<'a>(&'a self, vm: &'a VirtualMachine) -> &'a PyObjectRef {
+    fn start_ref<'a>(&'a self, vm: &'a VirtualMachine) -> &'a PyObject {
         match &self.start {
             Some(v) => v,
             None => vm.ctx.none.as_object(),
@@ -50,7 +49,7 @@ impl PySlice {
         self.step.clone().into_pyobject(vm)
     }
 
-    fn step_ref<'a>(&'a self, vm: &'a VirtualMachine) -> &'a PyObjectRef {
+    fn step_ref<'a>(&'a self, vm: &'a VirtualMachine) -> &'a PyObject {
         match &self.step {
             Some(v) => v,
             None => vm.ctx.none.as_object(),
@@ -59,9 +58,9 @@ impl PySlice {
 
     #[pymethod(magic)]
     fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
-        let start_repr = vm.to_repr(self.start_ref(vm))?;
-        let stop_repr = vm.to_repr(&self.stop)?;
-        let step_repr = vm.to_repr(self.step_ref(vm))?;
+        let start_repr = self.start_ref(vm).repr(vm)?;
+        let stop_repr = &self.stop.repr(vm)?;
+        let step_repr = self.step_ref(vm).repr(vm)?;
 
         Ok(format!(
             "slice({}, {}, {})",
@@ -71,24 +70,8 @@ impl PySlice {
         ))
     }
 
-    pub fn start_index(&self, vm: &VirtualMachine) -> PyResult<Option<BigInt>> {
-        if let Some(obj) = &self.start {
-            to_index_value(vm, obj)
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn stop_index(&self, vm: &VirtualMachine) -> PyResult<Option<BigInt>> {
-        to_index_value(vm, &self.stop)
-    }
-
-    pub fn step_index(&self, vm: &VirtualMachine) -> PyResult<Option<BigInt>> {
-        if let Some(obj) = &self.step {
-            to_index_value(vm, obj)
-        } else {
-            Ok(None)
-        }
+    pub fn to_saturated(&self, vm: &VirtualMachine) -> PyResult<SaturatedSlice> {
+        SaturatedSlice::with_slice(self, vm)
     }
 
     #[pyslot]
@@ -131,7 +114,7 @@ impl PySlice {
             step = One::one();
         } else {
             // Clone the value, not the reference.
-            let this_step: PyRef<PyInt> = self.step(vm).try_into_ref(vm)?;
+            let this_step: PyRef<PyInt> = self.step(vm).try_into_value(vm)?;
             step = this_step.as_bigint().clone();
 
             if step.is_zero() {
@@ -165,7 +148,7 @@ impl PySlice {
                 lower.clone()
             };
         } else {
-            let this_start: PyRef<PyInt> = self.start(vm).try_into_ref(vm)?;
+            let this_start: PyRef<PyInt> = self.start(vm).try_into_value(vm)?;
             start = this_start.as_bigint().clone();
 
             if start < Zero::zero() {
@@ -185,7 +168,7 @@ impl PySlice {
         if vm.is_none(&self.stop) {
             stop = if backwards { lower } else { upper };
         } else {
-            let this_stop: PyRef<PyInt> = self.stop(vm).try_into_ref(vm)?;
+            let this_stop: PyRef<PyInt> = self.stop(vm).try_into_value(vm)?;
             stop = this_stop.as_bigint().clone();
 
             if stop < Zero::zero() {
@@ -211,12 +194,26 @@ impl PySlice {
         let (start, stop, step) = self.inner_indices(length, vm)?;
         Ok(vm.new_tuple((start, stop, step)))
     }
+
+    #[allow(clippy::type_complexity)]
+    #[pymethod(magic)]
+    fn reduce(
+        zelf: PyRef<Self>,
+    ) -> PyResult<(
+        PyTypeRef,
+        (Option<PyObjectRef>, PyObjectRef, Option<PyObjectRef>),
+    )> {
+        Ok((
+            zelf.clone_class(),
+            (zelf.start.clone(), zelf.stop.clone(), zelf.step.clone()),
+        ))
+    }
 }
 
 impl Comparable for PySlice {
     fn cmp(
-        zelf: &PyRef<Self>,
-        other: &PyObjectRef,
+        zelf: &crate::PyObjectView<Self>,
+        other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<PyComparisonValue> {
@@ -263,17 +260,164 @@ impl Comparable for PySlice {
 
 impl Unhashable for PySlice {}
 
-fn to_index_value(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<Option<BigInt>> {
+/// A saturated slice with values ranging in [isize::MIN, isize::MAX]. Used for
+/// slicable sequences that require indices in the aforementioned range.
+///
+/// Invokes `__index__` on the PySliceRef during construction so as to separate the
+/// transformation from PyObject into isize and the adjusting of the slice to a given
+/// sequence length. The reason this is important is due to the fact that an objects
+/// `__index__` might get a lock on the sequence and cause a deadlock.
+#[derive(Copy, Clone, Debug)]
+pub struct SaturatedSlice {
+    start: isize,
+    stop: isize,
+    step: isize,
+}
+
+impl SaturatedSlice {
+    // Equivalent to PySlice_Unpack.
+    pub fn with_slice(slice: &PySlice, vm: &VirtualMachine) -> PyResult<Self> {
+        let step = to_isize_index(vm, slice.step_ref(vm))?.unwrap_or(1);
+        if step == 0 {
+            return Err(vm.new_value_error("slice step cannot be zero".to_owned()));
+        }
+        let start = to_isize_index(vm, slice.start_ref(vm))?.unwrap_or_else(|| {
+            if step.is_negative() {
+                isize::MAX
+            } else {
+                0
+            }
+        });
+
+        let stop = to_isize_index(vm, &slice.stop(vm))?.unwrap_or_else(|| {
+            if step.is_negative() {
+                isize::MIN
+            } else {
+                isize::MAX
+            }
+        });
+        Ok(Self { start, stop, step })
+    }
+
+    // Equivalent to PySlice_AdjustIndices
+    /// Convert for usage in indexing the underlying rust collections. Called *after*
+    /// __index__ has been called on the Slice which might mutate the collection.
+    pub fn adjust_indices(&self, len: usize) -> (Range<usize>, isize, usize) {
+        if len == 0 {
+            return (0..0, self.step, 0);
+        }
+        let range = if self.step.is_negative() {
+            let stop = if self.stop == -1 {
+                len
+            } else {
+                saturate_index(self.stop.saturating_add(1), len)
+            };
+            let start = if self.start == -1 {
+                len
+            } else {
+                saturate_index(self.start.saturating_add(1), len)
+            };
+            stop..start
+        } else {
+            saturate_index(self.start, len)..saturate_index(self.stop, len)
+        };
+
+        let (range, slicelen) = if range.start >= range.end {
+            (range.start..range.start, 0)
+        } else {
+            let slicelen = (range.end - range.start - 1) / self.step.unsigned_abs() + 1;
+            (range, slicelen)
+        };
+        (range, self.step, slicelen)
+    }
+
+    pub fn iter(&self, len: usize) -> SaturatedSliceIter {
+        SaturatedSliceIter::new(self, len)
+    }
+}
+
+pub struct SaturatedSliceIter {
+    index: isize,
+    step: isize,
+    len: usize,
+}
+
+impl SaturatedSliceIter {
+    pub fn new(slice: &SaturatedSlice, seq_len: usize) -> Self {
+        let (range, step, len) = slice.adjust_indices(seq_len);
+        Self::from_adjust_indices(range, step, len)
+    }
+
+    pub fn from_adjust_indices(range: Range<usize>, step: isize, len: usize) -> Self {
+        let index = if step.is_negative() {
+            range.end as isize - 1
+        } else {
+            range.start as isize
+        };
+        Self { index, step, len }
+    }
+
+    pub fn positive_order(mut self) -> Self {
+        if self.step.is_negative() {
+            self.index += self.step * self.len.saturating_sub(1) as isize;
+            self.step = self.step.saturating_abs()
+        }
+        self
+    }
+}
+
+impl Iterator for SaturatedSliceIter {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        let ret = self.index as usize;
+        // SAFETY: if index is overflowed, len should be zero
+        self.index = self.index.wrapping_add(self.step);
+        Some(ret)
+    }
+}
+
+// Go from PyObjectRef to isize w/o overflow error, out of range values are substituted by
+// isize::MIN or isize::MAX depending on type and value of step.
+// Equivalent to PyEval_SliceIndex.
+fn to_isize_index(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Option<isize>> {
     if vm.is_none(obj) {
         return Ok(None);
     }
-
-    let result = vm.to_index_opt(obj.clone()).unwrap_or_else(|| {
+    let result = vm.to_index_opt(obj.to_owned()).unwrap_or_else(|| {
         Err(vm.new_type_error(
             "slice indices must be integers or None or have an __index__ method".to_owned(),
         ))
     })?;
-    Ok(Some(result.as_bigint().clone()))
+    let value = result.as_bigint();
+    let is_negative = value.is_negative();
+    Ok(Some(value.to_isize().unwrap_or_else(|| {
+        if is_negative {
+            isize::MIN
+        } else {
+            isize::MAX
+        }
+    })))
+}
+
+// Saturate p in range [0, len] inclusive
+pub fn saturate_index(p: isize, len: usize) -> usize {
+    let len = len.to_isize().unwrap_or(isize::MAX);
+    let mut p = p;
+    if p < 0 {
+        p += len;
+        if p < 0 {
+            p = 0;
+        }
+    }
+    if p > len {
+        p = len;
+    }
+    p as usize
 }
 
 #[pyclass(module = false, name = "EllipsisType")]
@@ -286,7 +430,7 @@ impl PyValue for PyEllipsis {
     }
 }
 
-impl SlotConstructor for PyEllipsis {
+impl Constructor for PyEllipsis {
     type Args = ();
 
     fn py_new(_cls: PyTypeRef, _args: Self::Args, vm: &VirtualMachine) -> PyResult {
@@ -294,7 +438,7 @@ impl SlotConstructor for PyEllipsis {
     }
 }
 
-#[pyimpl(with(SlotConstructor))]
+#[pyimpl(with(Constructor))]
 impl PyEllipsis {
     #[pymethod(magic)]
     fn repr(&self) -> String {

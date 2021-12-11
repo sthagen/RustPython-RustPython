@@ -4,7 +4,7 @@ use crate::{
     frame::FrameRef,
     function::OptionalArg,
     protocol::PyIterReturn,
-    slots::{IteratorIterable, SlotIterator},
+    types::{Constructor, IterNext, IterNextIterable, Unconstructible},
     IdProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
 
@@ -21,7 +21,7 @@ impl PyValue for PyCoroutine {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(Constructor, IterNext))]
 impl PyCoroutine {
     pub fn as_coro(&self) -> &Coro {
         &self.inner
@@ -103,11 +103,12 @@ impl PyCoroutine {
         None
     }
 }
+impl Unconstructible for PyCoroutine {}
 
-impl IteratorIterable for PyCoroutine {}
-impl SlotIterator for PyCoroutine {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-        Self::send(zelf.clone(), vm.ctx.none(), vm)
+impl IterNextIterable for PyCoroutine {}
+impl IterNext for PyCoroutine {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+        Self::send(zelf.to_owned(), vm.ctx.none(), vm)
     }
 }
 
@@ -124,7 +125,7 @@ impl PyValue for PyCoroutineWrapper {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(IterNext))]
 impl PyCoroutineWrapper {
     #[pymethod]
     fn send(zelf: PyRef<Self>, val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
@@ -143,10 +144,10 @@ impl PyCoroutineWrapper {
     }
 }
 
-impl IteratorIterable for PyCoroutineWrapper {}
-impl SlotIterator for PyCoroutineWrapper {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-        Self::send(zelf.clone(), vm.ctx.none(), vm)
+impl IterNextIterable for PyCoroutineWrapper {}
+impl IterNext for PyCoroutineWrapper {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+        Self::send(zelf.to_owned(), vm.ctx.none(), vm)
     }
 }
 

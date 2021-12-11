@@ -1,18 +1,18 @@
-use super::{PositionIterInternal, PyTypeRef};
+use super::{PositionIterInternal, PyGenericAlias, PyTypeRef};
 use crate::common::hash::PyHash;
 use crate::{
     function::{IntoPyObject, OptionalArg},
     protocol::{PyIterReturn, PyMappingMethods},
-    sequence::{self, SimpleSeq},
+    sequence::{ObjectSequenceOp, SequenceOp},
     sliceable::PySliceableSequence,
-    slots::{
-        AsMapping, Comparable, Hashable, Iterable, IteratorIterable, PyComparisonOp,
-        SlotConstructor, SlotIterator,
-    },
     stdlib::sys,
+    types::{
+        AsMapping, Comparable, Constructor, Hashable, IterNext, IterNextIterable, Iterable,
+        PyComparisonOp, Unconstructible,
+    },
     utils::Either,
     vm::{ReprGuard, VirtualMachine},
-    IdProtocol, PyArithmeticValue, PyClassDef, PyClassImpl, PyComparisonValue, PyContext,
+    IdProtocol, PyArithmeticValue, PyClassDef, PyClassImpl, PyComparisonValue, PyContext, PyObject,
     PyObjectRef, PyRef, PyResult, PyValue, TransmuteFromObject, TryFromObject, TypeProtocol,
 };
 use rustpython_common::lock::PyMutex;
@@ -89,7 +89,7 @@ impl PyTuple {
 
 pub type PyTupleRef = PyRef<PyTuple>;
 
-impl SlotConstructor for PyTuple {
+impl Constructor for PyTuple {
     type Args = OptionalArg<PyObjectRef>;
 
     fn py_new(cls: PyTypeRef, iterable: Self::Args, vm: &VirtualMachine) -> PyResult {
@@ -142,7 +142,7 @@ impl PyTuple {
 
 #[pyimpl(
     flags(BASETYPE),
-    with(AsMapping, Hashable, Comparable, Iterable, SlotConstructor)
+    with(AsMapping, Hashable, Comparable, Iterable, Constructor)
 )]
 impl PyTuple {
     #[pymethod(magic)]
@@ -201,7 +201,7 @@ impl PyTuple {
         let s = if let Some(_guard) = ReprGuard::enter(vm, zelf.as_object()) {
             let mut str_parts = Vec::with_capacity(zelf.elements.len());
             for elem in zelf.elements.iter() {
-                let s = vm.to_repr(elem)?;
+                let s = elem.repr(vm)?;
                 str_parts.push(s.as_str().to_owned());
             }
 
@@ -228,10 +228,8 @@ impl PyTuple {
             // This only works for `tuple` itself, not its subclasses.
             zelf
         } else {
-            let elements = sequence::seq_mul(vm, &zelf.elements, value)?
-                .cloned()
-                .collect::<Vec<_>>()
-                .into_boxed_slice();
+            let v = zelf.elements.mul(vm, value)?;
+            let elements = v.into_boxed_slice();
             Self { elements }.into_ref(vm)
         })
     }
@@ -303,48 +301,41 @@ impl PyTuple {
         };
         (tup_arg,)
     }
+
+    #[pyclassmethod(magic)]
+    fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
+        PyGenericAlias::new(cls, args, vm)
+    }
+}
+
+impl PyTuple {
+    const MAPPING_METHODS: PyMappingMethods = PyMappingMethods {
+        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
+        subscript: Some(|mapping, needle, vm| {
+            let zelf = Self::mapping_downcast(mapping);
+            Self::getitem(zelf.to_owned(), needle.to_owned(), vm)
+        }),
+        ass_subscript: None,
+    };
 }
 
 impl AsMapping for PyTuple {
-    fn as_mapping(_zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<PyMappingMethods> {
-        Ok(PyMappingMethods {
-            length: Some(Self::length),
-            subscript: Some(Self::subscript),
-            ass_subscript: None,
-        })
-    }
-
-    #[inline]
-    fn length(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
-        Self::downcast_ref(&zelf, vm).map(|zelf| Ok(zelf.len()))?
-    }
-
-    #[inline]
-    fn subscript(zelf: PyObjectRef, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        Self::downcast(zelf, vm).map(|zelf| Self::getitem(zelf, needle, vm))?
-    }
-
-    #[inline]
-    fn ass_subscript(
-        zelf: PyObjectRef,
-        _needle: PyObjectRef,
-        _value: Option<PyObjectRef>,
-        _vm: &VirtualMachine,
-    ) -> PyResult<()> {
-        unreachable!("ass_subscript not implemented for {}", zelf.class())
+    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+        Self::MAPPING_METHODS
     }
 }
 
 impl Hashable for PyTuple {
-    fn hash(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
+    #[inline]
+    fn hash(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
         crate::utils::hash_iter(zelf.elements.iter(), vm)
     }
 }
 
 impl Comparable for PyTuple {
     fn cmp(
-        zelf: &PyRef<Self>,
-        other: &PyObjectRef,
+        zelf: &crate::PyObjectView<Self>,
+        other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<PyComparisonValue> {
@@ -354,7 +345,7 @@ impl Comparable for PyTuple {
         let other = class_or_notimplemented!(Self, other);
         let a = zelf.as_slice();
         let b = other.as_slice();
-        sequence::cmp(vm, a.boxed_iter(), b.boxed_iter(), op).map(PyComparisonValue::Implemented)
+        a.cmp(vm, b, op).map(PyComparisonValue::Implemented)
     }
 }
 
@@ -379,7 +370,7 @@ impl PyValue for PyTupleIterator {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(Constructor, IterNext))]
 impl PyTupleIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {
@@ -400,16 +391,15 @@ impl PyTupleIterator {
             .builtins_iter_reduce(|x| x.clone().into(), vm)
     }
 }
+impl Unconstructible for PyTupleIterator {}
 
-impl IteratorIterable for PyTupleIterator {}
-impl SlotIterator for PyTupleIterator {
-    fn next(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl IterNextIterable for PyTupleIterator {}
+impl IterNext for PyTupleIterator {
+    fn next(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.internal.lock().next(|tuple, pos| {
-            Ok(if let Some(ret) = tuple.as_slice().get(pos) {
-                PyIterReturn::Return(ret.clone())
-            } else {
-                PyIterReturn::StopIteration(None)
-            })
+            Ok(PyIterReturn::from_result(
+                tuple.as_slice().get(pos).cloned().ok_or(None),
+            ))
         })
     }
 }

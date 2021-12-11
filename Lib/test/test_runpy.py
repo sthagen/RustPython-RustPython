@@ -12,10 +12,10 @@ import tempfile
 import textwrap
 import unittest
 import warnings
-from test.support import (
-    forget, make_legacy_pyc, unload, verbose, no_tracing,
-    create_empty_file, temp_dir)
+from test.support import verbose, no_tracing
+from test.support.os_helper import create_empty_file, temp_dir
 from test.support.script_helper import make_script, make_zip_script
+from test.support.import_helper import unload, forget, make_legacy_pyc
 
 
 import runpy
@@ -676,6 +676,7 @@ class RunPathTestCase(unittest.TestCase, CodeExecutionMixin):
 
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
+    @unittest.skipIf(sys.platform == 'win32', "TODO: RUSTPYTHON; weird panic in lz4-flex")
     def test_script_compiled(self):
         with temp_dir() as script_dir:
             mod_name = 'script'

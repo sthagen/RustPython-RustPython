@@ -64,36 +64,36 @@ pub fn gt_int(value: f64, other_int: &BigInt) -> bool {
 }
 
 pub fn parse_str(literal: &str) -> Option<f64> {
-    if literal.starts_with('_') || literal.ends_with('_') {
-        return None;
+    parse_inner(literal.trim().as_bytes())
+}
+
+pub fn parse_bytes(literal: &[u8]) -> Option<f64> {
+    parse_inner(trim_slice(literal, |b| b.is_ascii_whitespace()))
+}
+
+fn trim_slice<T>(v: &[T], mut trim: impl FnMut(&T) -> bool) -> &[T] {
+    let mut it = v.iter();
+    // it.take_while_ref(&mut trim).for_each(drop);
+    // hmm.. `&mut slice::Iter<_>` is not `Clone`
+    // it.by_ref().rev().take_while_ref(&mut trim).for_each(drop);
+    while it.clone().next().map_or(false, &mut trim) {
+        it.next();
     }
-
-    let mut buf = String::with_capacity(literal.len());
-    let mut last_tok: Option<char> = None;
-    for c in literal.chars() {
-        if !(c.is_ascii_alphanumeric() || c == '_' || c == '+' || c == '-' || c == '.') {
-            return None;
-        }
-
-        if !c.is_ascii_alphanumeric() {
-            if let Some(l) = last_tok {
-                if !l.is_ascii_alphanumeric() && !(c == '.' && (l == '-' || l == '+')) {
-                    return None;
-                }
-            }
-        }
-
-        if c != '_' {
-            buf.push(c);
-        }
-        last_tok = Some(c);
+    while it.clone().next_back().map_or(false, &mut trim) {
+        it.next_back();
     }
+    it.as_slice()
+}
 
-    if let Ok(f) = lexical_core::parse(buf.as_bytes()) {
-        Some(f)
-    } else {
-        None
-    }
+fn parse_inner(literal: &[u8]) -> Option<f64> {
+    use lexical_parse_float::{
+        format::PYTHON3_LITERAL, FromLexicalWithOptions, NumberFormatBuilder, Options,
+    };
+    // lexical-core's format::PYTHON_STRING is inaccurate
+    const PYTHON_STRING: u128 = NumberFormatBuilder::rebuild(PYTHON3_LITERAL)
+        .no_special(false)
+        .build();
+    f64::from_lexical_with_options::<PYTHON_STRING>(literal, &Options::new()).ok()
 }
 
 pub fn is_integer(v: f64) -> bool {
@@ -157,9 +157,9 @@ pub fn format_exponent(precision: usize, magnitude: f64, case: Case) -> String {
 /// If s represents a floating point value, trailing zeros and a possibly trailing
 /// decimal point will be removed.
 /// This function does NOT work with decimal commas.
-fn remove_trailing_redundant_chars(s: String) -> String {
-    if s.contains('.') {
-        // only truncate floating point values
+fn maybe_remove_trailing_redundant_chars(s: String, alternate_form: bool) -> String {
+    if !alternate_form && s.contains('.') {
+        // only truncate floating point values when not in alternate form
         let s = remove_trailing_zeros(s);
         remove_trailing_decimal_point(s)
     } else {
@@ -183,7 +183,12 @@ fn remove_trailing_decimal_point(s: String) -> String {
     s
 }
 
-pub fn format_general(precision: usize, magnitude: f64, case: Case) -> String {
+pub fn format_general(
+    precision: usize,
+    magnitude: f64,
+    case: Case,
+    alternate_form: bool,
+) -> String {
     match magnitude {
         magnitude if magnitude.is_finite() => {
             let r_exp = format!("{:.*e}", precision.saturating_sub(1), magnitude);
@@ -196,12 +201,18 @@ pub fn format_general(precision: usize, magnitude: f64, case: Case) -> String {
                     Case::Upper => 'E',
                 };
 
-                let base = remove_trailing_redundant_chars(format!("{:.*}", precision + 1, base));
+                let base = maybe_remove_trailing_redundant_chars(
+                    format!("{:.*}", precision + 1, base),
+                    alternate_form,
+                );
                 format!("{}{}{:+#03}", base, e, exponent)
             } else {
                 let precision = (precision as i64) - 1 - exponent;
                 let precision = precision as usize;
-                remove_trailing_redundant_chars(format!("{:.*}", precision, magnitude))
+                maybe_remove_trailing_redundant_chars(
+                    format!("{:.*}", precision, magnitude),
+                    alternate_form,
+                )
             }
         }
         magnitude if magnitude.is_nan() => format_nan(case),
@@ -487,11 +498,20 @@ fn test_remove_trailing_decimal_point() {
 }
 
 #[test]
-fn test_remove_trailing_redundant_chars() {
-    assert!(remove_trailing_redundant_chars(String::from("100.")) == String::from("100"));
-    assert!(remove_trailing_redundant_chars(String::from("1.")) == String::from("1"));
-    assert!(remove_trailing_redundant_chars(String::from("10.0")) == String::from("10"));
+fn test_maybe_remove_trailing_redundant_chars() {
+    assert!(
+        maybe_remove_trailing_redundant_chars(String::from("100."), true) == String::from("100.")
+    );
+    assert!(
+        maybe_remove_trailing_redundant_chars(String::from("100."), false) == String::from("100")
+    );
+    assert!(maybe_remove_trailing_redundant_chars(String::from("1."), false) == String::from("1"));
+    assert!(
+        maybe_remove_trailing_redundant_chars(String::from("10.0"), false) == String::from("10")
+    );
 
     // don't truncate integers
-    assert!(remove_trailing_redundant_chars(String::from("1000")) == String::from("1000"));
+    assert!(
+        maybe_remove_trailing_redundant_chars(String::from("1000"), false) == String::from("1000")
+    );
 }

@@ -15,7 +15,7 @@ from unittest import mock
 
 import unittest
 from test import support
-from test.support import script_helper
+from test.support import script_helper, os_helper
 
 
 has_textmode = (tempfile._text_openflags != tempfile._bin_openflags)
@@ -232,7 +232,7 @@ class TestCandidateTempdirList(BaseTestCase):
         # _candidate_tempdir_list contains the expected directories
 
         # Make sure the interesting environment variables are all set.
-        with support.EnvironmentVarGuard() as env:
+        with os_helper.EnvironmentVarGuard() as env:
             for envname in 'TMPDIR', 'TEMP', 'TMP':
                 dirname = os.getenv(envname)
                 if not dirname:
@@ -318,7 +318,7 @@ def _inside_empty_temp_dir():
         with support.swap_attr(tempfile, 'tempdir', dir):
             yield
     finally:
-        support.rmtree(dir)
+        os_helper.rmtree(dir)
 
 
 def _mock_candidate_names(*names):
@@ -357,10 +357,6 @@ class TestBadTempdir:
             with support.swap_attr(tempfile, 'tempdir', tempdir):
                 with self.assertRaises((NotADirectoryError, FileNotFoundError)):
                     self.make_temp()
-
-    # TODO: RUSTPYTHON
-    if sys.platform != "win32":
-        test_non_directory = unittest.expectedFailure(test_non_directory)
 
 
 class TestMkstempInner(TestBadTempdir, BaseTestCase):
@@ -606,7 +602,7 @@ class TestGetTempDir(BaseTestCase):
         case_sensitive_tempdir = tempfile.mkdtemp("-Temp")
         _tempdir, tempfile.tempdir = tempfile.tempdir, None
         try:
-            with support.EnvironmentVarGuard() as env:
+            with os_helper.EnvironmentVarGuard() as env:
                 # Fake the first env var which is checked as a candidate
                 env["TMPDIR"] = case_sensitive_tempdir
                 self.assertEqual(tempfile.gettempdir(), case_sensitive_tempdir)
@@ -962,7 +958,7 @@ class TestNamedTemporaryFile(BaseTestCase):
 
     def test_bad_mode(self):
         dir = tempfile.mkdtemp()
-        self.addCleanup(support.rmtree, dir)
+        self.addCleanup(os_helper.rmtree, dir)
         with self.assertRaises(ValueError):
             tempfile.NamedTemporaryFile(mode='wr', dir=dir)
         with self.assertRaises(TypeError):
@@ -1368,7 +1364,7 @@ class TestTemporaryDirectory(BaseTestCase):
         finally:
             os.rmdir(dir)
 
-    @support.skip_unless_symlink
+    @os_helper.skip_unless_symlink
     def test_cleanup_with_symlink_to_a_directory(self):
         # cleanup() should not follow symlinks to directories (issue #12464)
         d1 = self.do_create()
@@ -1402,8 +1398,6 @@ class TestTemporaryDirectory(BaseTestCase):
         finally:
             os.rmdir(dir)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_del_on_shutdown(self):
         # A TemporaryDirectory may be cleaned up during shutdown
         with self.do_create() as dir:
@@ -1436,8 +1430,6 @@ class TestTemporaryDirectory(BaseTestCase):
                 self.assertNotIn("Exception ", err)
                 self.assertIn("ResourceWarning: Implicitly cleaning up", err)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_exit_on_shutdown(self):
         # Issue #22427
         with self.do_create() as dir:
@@ -1462,8 +1454,6 @@ class TestTemporaryDirectory(BaseTestCase):
             self.assertNotIn("Exception ", err)
             self.assertIn("ResourceWarning: Implicitly cleaning up", err)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_warnings_on_cleanup(self):
         # ResourceWarning will be triggered by __del__
         with self.do_create() as dir:
@@ -1506,10 +1496,6 @@ class TestTemporaryDirectory(BaseTestCase):
                         os.chmod(root, mode)
                     d.cleanup()
                 self.assertFalse(os.path.exists(d.name))
-
-    # TODO: RUSTPYTHON
-    if sys.platform not in {"darwin", "win32"}:
-        test_modes = unittest.expectedFailure(test_modes)
 
     @unittest.skipUnless(hasattr(os, 'chflags'), 'requires os.lchflags')
     def test_flags(self):

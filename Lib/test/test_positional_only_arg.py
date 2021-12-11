@@ -145,8 +145,6 @@ class PositionalOnlyTestCase(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, expected):
             f(a=1, b=2)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_positional_only_and_arg_invalid_calls(self):
         def f(a, b, /, c):
             pass
@@ -194,8 +192,6 @@ class PositionalOnlyTestCase(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"f\(\) got an unexpected keyword argument 'f'"):
             f(1, 2, 3, d=1, e=4, f=56)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_positional_only_invalid_calls(self):
         def f(a, b, /):
             pass
@@ -292,9 +288,6 @@ class PositionalOnlyTestCase(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"f\(\) missing 2 required positional arguments: 'a' and 'b'"):
             global_pos_only_f()
 
-
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_closures(self):
         def f(x,y):
             def g(x2,/,y2):
@@ -325,8 +318,6 @@ class PositionalOnlyTestCase(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"g\(\) takes 2 positional arguments but 3 were given"):
             f(1,2)(3,4,5)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_same_keyword_as_positional_with_kwargs(self):
         def f(something,/,**kwargs):
             return (something, kwargs)

@@ -15,6 +15,7 @@ import unicodedata
 import unittest
 import warnings
 from test import support, string_tests
+from test.support import import_helper
 
 # Error handling (bad decoder return)
 def search_function(encoding):
@@ -661,8 +662,6 @@ class UnicodeTest(string_tests.CommonTest,
         self.assertFalse("\u20ac".isascii())
         self.assertFalse("\U0010ffff".isascii())
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_isdecimal(self):
         self.checkequalnofix(False, '', 'isdecimal')
         self.checkequalnofix(False, 'a', 'isdecimal')
@@ -2506,7 +2505,7 @@ class CAPITest(unittest.TestCase):
 
     # Test PyUnicode_FromFormat()
     def test_from_format(self):
-        support.import_module('ctypes')
+        import_helper.import_module('ctypes')
         from ctypes import (
             pythonapi, py_object, sizeof,
             c_int, c_long, c_longlong, c_ssize_t,
@@ -2747,7 +2746,7 @@ class CAPITest(unittest.TestCase):
     @support.cpython_only
     def test_aswidechar(self):
         from _testcapi import unicode_aswidechar
-        support.import_module('ctypes')
+        import_helper.import_module('ctypes')
         from ctypes import c_wchar, sizeof
 
         wchar, size = unicode_aswidechar('abcdef', 2)
@@ -2785,7 +2784,7 @@ class CAPITest(unittest.TestCase):
     @support.cpython_only
     def test_aswidecharstring(self):
         from _testcapi import unicode_aswidecharstring
-        support.import_module('ctypes')
+        import_helper.import_module('ctypes')
         from ctypes import c_wchar, sizeof
 
         wchar, size = unicode_aswidecharstring('abc')

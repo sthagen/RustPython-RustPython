@@ -1,6 +1,4 @@
-use crate::{
-    function::IntoPyObject, ItemProtocol, PyClassImpl, PyObjectRef, PyResult, VirtualMachine,
-};
+use crate::{function::IntoPyObject, PyClassImpl, PyObject, PyResult, VirtualMachine};
 
 pub(crate) use sys::{MAXSIZE, MULTIARCH};
 
@@ -11,14 +9,13 @@ mod sys {
         hash::{PyHash, PyUHash},
     };
     use crate::{
-        builtins::{PyDictRef, PyListRef, PyNamespace, PyStr, PyStrRef, PyTupleRef, PyTypeRef},
-        exceptions,
+        builtins::{PyDictRef, PyNamespace, PyStr, PyStrRef, PyTupleRef, PyTypeRef},
         frame::FrameRef,
         function::{FuncArgs, OptionalArg, PosArgs},
         stdlib::builtins,
         version,
         vm::{PySettings, VirtualMachine},
-        ItemProtocol, PyObjectRef, PyRef, PyRefExact, PyResult, PyStructSequence,
+        PyObjectRef, PyRef, PyRefExact, PyResult, PyStructSequence,
     };
     use num_traits::ToPrimitive;
     use std::{env, mem, path};
@@ -100,15 +97,13 @@ mod sys {
     // alphabetical order with segments of pyattr and others
 
     #[pyattr]
-    fn argv(vm: &VirtualMachine) -> PyListRef {
-        vm.ctx.new_list(
-            vm.state
-                .settings
-                .argv
-                .iter()
-                .map(|arg| vm.ctx.new_str(arg.clone()).into())
-                .collect(),
-        )
+    fn argv(vm: &VirtualMachine) -> Vec<PyObjectRef> {
+        vm.state
+            .settings
+            .argv
+            .iter()
+            .map(|arg| vm.ctx.new_str(arg.clone()).into())
+            .collect()
     }
 
     #[pyattr]
@@ -292,11 +287,11 @@ mod sys {
             return Ok(());
         }
         // set to none to avoid recursion while printing
-        vm.set_attr(&vm.builtins, "_", vm.ctx.none())?;
+        vm.builtins.set_attr("_", vm.ctx.none(), vm)?;
         // TODO: catch encoding errors
-        let repr = vm.to_repr(&obj)?.into();
+        let repr = obj.repr(vm)?.into();
         builtins::print(PosArgs::new(vec![repr]), Default::default(), vm)?;
-        vm.set_attr(&vm.builtins, "_", obj)?;
+        vm.builtins.set_attr("_", obj, vm)?;
         Ok(())
     }
 
@@ -308,15 +303,15 @@ mod sys {
         exc_tb: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        let exc = exceptions::normalize(exc_type, exc_val, exc_tb, vm)?;
+        let exc = vm.normalize_exception(exc_type, exc_val, exc_tb)?;
         let stderr = super::get_stderr(vm)?;
-        exceptions::write_exception(&mut crate::py_io::PyWriter(stderr, vm), vm, &exc)
+        vm.write_exception(&mut crate::py_io::PyWriter(stderr, vm), &exc)
     }
 
     #[pyfunction]
     fn exc_info(vm: &VirtualMachine) -> (PyObjectRef, PyObjectRef, PyObjectRef) {
         match vm.topmost_exception() {
-            Some(exception) => exceptions::split(exception, vm),
+            Some(exception) => vm.split_exception(exception),
             None => (vm.ctx.none(), vm.ctx.none(), vm.ctx.none()),
         }
     }
@@ -338,7 +333,7 @@ mod sys {
 
     #[pyfunction]
     fn getrefcount(obj: PyObjectRef) -> usize {
-        PyObjectRef::strong_count(&obj)
+        obj.strong_count()
     }
 
     #[pyfunction]
@@ -478,16 +473,16 @@ mod sys {
                     "recursion limit must be greater than or equal to one".to_owned(),
                 )
             })?;
-        let recursion_depth = vm.frames.borrow().len();
+        let recursion_depth = vm.current_recursion_depth();
 
-        if recursion_limit > recursion_depth + 1 {
+        if recursion_limit > recursion_depth {
             vm.recursion_limit.set(recursion_limit);
             Ok(())
         } else {
             Err(vm.new_recursion_error(format!(
-            "cannot set the recursion limit to {} at the recursion depth {}: the limit is too low",
-            recursion_limit, recursion_depth
-        )))
+                "cannot set the recursion limit to {} at the recursion depth {}: the limit is too low",
+                recursion_limit, recursion_depth
+            )))
         }
     }
 
@@ -673,7 +668,7 @@ mod sys {
     impl WindowsVersion {}
 }
 
-pub(crate) fn init_module(vm: &VirtualMachine, module: &PyObjectRef, builtins: &PyObjectRef) {
+pub(crate) fn init_module(vm: &VirtualMachine, module: &PyObject, builtins: &PyObject) {
     let ctx = &vm.ctx;
     let _flags_type = sys::Flags::make_class(ctx);
     let _version_info_type = crate::version::VersionInfo::make_class(ctx);
@@ -689,8 +684,10 @@ pub(crate) fn init_module(vm: &VirtualMachine, module: &PyObjectRef, builtins: &
     sys::extend_module(vm, module);
 
     let modules = vm.ctx.new_dict();
-    modules.set_item("sys", module.clone(), vm).unwrap();
-    modules.set_item("builtins", builtins.clone(), vm).unwrap();
+    modules.set_item("sys", module.to_owned(), vm).unwrap();
+    modules
+        .set_item("builtins", builtins.to_owned(), vm)
+        .unwrap();
     extend_module!(vm, module, {
         "__doc__" => sys::DOC.to_owned().into_pyobject(vm),
         "modules" => modules,
@@ -726,15 +723,21 @@ impl PyStderr<'_> {
 }
 
 pub fn get_stdin(vm: &VirtualMachine) -> PyResult {
-    vm.get_attribute(vm.sys_module.clone(), "stdin")
+    vm.sys_module
+        .clone()
+        .get_attr("stdin", vm)
         .map_err(|_| vm.new_runtime_error("lost sys.stdin".to_owned()))
 }
 pub fn get_stdout(vm: &VirtualMachine) -> PyResult {
-    vm.get_attribute(vm.sys_module.clone(), "stdout")
+    vm.sys_module
+        .clone()
+        .get_attr("stdout", vm)
         .map_err(|_| vm.new_runtime_error("lost sys.stdout".to_owned()))
 }
 pub fn get_stderr(vm: &VirtualMachine) -> PyResult {
-    vm.get_attribute(vm.sys_module.clone(), "stderr")
+    vm.sys_module
+        .clone()
+        .get_attr("stderr", vm)
         .map_err(|_| vm.new_runtime_error("lost sys.stderr".to_owned()))
 }
 

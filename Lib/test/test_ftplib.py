@@ -1024,7 +1024,6 @@ class TestTimeouts(TestCase):
         finally:
             self.sock.close()
 
-    @unittest.skip("TODO: RUSTPYTHON; socket.{get,set}timeout")
     def testTimeoutDefault(self):
         # default -- use global socket timeout
         self.assertIsNone(socket.getdefaulttimeout())
@@ -1037,7 +1036,6 @@ class TestTimeouts(TestCase):
         self.evt.wait()
         ftp.close()
 
-    @unittest.skip("TODO: RUSTPYTHON; socket.{get,set}timeout")
     def testTimeoutNone(self):
         # no timeout -- do not use global socket timeout
         self.assertIsNone(socket.getdefaulttimeout())
@@ -1082,10 +1080,10 @@ class TestTimeouts(TestCase):
 
 class MiscTestCase(TestCase):
     def test__all__(self):
-        blacklist = {'MSG_OOB', 'FTP_PORT', 'MAXLINE', 'CRLF', 'B_CRLF',
+        not_exported = {'MSG_OOB', 'FTP_PORT', 'MAXLINE', 'CRLF', 'B_CRLF',
                      'Error', 'parse150', 'parse227', 'parse229', 'parse257',
                      'print_line', 'ftpcp', 'test'}
-        support.check__all__(self, ftplib, blacklist=blacklist)
+        support.check__all__(self, ftplib, not_exported=not_exported)
 
 
 def test_main():

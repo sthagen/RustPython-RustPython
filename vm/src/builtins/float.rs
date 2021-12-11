@@ -1,13 +1,13 @@
-use super::{try_bigint_to_f64, PyBytes, PyInt, PyIntRef, PyStr, PyStrRef, PyTypeRef};
+use super::{try_bigint_to_f64, PyByteArray, PyBytes, PyInt, PyIntRef, PyStr, PyStrRef, PyTypeRef};
 use crate::common::{float_ops, hash};
 use crate::{
     format::FormatSpec,
-    function::{IntoPyObject, OptionalArg, OptionalOption},
-    slots::{Comparable, Hashable, PyComparisonOp, SlotConstructor},
+    function::{ArgBytesLike, IntoPyObject, OptionalArg, OptionalOption},
+    types::{Comparable, Constructor, Hashable, PyComparisonOp},
     IdProtocol,
     PyArithmeticValue::{self, *},
-    PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol, VirtualMachine,
+    PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
+    TryFromBorrowedObject, TryFromObject, TypeProtocol, VirtualMachine,
 };
 use num_bigint::{BigInt, ToBigInt};
 use num_complex::Complex64;
@@ -50,12 +50,12 @@ impl From<f64> for PyFloat {
     }
 }
 
-impl PyObjectRef {
+impl PyObject {
     pub fn try_to_f64(&self, vm: &VirtualMachine) -> PyResult<Option<f64>> {
         if let Some(float) = self.payload_if_exact::<PyFloat>(vm) {
             return Ok(Some(float.value));
         }
-        if let Some(method) = vm.get_method(self.clone(), "__float__") {
+        if let Some(method) = vm.get_method(self.to_owned(), "__float__") {
             let result = vm.invoke(&method?, ())?;
             // TODO: returning strict subclasses of float in __float__ is deprecated
             return match result.payload::<PyFloat>() {
@@ -66,20 +66,20 @@ impl PyObjectRef {
                 ))),
             };
         }
-        if let Some(r) = vm.to_index_opt(self.clone()).transpose()? {
+        if let Some(r) = vm.to_index_opt(self.to_owned()).transpose()? {
             return Ok(Some(try_bigint_to_f64(r.as_bigint(), vm)?));
         }
         Ok(None)
     }
 }
 
-pub fn try_float(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<f64> {
+pub fn try_float(obj: &PyObject, vm: &VirtualMachine) -> PyResult<f64> {
     obj.try_to_f64(vm)?.ok_or_else(|| {
         vm.new_type_error(format!("must be real number, not {}", obj.class().name()))
     })
 }
 
-pub(crate) fn to_op_float(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<f64>> {
+pub(crate) fn to_op_float(obj: &PyObject, vm: &VirtualMachine) -> PyResult<Option<f64>> {
     let v = if let Some(float) = obj.payload_if_subclass::<PyFloat>(vm) {
         Some(float.value)
     } else if let Some(int) = obj.payload_if_subclass::<PyInt>(vm) {
@@ -94,7 +94,7 @@ macro_rules! impl_try_from_object_float {
     ($($t:ty),*) => {
         $(impl TryFromObject for $t {
             fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-                PyFloatRef::try_from_object(vm, obj).map(|f| f.to_f64() as $t)
+                PyRef::<PyFloat>::try_from_object(vm, obj).map(|f| f.to_f64() as $t)
             }
         })*
     };
@@ -156,7 +156,7 @@ pub fn float_pow(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult {
     }
 }
 
-impl SlotConstructor for PyFloat {
+impl Constructor for PyFloat {
     type Args = OptionalArg<PyObjectRef>;
 
     fn py_new(cls: PyTypeRef, arg: Self::Args, vm: &VirtualMachine) -> PyResult {
@@ -174,22 +174,8 @@ impl SlotConstructor for PyFloat {
 
                 if let Some(f) = val.try_to_f64(vm)? {
                     f
-                } else if let Some(s) = val.payload_if_subclass::<PyStr>(vm) {
-                    float_ops::parse_str(s.as_str().trim()).ok_or_else(|| {
-                        vm.new_value_error(format!("could not convert string to float: '{}'", s))
-                    })?
-                } else if let Some(bytes) = val.payload_if_subclass::<PyBytes>(vm) {
-                    lexical_core::parse(bytes.as_bytes()).map_err(|_| {
-                        vm.new_value_error(format!(
-                            "could not convert string to float: '{}'",
-                            bytes.repr()
-                        ))
-                    })?
                 } else {
-                    return Err(vm.new_type_error(format!(
-                        "float() argument must be a string or a number, not '{}'",
-                        val.class().name()
-                    )));
+                    float_from_string(val, vm)?
                 }
             }
         };
@@ -197,7 +183,35 @@ impl SlotConstructor for PyFloat {
     }
 }
 
-#[pyimpl(flags(BASETYPE), with(Comparable, Hashable, SlotConstructor))]
+fn float_from_string(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<f64> {
+    let (bytearray, buffer, buffer_lock);
+    let b = if let Some(s) = val.payload_if_subclass::<PyStr>(vm) {
+        s.as_str().trim().as_bytes()
+    } else if let Some(bytes) = val.payload_if_subclass::<PyBytes>(vm) {
+        bytes.as_bytes()
+    } else if let Some(buf) = val.payload_if_subclass::<PyByteArray>(vm) {
+        bytearray = buf.borrow_buf();
+        &*bytearray
+    } else if let Ok(b) = ArgBytesLike::try_from_borrowed_object(vm, &val) {
+        buffer = b;
+        buffer_lock = buffer.borrow_buf();
+        &*buffer_lock
+    } else {
+        return Err(vm.new_type_error(format!(
+            "float() argument must be a string or a number, not '{}'",
+            val.class().name()
+        )));
+    };
+    float_ops::parse_bytes(b).ok_or_else(|| {
+        val.repr(vm)
+            .map(|repr| {
+                vm.new_value_error(format!("could not convert string to float: '{}'", repr))
+            })
+            .unwrap_or_else(|e| e)
+    })
+}
+
+#[pyimpl(flags(BASETYPE), with(Comparable, Hashable, Constructor))]
 impl PyFloat {
     #[pymethod(magic)]
     fn format(&self, spec: PyStrRef, vm: &VirtualMachine) -> PyResult<String> {
@@ -493,8 +507,8 @@ impl PyFloat {
 
 impl Comparable for PyFloat {
     fn cmp(
-        zelf: &PyRef<Self>,
-        other: &PyObjectRef,
+        zelf: &crate::PyObjectView<Self>,
+        other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<PyComparisonValue> {
@@ -533,15 +547,14 @@ impl Comparable for PyFloat {
 }
 
 impl Hashable for PyFloat {
-    fn hash(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
+    #[inline]
+    fn hash(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
         Ok(hash::hash_float(zelf.to_f64()))
     }
 }
 
-pub type PyFloatRef = PyRef<PyFloat>;
-
 // Retrieve inner float value:
-pub(crate) fn get_value(obj: &PyObjectRef) -> f64 {
+pub(crate) fn get_value(obj: &PyObject) -> f64 {
     obj.payload::<PyFloat>().unwrap().value
 }
 

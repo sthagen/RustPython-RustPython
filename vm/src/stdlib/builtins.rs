@@ -1,7 +1,7 @@
 //! Builtin function definitions.
 //!
 //! Implements the list of [builtin Python functions](https://docs.python.org/3/library/builtins.html).
-use crate::{PyObjectRef, VirtualMachine};
+use crate::{PyClassImpl, PyObjectRef, VirtualMachine};
 
 /// Built-in functions, exceptions, and other objects.
 ///
@@ -18,22 +18,22 @@ mod builtins {
             iter::PyCallableIterator,
             list::{PyList, SortOptions},
             PyByteArray, PyBytes, PyBytesRef, PyCode, PyDictRef, PyStr, PyStrRef, PyTuple,
-            PyTupleRef, PyTypeRef,
+            PyTupleRef, PyType,
         },
         common::{hash::PyHash, str::to_ascii},
         function::{
-            ArgBytesLike, ArgCallable, ArgIntoBool, ArgIterable, FuncArgs, KwArgs, OptionalArg,
-            OptionalOption, PosArgs,
+            ArgBytesLike, ArgCallable, ArgIntoBool, ArgIterable, ArgMapping, FuncArgs, KwArgs,
+            OptionalArg, OptionalOption, PosArgs,
         },
         protocol::{PyIter, PyIterReturn},
         py_io,
         readline::{Readline, ReadlineResult},
         scope::Scope,
-        slots::PyComparisonOp,
         stdlib::sys,
+        types::PyComparisonOp,
         utils::Either,
-        IdProtocol, ItemProtocol, PyArithmeticValue, PyClassImpl, PyObjectRef, PyRef, PyResult,
-        PyValue, TryFromObject, TypeProtocol, VirtualMachine,
+        IdProtocol, PyArithmeticValue, PyClassImpl, PyObject, PyObjectRef, PyObjectWrap, PyRef,
+        PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
     };
     use num_traits::{Signed, ToPrimitive, Zero};
 
@@ -64,7 +64,7 @@ mod builtins {
 
     #[pyfunction]
     pub fn ascii(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<ascii::AsciiString> {
-        let repr = vm.to_repr(&obj)?;
+        let repr = obj.repr(vm)?;
         let ascii = to_ascii(repr.as_str());
         Ok(ascii)
     }
@@ -186,20 +186,12 @@ mod builtins {
 
     #[pyfunction]
     fn delattr(obj: PyObjectRef, attr: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
-        vm.del_attr(&obj, attr)
+        obj.del_attr(attr, vm)
     }
 
     #[pyfunction]
     fn dir(obj: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyList> {
-        let seq = match obj {
-            OptionalArg::Present(obj) => vm
-                .get_special_method(obj, "__dir__")?
-                .map_err(|_obj| vm.new_type_error("object does not provide __dir__".to_owned()))?
-                .invoke((), vm)?,
-            OptionalArg::Missing => vm.call_method(vm.current_locals()?.as_object(), "keys", ())?,
-        };
-        let sorted = sorted(seq, Default::default(), vm)?;
-        Ok(sorted)
+        vm.dir(obj.into_option())
     }
 
     #[pyfunction]
@@ -212,9 +204,8 @@ mod builtins {
     struct ScopeArgs {
         #[pyarg(any, default)]
         globals: Option<PyDictRef>,
-        // TODO: support any mapping for `locals`
         #[pyarg(any, default)]
-        locals: Option<PyDictRef>,
+        locals: Option<ArgMapping>,
     }
 
     #[cfg(feature = "rustpython-compiler")]
@@ -223,20 +214,24 @@ mod builtins {
             let (globals, locals) = match self.globals {
                 Some(globals) => {
                     if !globals.contains_key("__builtins__", vm) {
-                        let builtins_dict = vm.builtins.dict().unwrap().into();
+                        let builtins_dict = vm.builtins.dict().into();
                         globals.set_item("__builtins__", builtins_dict, vm)?;
                     }
-                    let locals = self.locals.unwrap_or_else(|| globals.clone());
-                    (globals, locals)
+                    (
+                        globals.clone(),
+                        self.locals.unwrap_or_else(|| {
+                            ArgMapping::try_from_object(vm, globals.into()).unwrap()
+                        }),
+                    )
                 }
-                None => {
-                    let globals = vm.current_globals().clone();
-                    let locals = match self.locals {
-                        Some(l) => l,
-                        None => vm.current_locals()?,
-                    };
-                    (globals, locals)
-                }
+                None => (
+                    vm.current_globals().clone(),
+                    if let Some(locals) = self.locals {
+                        locals
+                    } else {
+                        vm.current_locals()?
+                    },
+                ),
             };
 
             let scope = Scope::with_builtins(Some(locals), globals, vm);
@@ -327,7 +322,7 @@ mod builtins {
         if let OptionalArg::Present(default) = default {
             Ok(vm.get_attribute_opt(obj, attr)?.unwrap_or(default))
         } else {
-            vm.get_attribute(obj, attr)
+            obj.get_attr(attr, vm)
         }
     }
 
@@ -343,7 +338,7 @@ mod builtins {
 
     #[pyfunction]
     fn hash(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyHash> {
-        vm._hash(&obj)
+        obj.hash(vm)
     }
 
     // builtin_help
@@ -403,12 +398,12 @@ mod builtins {
 
     #[pyfunction]
     fn isinstance(obj: PyObjectRef, typ: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
-        vm.isinstance(&obj, &typ)
+        obj.is_instance(&typ, vm)
     }
 
     #[pyfunction]
     fn issubclass(subclass: PyObjectRef, typ: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
-        vm.issubclass(&subclass, &typ)
+        subclass.is_subclass(&typ, vm)
     }
 
     #[pyfunction]
@@ -430,12 +425,12 @@ mod builtins {
 
     #[pyfunction]
     fn len(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
-        vm.obj_len(&obj)
+        obj.length(vm)
     }
 
     #[pyfunction]
-    fn locals(vm: &VirtualMachine) -> PyResult<PyDictRef> {
-        vm.current_locals()
+    fn locals(vm: &VirtualMachine) -> PyResult {
+        vm.current_locals().map(|x| x.into_object())
     }
 
     fn min_or_max(
@@ -483,14 +478,14 @@ mod builtins {
             let mut x_key = vm.invoke(key_func, (x.clone(),))?;
             for y in candidates_iter {
                 let y_key = vm.invoke(key_func, (y.clone(),))?;
-                if vm.bool_cmp(&y_key, &x_key, op)? {
+                if y_key.rich_compare_bool(&x_key, op, vm)? {
                     x = y;
                     x_key = y_key;
                 }
             }
         } else {
             for y in candidates_iter {
-                if vm.bool_cmp(&y, &x, op)? {
+                if y.rich_compare_bool(&x, op, vm)? {
                     x = y;
                 }
             }
@@ -594,7 +589,7 @@ mod builtins {
                 Err(vm.new_unsupported_binop_error(x, y, "pow"))
             }),
             Some(z) => {
-                let try_pow_value = |obj: &PyObjectRef,
+                let try_pow_value = |obj: &PyObject,
                                      args: (PyObjectRef, PyObjectRef, PyObjectRef)|
                  -> Option<PyResult> {
                     if let Some(method) = obj.get_class_attr("__pow__") {
@@ -668,7 +663,7 @@ mod builtins {
                 write(sep.clone())?;
             }
 
-            write(vm.to_str(&object)?)?;
+            write(object.str(vm)?)?;
         }
 
         let end = options
@@ -685,7 +680,7 @@ mod builtins {
 
     #[pyfunction]
     fn repr(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
-        vm.to_repr(&obj)
+        obj.repr(vm)
     }
 
     #[pyfunction]
@@ -696,7 +691,7 @@ mod builtins {
             vm.get_method_or_type_error(obj.clone(), "__getitem__", || {
                 "argument to reversed() must be a sequence".to_owned()
             })?;
-            let len = vm.obj_len(&obj)?;
+            let len = obj.length(vm)?;
             let obj_iterator = PyReverseSequenceIterator::new(obj, len);
             Ok(obj_iterator.into_object(vm))
         }
@@ -738,7 +733,7 @@ mod builtins {
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        vm.set_attr(&obj, attr, value)?;
+        obj.set_attr(attr, value, vm)?;
         Ok(())
     }
 
@@ -784,7 +779,7 @@ mod builtins {
         });
 
         for item in iterable.iter(vm)? {
-            sum = vm._add(&sum, &item?)?;
+            sum = vm._add(&sum, &*item?)?;
         }
         Ok(sum)
     }
@@ -797,11 +792,11 @@ mod builtins {
     #[pyfunction]
     fn vars(obj: OptionalArg, vm: &VirtualMachine) -> PyResult {
         if let OptionalArg::Present(obj) = obj {
-            vm.get_attribute(obj, "__dict__").map_err(|_| {
+            obj.get_attr("__dict__", vm).map_err(|_| {
                 vm.new_type_error("vars() argument must have __dict__ attribute".to_owned())
             })
         } else {
-            Ok(vm.current_locals()?.into())
+            Ok(vm.current_locals()?.into_object())
         }
     }
 
@@ -816,16 +811,9 @@ mod builtins {
         let name = qualified_name.as_str().split('.').next_back().unwrap();
         let name_obj = vm.ctx.new_str(name);
 
-        let mut metaclass = if let Some(metaclass) = kwargs.pop_kwarg("metaclass") {
-            PyTypeRef::try_from_object(vm, metaclass)?
-        } else {
-            vm.ctx.types.type_type.clone()
-        };
-
+        // Update bases.
         let mut new_bases: Option<Vec<PyObjectRef>> = None;
-
         let bases = PyTuple::new_ref(bases.into_vec(), &vm.ctx);
-
         for (i, base) in bases.as_slice().iter().enumerate() {
             if base.isinstance(&vm.ctx.types.type_type) {
                 if let Some(bases) = &mut new_bases {
@@ -856,39 +844,64 @@ mod builtins {
             None => (None, bases),
         };
 
-        for base in bases.as_slice().iter() {
-            let base_class = base.class();
-            if base_class.issubclass(&metaclass) {
-                metaclass = base.clone_class();
-            } else if !metaclass.issubclass(&base_class) {
-                return Err(vm.new_type_error(
-                    "metaclass conflict: the metaclass of a derived class must be a (non-strict) \
-                     subclass of the metaclasses of all its bases"
-                        .to_owned(),
-                ));
+        // Use downcast_exact to keep ref to old object on error.
+        let metaclass = kwargs
+            .pop_kwarg("metaclass")
+            .map(|metaclass| metaclass.downcast_exact::<PyType>(vm))
+            .unwrap_or_else(|| Ok(vm.ctx.types.type_type.clone()));
+
+        let (metaclass, meta_name) = match metaclass {
+            Ok(mut metaclass) => {
+                for base in bases.as_slice().iter() {
+                    let base_class = base.class();
+                    if base_class.issubclass(&metaclass) {
+                        metaclass = base.clone_class();
+                    } else if !metaclass.issubclass(&base_class) {
+                        return Err(vm.new_type_error(
+                            "metaclass conflict: the metaclass of a derived class must be a (non-strict) \
+                            subclass of the metaclasses of all its bases"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                let meta_name = metaclass.slot_name();
+                (metaclass.into(), meta_name)
             }
-        }
+            Err(obj) => (obj, "<metaclass>".to_owned()),
+        };
 
         let bases: PyObjectRef = bases.into();
 
         // Prepare uses full __getattribute__ resolution chain.
-        let prepare = vm.get_attribute(metaclass.clone().into(), "__prepare__")?;
-        let namespace = vm.invoke(
-            &prepare,
-            FuncArgs::new(vec![name_obj.clone().into(), bases.clone()], kwargs.clone()),
-        )?;
+        let namespace = vm
+            .get_attribute_opt(metaclass.clone(), "__prepare__")?
+            .map_or(Ok(vm.ctx.new_dict().into()), |prepare| {
+                vm.invoke(
+                    &prepare,
+                    FuncArgs::new(vec![name_obj.clone().into(), bases.clone()], kwargs.clone()),
+                )
+            })?;
 
-        let namespace = PyDictRef::try_from_object(vm, namespace)?;
+        // Accept any PyMapping as namespace.
+        let namespace = ArgMapping::try_from_object(vm, namespace.clone()).map_err(|_| {
+            vm.new_type_error(format!(
+                "{}.__prepare__() must return a mapping, not {}",
+                meta_name,
+                namespace.class()
+            ))
+        })?;
 
         let classcell = function.invoke_with_locals(().into(), Some(namespace.clone()), vm)?;
         let classcell = <Option<PyCellRef>>::try_from_object(vm, classcell)?;
 
         if let Some(orig_bases) = orig_bases {
-            namespace.set_item("__orig_bases__", orig_bases.into(), vm)?;
+            namespace
+                .as_object()
+                .set_item("__orig_bases__", orig_bases.into(), vm)?;
         }
 
         let class = vm.invoke(
-            metaclass.as_object(),
+            &metaclass,
             FuncArgs::new(vec![name_obj.into(), bases, namespace.into()], kwargs),
         )?;
 
@@ -905,7 +918,9 @@ pub use builtins::{ascii, print};
 pub fn make_module(vm: &VirtualMachine, module: PyObjectRef) {
     let ctx = &vm.ctx;
 
-    builtins::extend_module(vm, &module);
+    crate::protocol::VecBuffer::make_class(&vm.ctx);
+
+    let _ = builtins::extend_module(vm, &module);
 
     let debug_mode: bool = vm.state.settings.optimize == 0;
     extend_module!(vm, module, {
@@ -938,6 +953,9 @@ pub fn make_module(vm: &VirtualMachine, module: PyObjectRef) {
         "zip" => ctx.types.zip_type.clone(),
 
         // Constants
+        "None" => ctx.none(),
+        "True" => ctx.new_bool(true),
+        "False" => ctx.new_bool(false),
         "NotImplemented" => ctx.not_implemented(),
         "Ellipsis" => vm.ctx.ellipsis.clone(),
 

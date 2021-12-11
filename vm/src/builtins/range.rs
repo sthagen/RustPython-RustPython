@@ -1,13 +1,14 @@
-use super::{PyInt, PyIntRef, PySlice, PySliceRef, PyTupleRef, PyTypeRef};
+use super::{PyInt, PyIntRef, PySlice, PyTupleRef, PyTypeRef};
 use crate::builtins::builtins_iter;
 use crate::common::hash::PyHash;
 use crate::{
     function::{FuncArgs, OptionalArg},
     protocol::{PyIterReturn, PyMappingMethods},
-    slots::{
-        AsMapping, Comparable, Hashable, Iterable, IteratorIterable, PyComparisonOp, SlotIterator,
+    types::{
+        AsMapping, Comparable, Constructor, Hashable, IterNext, IterNextIterable, Iterable,
+        PyComparisonOp, Unconstructible,
     },
-    IdProtocol, IntoPyRef, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
+    IdProtocol, IntoPyRef, PyClassImpl, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
     TryFromObject, TypeProtocol, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
@@ -34,8 +35,8 @@ fn iter_search(
 ) -> PyResult<usize> {
     let mut count = 0;
     let iter = obj.get_iter(vm)?;
-    for element in iter.iter_without_hint(vm)? {
-        if vm.bool_eq(&item, &element?)? {
+    for element in iter.iter_without_hint::<PyObjectRef>(vm)? {
+        if vm.bool_eq(&item, &*element?)? {
             match flag {
                 SearchType::Index => return Ok(count),
                 SearchType::Contains => return Ok(1),
@@ -48,7 +49,8 @@ fn iter_search(
         SearchType::Contains => Ok(0),
         SearchType::Index => Err(vm.new_value_error(format!(
             "{} not in range",
-            vm.to_repr(&item)
+            &item
+                .repr(vm)
                 .map(|v| v.as_str().to_owned())
                 .unwrap_or_else(|_| "value".to_owned())
         ))),
@@ -166,7 +168,7 @@ impl PyRange {
     }
 }
 
-// pub fn get_value(obj: &PyObjectRef) -> PyRange {
+// pub fn get_value(obj: &PyObject) -> PyRange {
 //     obj.payload::<PyRange>().unwrap().clone()
 // }
 
@@ -295,7 +297,7 @@ impl PyRange {
     fn reduce(&self, vm: &VirtualMachine) -> (PyTypeRef, PyTupleRef) {
         let range_paramters: Vec<PyObjectRef> = vec![&self.start, &self.stop, &self.step]
             .iter()
-            .map(|x| x.as_object().clone())
+            .map(|x| x.as_object().to_owned())
             .collect();
         let range_paramters_tuple = vm.ctx.new_tuple(range_paramters);
         (vm.ctx.types.range_type.clone(), range_paramters_tuple)
@@ -375,38 +377,33 @@ impl PyRange {
     }
 }
 
+impl PyRange {
+    const MAPPING_METHODS: PyMappingMethods = PyMappingMethods {
+        length: Some(|mapping, vm| {
+            Self::mapping_downcast(mapping)
+                .len()
+                .to_usize()
+                .ok_or_else(|| {
+                    vm.new_overflow_error(
+                        "RustPython int too large to convert to C ssize_t".to_owned(),
+                    )
+                })
+        }),
+        subscript: Some(|mapping, needle, vm| {
+            Self::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
+        }),
+        ass_subscript: None,
+    };
+}
+
 impl AsMapping for PyRange {
-    fn as_mapping(_zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<PyMappingMethods> {
-        Ok(PyMappingMethods {
-            length: Some(Self::length),
-            subscript: Some(Self::subscript),
-            ass_subscript: None,
-        })
-    }
-
-    #[inline]
-    fn length(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
-        Self::downcast_ref(&zelf, vm).map(|zelf| Ok(zelf.len().to_usize().unwrap()))?
-    }
-
-    #[inline]
-    fn subscript(zelf: PyObjectRef, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        Self::downcast_ref(&zelf, vm).map(|zelf| zelf.getitem(needle, vm))?
-    }
-
-    #[inline]
-    fn ass_subscript(
-        zelf: PyObjectRef,
-        _needle: PyObjectRef,
-        _value: Option<PyObjectRef>,
-        _vm: &VirtualMachine,
-    ) -> PyResult<()> {
-        unreachable!("ass_subscript not implemented for {}", zelf.class())
+    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+        Self::MAPPING_METHODS
     }
 }
 
 impl Hashable for PyRange {
-    fn hash(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
+    fn hash(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
         let length = zelf.compute_length();
         let elements = if length.is_zero() {
             [vm.ctx.new_int(length).into(), vm.ctx.none(), vm.ctx.none()]
@@ -429,8 +426,8 @@ impl Hashable for PyRange {
 
 impl Comparable for PyRange {
     fn cmp(
-        zelf: &PyRef<Self>,
-        other: &PyObjectRef,
+        zelf: &crate::PyObjectView<Self>,
+        other: &PyObject,
         op: PyComparisonOp,
         _vm: &VirtualMachine,
     ) -> PyResult<crate::PyComparisonValue> {
@@ -511,13 +508,8 @@ impl PyValue for PyLongRangeIterator {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(Constructor, IterNext))]
 impl PyLongRangeIterator {
-    #[pyslot]
-    fn slot_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        Err(vm.new_type_error("cannot create 'longrange_iterator' instances".to_owned()))
-    }
-
     #[pymethod(magic)]
     fn length_hint(&self) -> BigInt {
         let index = BigInt::from(self.index.load());
@@ -545,10 +537,11 @@ impl PyLongRangeIterator {
         )
     }
 }
+impl Unconstructible for PyLongRangeIterator {}
 
-impl IteratorIterable for PyLongRangeIterator {}
-impl SlotIterator for PyLongRangeIterator {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl IterNextIterable for PyLongRangeIterator {}
+impl IterNext for PyLongRangeIterator {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         // TODO: In pathological case (index == usize::MAX) this can wrap around
         // (since fetch_add wraps). This would result in the iterator spinning again
         // from the beginning.
@@ -580,13 +573,8 @@ impl PyValue for PyRangeIterator {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(Constructor, IterNext))]
 impl PyRangeIterator {
-    #[pyslot]
-    fn slot_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        Err(vm.new_type_error("cannot create 'range_iterator' instances".to_owned()))
-    }
-
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {
         let index = self.index.load();
@@ -615,10 +603,11 @@ impl PyRangeIterator {
         )
     }
 }
+impl Unconstructible for PyRangeIterator {}
 
-impl IteratorIterable for PyRangeIterator {}
-impl SlotIterator for PyRangeIterator {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl IterNextIterable for PyRangeIterator {}
+impl IterNext for PyRangeIterator {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         // TODO: In pathological case (index == usize::MAX) this can wrap around
         // (since fetch_add wraps). This would result in the iterator spinning again
         // from the beginning.
@@ -640,7 +629,7 @@ fn range_iter_reduce(
     index: usize,
     vm: &VirtualMachine,
 ) -> PyResult<PyTupleRef> {
-    let iter = builtins_iter(vm).clone();
+    let iter = builtins_iter(vm).to_owned();
     let stop = start.clone() + length * step.clone();
     let range = PyRange {
         start: PyInt::from(start).into_ref(vm),
@@ -666,7 +655,7 @@ fn range_state(length: &BigInt, state: PyObjectRef, vm: &VirtualMachine) -> PyRe
 
 pub enum RangeIndex {
     Int(PyIntRef),
-    Slice(PySliceRef),
+    Slice(PyRef<PySlice>),
 }
 
 impl TryFromObject for RangeIndex {

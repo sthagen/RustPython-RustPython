@@ -20,9 +20,9 @@ import warnings
 from functools import partial
 from contextlib import ExitStack
 from operator import neg
-from test.support import (
-    EnvironmentVarGuard, TESTFN, check_warnings, swap_attr, unlink)
+from test.support import check_warnings, swap_attr
 from test.support.script_helper import assert_python_ok
+from test.support.os_helper import EnvironmentVarGuard, TESTFN, unlink
 from unittest.mock import MagicMock, patch
 try:
     import pty, signal
@@ -490,8 +490,6 @@ class BuiltinTest(unittest.TestCase):
                 raise ValueError
         self.assertRaises(ValueError, eval, "foo", {}, X())
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_general_eval(self):
         # Tests that general mappings can be used for the locals argument
 

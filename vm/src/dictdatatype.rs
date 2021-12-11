@@ -1,18 +1,24 @@
-use crate::common::{
-    hash,
-    lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard},
-};
+use num_traits::ToPrimitive;
+
 /// Ordered dictionary implementation.
 /// Inspired by: https://morepypy.blogspot.com/2015/01/faster-more-memory-efficient-and-more.html
 /// And: https://www.youtube.com/watch?v=p33CVV29OG8
 /// And: http://code.activestate.com/recipes/578375/
 use crate::{
-    builtins::{PyStr, PyStrRef},
+    builtins::{PyInt, PyStr, PyStrRef},
     function::IntoPyObject,
-    IdProtocol, PyObjectRef, PyRefExact, PyResult, TypeProtocol, VirtualMachine,
+    IdProtocol, PyObject, PyObjectRef, PyRefExact, PyResult, TypeProtocol, VirtualMachine,
+};
+use crate::{
+    common::{
+        hash,
+        lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard},
+    },
+    PyObjectWrap,
 };
 use std::fmt;
 use std::mem::size_of;
+use std::ops::ControlFlow;
 
 // HashIndex is intended to be same size with hash::PyHash
 // but it doesn't mean the values are compatible with actual pyhash value
@@ -223,6 +229,8 @@ impl<T> DictInner<T> {
     }
 }
 
+type PopInnerResult<T> = ControlFlow<Option<DictEntry<T>>>;
+
 impl<T: Clone> Dict<T> {
     fn read(&self) -> PyRwLockReadGuard<'_, DictInner<T>> {
         self.inner.read()
@@ -235,13 +243,13 @@ impl<T: Clone> Dict<T> {
     /// Store a key
     pub fn insert<K>(&self, vm: &VirtualMachine, key: K, value: T) -> PyResult<()>
     where
-        K: DictKey,
+        K: DictKey + IntoPyObject,
     {
         let hash = key.key_hash(vm)?;
         let _removed = loop {
             let (entry_index, index_index) = self.lookup(vm, &key, hash, None)?;
+            let mut inner = self.write();
             if let IndexEntry::Index(index) = entry_index {
-                let mut inner = self.write();
                 // Update existing key
                 if let Some(entry) = inner.entries.get_mut(index) {
                     let entry = entry
@@ -259,7 +267,6 @@ impl<T: Clone> Dict<T> {
                 }
             } else {
                 // New key:
-                let mut inner = self.write();
                 inner.unchecked_push(index_index, hash, key.into_pyobject(vm), value, entry_index);
                 break None;
             }
@@ -337,7 +344,7 @@ impl<T: Clone> Dict<T> {
     /// Delete a key
     pub fn delete<K>(&self, vm: &VirtualMachine, key: K) -> PyResult<()>
     where
-        K: DictKey,
+        K: DictKey + IntoPyObject,
     {
         if self.delete_if_exists(vm, &key)? {
             Ok(())
@@ -350,41 +357,40 @@ impl<T: Clone> Dict<T> {
     where
         K: DictKey,
     {
+        self.delete_if(vm, key, |_| Ok(true))
+    }
+
+    /// pred should be VERY CAREFUL about what it does as it is called while
+    /// the dict's internal mutex is held
+    pub(crate) fn delete_if<K, F>(&self, vm: &VirtualMachine, key: &K, pred: F) -> PyResult<bool>
+    where
+        K: DictKey,
+        F: Fn(&T) -> PyResult<bool>,
+    {
         let hash = key.key_hash(vm)?;
         let deleted = loop {
             let lookup = self.lookup(vm, key, hash, None)?;
-            if let IndexEntry::Index(_) = lookup.0 {
-                if let Ok(Some(entry)) = self.pop_inner(lookup) {
-                    break Some(entry);
-                } else {
-                    // The dict was changed since we did lookup. Let's try again.
-                }
-            } else {
-                break None;
+            match self.pop_inner_if(lookup, &pred)? {
+                ControlFlow::Break(entry) => break entry,
+                ControlFlow::Continue(()) => continue,
             }
         };
         Ok(deleted.is_some())
     }
 
-    pub fn delete_or_insert(
-        &self,
-        vm: &VirtualMachine,
-        key: &PyObjectRef,
-        value: T,
-    ) -> PyResult<()> {
+    pub fn delete_or_insert(&self, vm: &VirtualMachine, key: &PyObject, value: T) -> PyResult<()> {
         let hash = key.key_hash(vm)?;
         let _removed = loop {
             let lookup = self.lookup(vm, key, hash, None)?;
             let (entry, index_index) = lookup;
             if let IndexEntry::Index(_) = entry {
-                if let Ok(Some(entry)) = self.pop_inner(lookup) {
-                    break Some(entry);
-                } else {
-                    // The dict was changed since we did lookup. Let's try again.
+                match self.pop_inner(lookup) {
+                    ControlFlow::Break(Some(entry)) => break Some(entry),
+                    _ => continue,
                 }
             } else {
                 let mut inner = self.write();
-                inner.unchecked_push(index_index, hash, key.clone(), value, entry);
+                inner.unchecked_push(index_index, hash, key.to_owned(), value, entry);
                 break None;
             }
         };
@@ -393,7 +399,7 @@ impl<T: Clone> Dict<T> {
 
     pub fn setdefault<K, F>(&self, vm: &VirtualMachine, key: K, default: F) -> PyResult<T>
     where
-        K: DictKey,
+        K: DictKey + IntoPyObject,
         F: FnOnce() -> T,
     {
         let hash = key.key_hash(vm)?;
@@ -436,7 +442,7 @@ impl<T: Clone> Dict<T> {
         default: F,
     ) -> PyResult<(PyObjectRef, T)>
     where
-        K: DictKey,
+        K: DictKey + IntoPyObject,
         F: FnOnce() -> T,
     {
         let hash = key.key_hash(vm)?;
@@ -579,25 +585,42 @@ impl<T: Clone> Dict<T> {
     }
 
     // returns Err(()) if changed since lookup
-    fn pop_inner(&self, lookup: LookupResult) -> Result<Option<DictEntry<T>>, ()> {
+    fn pop_inner(&self, lookup: LookupResult) -> PopInnerResult<T> {
+        self.pop_inner_if(lookup, |_| Ok::<_, std::convert::Infallible>(true))
+            .unwrap_or_else(|x| match x {})
+    }
+
+    fn pop_inner_if<E>(
+        &self,
+        lookup: LookupResult,
+        pred: impl Fn(&T) -> Result<bool, E>,
+    ) -> Result<PopInnerResult<T>, E> {
         let (entry_index, index_index) = lookup;
         let entry_index = if let IndexEntry::Index(entry_index) = entry_index {
             entry_index
         } else {
-            return Ok(None);
+            return Ok(ControlFlow::Break(None));
         };
-        let mut inner = self.write();
-        if matches!(inner.entries.get(entry_index), Some(Some(entry)) if entry.index == index_index)
-        {
-            // all good
+        let inner = &mut *self.write();
+        let slot = if let Some(slot) = inner.entries.get_mut(entry_index) {
+            slot
         } else {
             // The dict was changed since we did lookup. Let's try again.
-            return Err(());
+            return Ok(ControlFlow::Continue(()));
         };
+        match slot {
+            Some(entry) if entry.index == index_index => {
+                if !pred(&entry.value)? {
+                    return Ok(ControlFlow::Break(None));
+                }
+            }
+            // The dict was changed since we did lookup. Let's try again.
+            _ => return Ok(ControlFlow::Continue(())),
+        }
         inner.indices[index_index] = IndexEntry::DUMMY;
         inner.used -= 1;
-        let removed = std::mem::take(&mut inner.entries[entry_index]);
-        Ok(removed)
+        let removed = slot.take();
+        Ok(ControlFlow::Break(removed))
     }
 
     /// Retrieve and delete a key
@@ -605,10 +628,9 @@ impl<T: Clone> Dict<T> {
         let hash_value = key.key_hash(vm)?;
         let removed = loop {
             let lookup = self.lookup(vm, key, hash_value, None)?;
-            if let Ok(ret) = self.pop_inner(lookup) {
-                break ret.map(|e| e.value);
-            } else {
-                // changed since lookup, loop again
+            match self.pop_inner(lookup) {
+                ControlFlow::Break(entry) => break entry.map(|e| e.value),
+                ControlFlow::Continue(()) => continue,
             }
         };
         Ok(removed)
@@ -642,24 +664,53 @@ type LookupResult = (IndexEntry, IndexIndex);
 /// the dictionary. Typical usecases are:
 /// - PyObjectRef -> arbitrary python type used as key
 /// - str -> string reference used as key, this is often used internally
-pub trait DictKey: IntoPyObject {
+pub trait DictKey {
     fn key_hash(&self, vm: &VirtualMachine) -> PyResult<HashValue>;
-    fn key_is(&self, other: &PyObjectRef) -> bool;
-    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObjectRef) -> PyResult<bool>;
+    fn key_is(&self, other: &PyObject) -> bool;
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool>;
 }
 
 /// Implement trait for PyObjectRef such that we can use python objects
 /// to index dictionaries.
 impl DictKey for PyObjectRef {
+    #[inline]
     fn key_hash(&self, vm: &VirtualMachine) -> PyResult<HashValue> {
-        vm._hash(self)
+        (**self).key_hash(vm)
+    }
+    #[inline]
+    fn key_is(&self, other: &PyObject) -> bool {
+        (**self).key_is(other)
+    }
+    #[inline]
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
+        (**self).key_eq(vm, other_key)
+    }
+}
+
+impl DictKey for &PyObject {
+    #[inline]
+    fn key_hash(&self, vm: &VirtualMachine) -> PyResult<HashValue> {
+        (**self).key_hash(vm)
+    }
+    #[inline]
+    fn key_is(&self, other: &PyObject) -> bool {
+        (**self).key_is(other)
+    }
+    #[inline]
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
+        (**self).key_eq(vm, other_key)
+    }
+}
+impl DictKey for PyObject {
+    fn key_hash(&self, vm: &VirtualMachine) -> PyResult<HashValue> {
+        self.hash(vm)
     }
 
-    fn key_is(&self, other: &PyObjectRef) -> bool {
+    fn key_is(&self, other: &PyObject) -> bool {
         self.is(other)
     }
 
-    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObjectRef) -> PyResult<bool> {
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
         vm.identical_or_equal(self, other_key)
     }
 }
@@ -669,11 +720,11 @@ impl DictKey for PyStrRef {
         Ok(self.hash(vm))
     }
 
-    fn key_is(&self, other: &PyObjectRef) -> bool {
+    fn key_is(&self, other: &PyObject) -> bool {
         self.is(other)
     }
 
-    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObjectRef) -> PyResult<bool> {
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
         if self.is(other_key) {
             Ok(true)
         } else if let Some(pystr) = str_exact(other_key, vm) {
@@ -688,10 +739,10 @@ impl DictKey for PyRefExact<PyStr> {
     fn key_hash(&self, vm: &VirtualMachine) -> PyResult<HashValue> {
         (**self).key_hash(vm)
     }
-    fn key_is(&self, other: &PyObjectRef) -> bool {
+    fn key_is(&self, other: &PyObject) -> bool {
         (**self).key_is(other)
     }
-    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObjectRef) -> PyResult<bool> {
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
         (**self).key_eq(vm, other_key)
     }
 }
@@ -706,13 +757,13 @@ impl DictKey for &str {
         Ok(vm.state.hash_secret.hash_str(*self))
     }
 
-    fn key_is(&self, _other: &PyObjectRef) -> bool {
+    fn key_is(&self, _other: &PyObject) -> bool {
         // No matter who the other pyobject is, we are never the same thing, since
         // we are a str, not a pyobject.
         false
     }
 
-    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObjectRef) -> PyResult<bool> {
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
         if let Some(pystr) = str_exact(other_key, vm) {
             Ok(pystr.as_str() == *self)
         } else {
@@ -728,16 +779,39 @@ impl DictKey for String {
         self.as_str().key_hash(vm)
     }
 
-    fn key_is(&self, other: &PyObjectRef) -> bool {
+    fn key_is(&self, other: &PyObject) -> bool {
         self.as_str().key_is(other)
     }
 
-    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObjectRef) -> PyResult<bool> {
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
         self.as_str().key_eq(vm, other_key)
     }
 }
 
-fn str_exact<'a>(obj: &'a PyObjectRef, vm: &VirtualMachine) -> Option<&'a PyStr> {
+impl DictKey for usize {
+    fn key_hash(&self, vm: &VirtualMachine) -> PyResult<HashValue> {
+        Ok(vm.state.hash_secret.hash_value(self))
+    }
+
+    fn key_is(&self, _other: &PyObject) -> bool {
+        false
+    }
+
+    fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool> {
+        if let Some(int) = other_key.payload_if_exact::<PyInt>(vm) {
+            if let Some(i) = int.as_bigint().to_usize() {
+                Ok(i == *self)
+            } else {
+                Ok(false)
+            }
+        } else {
+            let int = vm.ctx.new_int(*self);
+            vm.bool_eq(&int.into_object(), other_key)
+        }
+    }
+}
+
+fn str_exact<'a>(obj: &'a PyObject, vm: &VirtualMachine) -> Option<&'a PyStr> {
     if obj.class().is(&vm.ctx.types.str_type) {
         obj.payload::<PyStr>()
     } else {

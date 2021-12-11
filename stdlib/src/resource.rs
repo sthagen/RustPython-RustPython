@@ -5,7 +5,7 @@ mod resource {
     use crate::vm::{
         function::{IntoPyException, IntoPyObject},
         stdlib::os,
-        PyObjectRef, PyResult, PyStructSequence, TryFromBorrowedObject, VirtualMachine,
+        PyObject, PyObjectRef, PyResult, PyStructSequence, TryFromBorrowedObject, VirtualMachine,
     };
     use std::{io, mem};
 
@@ -35,13 +35,29 @@ mod resource {
     #[pyattr]
     use libc::RLIMIT_RTTIME;
 
-    #[cfg(any(target_os = "freebsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "solaris",
+        target_os = "illumos"
+    ))]
     #[pyattr]
-    use libc::{RLIMIT_NPTS, RLIMIT_SBSIZE, RLIMIT_SWAP};
+    use libc::RLIMIT_SBSIZE;
 
     #[cfg(any(target_os = "freebsd", target_os = "solaris", target_os = "illumos"))]
     #[pyattr]
-    use libc::{RLIMIT_NPTS, RLIMIT_SBSIZE, RLIMIT_SWAP, RLIMIT_VMEM};
+    use libc::{RLIMIT_NPTS, RLIMIT_SWAP};
+
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    #[pyattr]
+    use libc::RLIMIT_VMEM;
+
+    #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "freebds"))]
+    #[pyattr]
+    use libc::RUSAGE_THREAD;
+    #[cfg(not(any(target_os = "windows", target_os = "redox")))]
+    #[pyattr]
+    use libc::{RUSAGE_CHILDREN, RUSAGE_SELF};
 
     #[pyattr]
     #[pyclass(name = "struct_rusage")]
@@ -113,7 +129,7 @@ mod resource {
 
     struct Limits(libc::rlimit);
     impl TryFromBorrowedObject for Limits {
-        fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObjectRef) -> PyResult<Self> {
+        fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Self> {
             let seq = vm.extract_elements::<libc::rlim_t>(obj)?;
             match *seq {
                 [cur, max] => Ok(Self(libc::rlimit {

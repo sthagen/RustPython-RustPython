@@ -3,11 +3,11 @@
 
 use crate::common::float_ops;
 use crate::{
-    builtins::{try_f64_to_bigint, tuple, PyBytes, PyFloat, PyInt, PyStr},
+    builtins::{try_f64_to_bigint, tuple, PyByteArray, PyBytes, PyFloat, PyInt, PyStr},
     function::ArgIntoFloat,
     protocol::PyBuffer,
-    ItemProtocol, PyObjectRef, PyResult, TryFromBorrowedObject, TryFromObject, TypeProtocol,
-    VirtualMachine,
+    stdlib::builtins,
+    PyObjectRef, PyResult, TryFromBorrowedObject, TryFromObject, TypeProtocol, VirtualMachine,
 };
 use itertools::Itertools;
 use num_bigint::{BigInt, Sign};
@@ -166,22 +166,31 @@ impl CFormatSpec {
         string: String,
         fill_char: char,
         num_prefix_chars: Option<usize>,
+        fill_with_precision: bool,
     ) -> String {
+        let target_width = if fill_with_precision {
+            &self.precision
+        } else {
+            &self.min_field_width
+        };
         let mut num_chars = string.chars().count();
         if let Some(num_prefix_chars) = num_prefix_chars {
             num_chars += num_prefix_chars;
         }
         let num_chars = num_chars;
 
-        let width = match self.min_field_width {
-            Some(CFormatQuantity::Amount(width)) => cmp::max(width, num_chars),
-            _ => num_chars,
+        let width = match target_width {
+            Some(CFormatQuantity::Amount(width)) => cmp::max(width, &num_chars),
+            _ => &num_chars,
         };
-        let fill_chars_needed = width - num_chars;
+        let fill_chars_needed = width.saturating_sub(num_chars);
         let fill_string = CFormatSpec::compute_fill_string(fill_char, fill_chars_needed);
 
         if !fill_string.is_empty() {
-            if self.flags.contains(CConversionFlags::LEFT_ADJUST) {
+            // Don't left-adjust if precision-filling: that will always be prepending 0s to %d
+            // arguments, the LEFT_ADJUST flag will be used by a later call to fill_string with
+            // the 0-filled string as the string param.
+            if !fill_with_precision && self.flags.contains(CConversionFlags::LEFT_ADJUST) {
                 format!("{}{}", string, fill_string)
             } else {
                 format!("{}{}", fill_string, string)
@@ -203,7 +212,7 @@ impl CFormatSpec {
             }
             _ => string,
         };
-        self.fill_string(string, ' ', None)
+        self.fill_string(string, ' ', None, false)
     }
 
     pub(crate) fn format_string(&self, string: String) -> String {
@@ -268,6 +277,8 @@ impl CFormatSpec {
             _ => self.flags.sign_string(),
         };
 
+        let padded_magnitude_string = self.fill_string(magnitude_string, '0', None, true);
+
         if self.flags.contains(CConversionFlags::ZERO_PAD) {
             let fill_char = if !self.flags.contains(CConversionFlags::LEFT_ADJUST) {
                 '0'
@@ -279,16 +290,18 @@ impl CFormatSpec {
                 "{}{}",
                 signed_prefix,
                 self.fill_string(
-                    magnitude_string,
+                    padded_magnitude_string,
                     fill_char,
-                    Some(signed_prefix.chars().count())
-                )
+                    Some(signed_prefix.chars().count()),
+                    false
+                ),
             )
         } else {
             self.fill_string(
-                format!("{}{}{}", sign_string, prefix, magnitude_string),
+                format!("{}{}{}", sign_string, prefix, padded_magnitude_string),
                 ' ',
                 None,
+                false,
             )
         }
     }
@@ -329,7 +342,12 @@ impl CFormatSpec {
                     CFormatCase::Uppercase => float_ops::Case::Upper,
                 };
                 let magnitude = num.abs();
-                float_ops::format_general(precision, magnitude, case)
+                float_ops::format_general(
+                    precision,
+                    magnitude,
+                    case,
+                    self.flags.contains(CConversionFlags::ALTERNATE_FORM),
+                )
             }
             _ => unreachable!(),
         };
@@ -346,11 +364,17 @@ impl CFormatSpec {
                 self.fill_string(
                     magnitude_string,
                     fill_char,
-                    Some(sign_string.chars().count())
+                    Some(sign_string.chars().count()),
+                    false
                 )
             )
         } else {
-            self.fill_string(format!("{}{}", sign_string, magnitude_string), ' ', None)
+            self.fill_string(
+                format!("{}{}", sign_string, magnitude_string),
+                ' ',
+                None,
+                false,
+            )
         };
 
         formatted
@@ -359,26 +383,15 @@ impl CFormatSpec {
     fn bytes_format(&self, vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Vec<u8>> {
         match &self.format_type {
             CFormatType::String(preconversor) => match preconversor {
+                // Unlike strings, %r and %a are identical for bytes: the behaviour corresponds to
+                // %a for strings (not %r)
                 CFormatPreconversor::Repr | CFormatPreconversor::Ascii => {
-                    let s = vm.to_repr(&obj)?;
-                    let s = self.format_string(s.as_str().to_owned());
-                    Ok(s.into_bytes())
+                    let b = builtins::ascii(obj, vm)?.into();
+                    Ok(b)
                 }
                 CFormatPreconversor::Str | CFormatPreconversor::Bytes => {
                     if let Ok(buffer) = PyBuffer::try_from_borrowed_object(vm, &obj) {
-                        let guard;
-                        let vec;
-                        let bytes = match buffer.as_contiguous() {
-                            Some(bytes) => {
-                                guard = bytes;
-                                &*guard
-                            }
-                            None => {
-                                vec = buffer.to_contiguous();
-                                vec.as_slice()
-                            }
-                        };
-                        Ok(self.format_bytes(bytes))
+                        Ok(buffer.contiguous_or_collect(|bytes| self.format_bytes(bytes)))
                     } else {
                         let bytes = vm
                             .get_special_method(obj, "__bytes__")?
@@ -432,43 +445,66 @@ impl CFormatSpec {
                 }
             },
             CFormatType::Float(_) => {
-                let value = ArgIntoFloat::try_from_object(vm, obj)?.to_f64();
+                let type_name = obj.class().name().to_string();
+                let value = ArgIntoFloat::try_from_object(vm, obj)
+                    .map_err(|e| {
+                        if e.isinstance(&vm.ctx.exceptions.type_error) {
+                            // formatfloat in bytesobject.c generates its own specific exception
+                            // text in this case, mirror it here.
+                            vm.new_type_error(format!("float argument required, not {}", type_name))
+                        } else {
+                            e
+                        }
+                    })?
+                    .to_f64();
                 Ok(self.format_float(value).into_bytes())
             }
             CFormatType::Character => {
                 if let Some(i) = obj.payload::<PyInt>() {
                     let ch = i
-                        .as_bigint()
-                        .to_u32()
-                        .and_then(std::char::from_u32)
-                        .ok_or_else(|| {
-                            vm.new_overflow_error("%c arg not in range(0x110000)".to_owned())
-                        })?;
+                        .try_to_primitive::<u8>(vm)
+                        .map_err(|_| vm.new_overflow_error("%c arg not in range(256)".to_owned()))?
+                        as char;
                     return Ok(self.format_char(ch).into_bytes());
                 }
-                if let Some(s) = obj.payload::<PyStr>() {
-                    if let Ok(ch) = s.as_str().chars().exactly_one() {
-                        return Ok(self.format_char(ch).into_bytes());
+                if let Some(b) = obj.payload::<PyBytes>() {
+                    if b.len() == 1 {
+                        return Ok(self.format_char(b.as_bytes()[0] as char).into_bytes());
+                    }
+                } else if let Some(ba) = obj.payload::<PyByteArray>() {
+                    let buf = ba.borrow_buf();
+                    if buf.len() == 1 {
+                        return Ok(self.format_char(buf[0] as char).into_bytes());
                     }
                 }
-                Err(vm.new_type_error("%c requires int or char".to_owned()))
+                Err(vm.new_type_error(
+                    "%c requires an integer in range(256) or a single byte".to_owned(),
+                ))
             }
         }
     }
 
-    fn string_format(&self, vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<String> {
+    fn string_format(
+        &self,
+        vm: &VirtualMachine,
+        obj: PyObjectRef,
+        idx: &usize,
+    ) -> PyResult<String> {
         match &self.format_type {
             CFormatType::String(preconversor) => {
                 let result = match preconversor {
-                    CFormatPreconversor::Str => vm.to_str(&obj)?,
-                    CFormatPreconversor::Repr | CFormatPreconversor::Ascii => vm.to_repr(&obj)?,
+                    CFormatPreconversor::Ascii => builtins::ascii(obj, vm)?.into(),
+                    CFormatPreconversor::Str => obj.str(vm)?.as_str().to_owned(),
+                    CFormatPreconversor::Repr => obj.repr(vm)?.as_str().to_owned(),
                     CFormatPreconversor::Bytes => {
-                        return Err(vm.new_value_error(
-                            "unsupported format character 'b' (0x62)".to_owned(),
-                        ));
+                        // idx is the position of the %, we want the position of the b
+                        return Err(vm.new_value_error(format!(
+                            "unsupported format character 'b' (0x62) at index {}",
+                            idx + 1
+                        )));
                     }
                 };
-                Ok(self.format_string(result.as_str().to_owned()))
+                Ok(self.format_string(result))
             }
             CFormatType::Number(number_type) => match number_type {
                 CNumberType::Decimal => match_class!(match &obj {
@@ -563,7 +599,7 @@ fn try_update_quantity_from_tuple<'a, I: Iterator<Item = &'a PyObjectRef>>(
         Some(CFormatQuantity::FromValuesTuple) => match elements.next() {
             Some(width_obj) => {
                 if let Some(i) = width_obj.payload::<PyInt>() {
-                    let i = i.try_to_primitive::<isize>(vm)? as usize;
+                    let i = i.try_to_primitive::<i32>(vm)?.abs() as usize;
                     *q = Some(CFormatQuantity::Amount(i));
                     Ok(())
                 } else {
@@ -656,7 +692,8 @@ impl CFormatBytes {
 
         let is_mapping = values_obj.class().has_attr("__getitem__")
             && !values_obj.isinstance(&vm.ctx.types.tuple_type)
-            && !values_obj.isinstance(&vm.ctx.types.str_type);
+            && !values_obj.isinstance(&vm.ctx.types.bytes_type)
+            && !values_obj.isinstance(&vm.ctx.types.bytearray_type);
 
         if num_specifiers == 0 {
             // literal only
@@ -674,7 +711,7 @@ impl CFormatBytes {
                 Ok(result)
             } else {
                 Err(vm.new_type_error(
-                    "not all arguments converted during string formatting".to_owned(),
+                    "not all arguments converted during bytes formatting".to_owned(),
                 ))
             };
         }
@@ -687,7 +724,7 @@ impl CFormatBytes {
                         CFormatPart::Literal(literal) => result.append(literal),
                         CFormatPart::Spec(spec) => {
                             let value = match &spec.mapping_key {
-                                Some(key) => values_obj.get_item(key, vm)?,
+                                Some(key) => values_obj.get_item(key.as_str(), vm)?,
                                 None => unreachable!(),
                             };
                             let mut part_result = spec.bytes_format(vm, value)?;
@@ -730,8 +767,7 @@ impl CFormatBytes {
 
         // check that all arguments were converted
         if value_iter.next().is_some() && !is_mapping {
-            Err(vm
-                .new_type_error("not all arguments converted during string formatting".to_owned()))
+            Err(vm.new_type_error("not all arguments converted during bytes formatting".to_owned()))
         } else {
             Ok(result)
         }
@@ -834,15 +870,15 @@ impl CFormatString {
         if mapping_required {
             // dict
             return if is_mapping {
-                for (_, part) in &self.parts {
+                for (idx, part) in &self.parts {
                     match part {
                         CFormatPart::Literal(literal) => result.push_str(literal),
                         CFormatPart::Spec(spec) => {
                             let value = match &spec.mapping_key {
-                                Some(key) => values_obj.get_item(key, vm)?,
+                                Some(key) => values_obj.get_item(key.as_str(), vm)?,
                                 None => unreachable!(),
                             };
-                            let part_result = spec.string_format(vm, value)?;
+                            let part_result = spec.string_format(vm, value, idx)?;
                             result.push_str(&part_result);
                         }
                     }
@@ -861,7 +897,7 @@ impl CFormatString {
         };
         let mut value_iter = values.iter();
 
-        for (_, part) in &mut self.parts {
+        for (idx, part) in &mut self.parts {
             match part {
                 CFormatPart::Literal(literal) => result.push_str(literal),
                 CFormatPart::Spec(spec) => {
@@ -874,7 +910,7 @@ impl CFormatString {
                             vm.new_type_error("not enough arguments for format string".to_owned())
                         ),
                     }?;
-                    let part_result = spec.string_format(vm, value)?;
+                    let part_result = spec.string_format(vm, value, idx)?;
                     result.push_str(&part_result);
                 }
             }
@@ -904,20 +940,20 @@ where
             return Ok(Some(CFormatQuantity::FromValuesTuple));
         }
         if let Some(i) = c.to_digit(10) {
-            let mut num = i as isize;
+            let mut num = i as i32;
             iter.next().unwrap();
             while let Some(&(index, c)) = iter.peek() {
                 if let Some(i) = c.into().to_digit(10) {
                     num = num
                         .checked_mul(10)
-                        .and_then(|num| num.checked_add(i as isize))
+                        .and_then(|num| num.checked_add(i as i32))
                         .ok_or((CFormatErrorType::IntTooBig, index))?;
                     iter.next().unwrap();
                 } else {
                     break;
                 }
             }
-            return Ok(Some(CFormatQuantity::Amount(num as usize)));
+            return Ok(Some(CFormatQuantity::Amount(num.abs() as usize)));
         }
     }
     Ok(None)

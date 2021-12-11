@@ -1,10 +1,9 @@
 use crate::{
     builtins::{PyBaseExceptionRef, PyStrRef},
     common::lock::PyMutex,
-    exceptions,
     frame::{ExecutionResult, FrameRef},
     protocol::PyIterReturn,
-    IdProtocol, PyObjectRef, PyResult, TypeProtocol, VirtualMachine,
+    IdProtocol, PyObject, PyObjectRef, PyResult, TypeProtocol, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
 
@@ -37,7 +36,7 @@ pub struct Coro {
     exception: PyMutex<Option<PyBaseExceptionRef>>, // exc_state
 }
 
-fn gen_name(gen: &PyObjectRef, vm: &VirtualMachine) -> &'static str {
+fn gen_name(gen: &PyObject, vm: &VirtualMachine) -> &'static str {
     let typ = gen.class();
     if typ.is(&vm.ctx.types.coroutine_type) {
         "coroutine"
@@ -68,7 +67,7 @@ impl Coro {
 
     fn run_with_context<F>(
         &self,
-        gen: &PyObjectRef,
+        gen: &PyObject,
         vm: &VirtualMachine,
         func: F,
     ) -> PyResult<ExecutionResult>
@@ -91,7 +90,7 @@ impl Coro {
 
     pub fn send(
         &self,
-        gen: &PyObjectRef,
+        gen: &PyObject,
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<PyIterReturn> {
@@ -133,21 +132,21 @@ impl Coro {
     }
     pub fn throw(
         &self,
-        gen: &PyObjectRef,
+        gen: &PyObject,
         exc_type: PyObjectRef,
         exc_val: PyObjectRef,
         exc_tb: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<PyIterReturn> {
         if self.closed.load() {
-            return Err(exceptions::normalize(exc_type, exc_val, exc_tb, vm)?);
+            return Err(vm.normalize_exception(exc_type, exc_val, exc_tb)?);
         }
         let result = self.run_with_context(gen, vm, |f| f.gen_throw(vm, exc_type, exc_val, exc_tb));
         self.maybe_close(&result);
         Ok(result?.into_iter_return(vm))
     }
 
-    pub fn close(&self, gen: &PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+    pub fn close(&self, gen: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
         if self.closed.load() {
             return Ok(());
         }
@@ -184,7 +183,7 @@ impl Coro {
     pub fn set_name(&self, name: PyStrRef) {
         *self.name.lock() = name;
     }
-    pub fn repr(&self, gen: &PyObjectRef, id: usize, vm: &VirtualMachine) -> String {
+    pub fn repr(&self, gen: &PyObject, id: usize, vm: &VirtualMachine) -> String {
         format!(
             "<{} object {} at {:#x}>",
             gen_name(gen, vm),

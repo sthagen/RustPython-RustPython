@@ -1,18 +1,16 @@
 //! Implementation of the _thread module
-
+#[cfg_attr(target_os = "wasi", allow(unused_imports))]
 pub(crate) use _thread::{make_module, RawRMutex};
 
 #[pymodule]
 pub(crate) mod _thread {
     use crate::{
         builtins::{PyDictRef, PyStrRef, PyTupleRef, PyTypeRef},
-        exceptions,
         function::{ArgCallable, FuncArgs, IntoPyException, KwArgs, OptionalArg},
         py_io,
-        slots::{SlotConstructor, SlotGetattro, SlotSetattro},
+        types::{Constructor, GetAttr, SetAttr},
         utils::Either,
-        IdProtocol, ItemProtocol, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
-        VirtualMachine,
+        IdProtocol, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol, VirtualMachine,
     };
     use parking_lot::{
         lock_api::{RawMutex as RawMutexT, RawMutexTimed, RawReentrantMutex},
@@ -107,7 +105,7 @@ pub(crate) mod _thread {
         }
     }
 
-    #[pyimpl(with(SlotConstructor))]
+    #[pyimpl(with(Constructor))]
     impl Lock {
         #[pymethod]
         #[pymethod(name = "acquire_lock")]
@@ -142,7 +140,7 @@ pub(crate) mod _thread {
         }
     }
 
-    impl SlotConstructor for Lock {
+    impl Constructor for Lock {
         type Args = FuncArgs;
         fn py_new(_cls: PyTypeRef, _args: Self::Args, vm: &VirtualMachine) -> PyResult {
             Err(vm.new_type_error("cannot create '_thread.lock' instances".to_owned()))
@@ -261,12 +259,12 @@ pub(crate) mod _thread {
                 // TODO: sys.unraisablehook
                 let stderr = std::io::stderr();
                 let mut stderr = py_io::IoWriter(stderr.lock());
-                let repr = vm.to_repr(func.as_ref()).ok();
+                let repr = func.as_ref().repr(vm).ok();
                 let repr = repr
                     .as_ref()
                     .map_or("<object repr() failed>", |s| s.as_str());
                 writeln!(*stderr, "Exception ignored in thread started by: {}", repr)
-                    .and_then(|()| exceptions::write_exception(&mut stderr, vm, &exc))
+                    .and_then(|()| vm.write_exception(&mut stderr, &exc))
                     .ok();
             }
         }
@@ -313,7 +311,7 @@ pub(crate) mod _thread {
         data: ThreadLocal<PyDictRef>,
     }
 
-    #[pyimpl(with(SlotGetattro, SlotSetattro), flags(BASETYPE))]
+    #[pyimpl(with(GetAttr, SetAttr), flags(BASETYPE))]
     impl Local {
         fn ldict(&self, vm: &VirtualMachine) -> PyDictRef {
             self.data.get_or(|| vm.ctx.new_dict()).clone()
@@ -328,7 +326,7 @@ pub(crate) mod _thread {
         }
     }
 
-    impl SlotGetattro for Local {
+    impl GetAttr for Local {
         fn getattro(zelf: PyRef<Self>, attr: PyStrRef, vm: &VirtualMachine) -> PyResult {
             let ldict = zelf.ldict(vm);
             if attr.as_str() == "__dict__" {
@@ -346,9 +344,9 @@ pub(crate) mod _thread {
         }
     }
 
-    impl SlotSetattro for Local {
+    impl SetAttr for Local {
         fn setattro(
-            zelf: &PyRef<Self>,
+            zelf: &crate::PyObjectView<Self>,
             attr: PyStrRef,
             value: Option<PyObjectRef>,
             vm: &VirtualMachine,

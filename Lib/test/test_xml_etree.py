@@ -24,7 +24,9 @@ import weakref
 from functools import partial
 from itertools import product, islice
 from test import support
-from test.support import TESTFN, findfile, import_fresh_module, gc_collect, swap_attr
+from test.support import findfile, gc_collect, swap_attr, os_helper
+from test.support.os_helper import TESTFN
+from test.support.import_helper import import_fresh_module
 
 # pyET is the pure-Python implementation.
 #
@@ -123,7 +125,7 @@ class ModuleTest(unittest.TestCase):
 
     def test_all(self):
         names = ("xml.etree.ElementTree", "_elementtree")
-        support.check__all__(self, ET, names, blacklist=("HTML_EMPTY",))
+        support.check__all__(self, ET, names, not_exported=("HTML_EMPTY",))
 
 
 def serialize(elem, to_string=True, encoding='unicode', **options):
@@ -649,7 +651,7 @@ class ElementTreeTest(unittest.TestCase):
         self.assertEqual(str(cm.exception),
                 'junk after document element: line 1, column 12')
 
-        self.addCleanup(support.unlink, TESTFN)
+        self.addCleanup(os_helper.unlink, TESTFN)
         with open(TESTFN, "wb") as f:
             f.write(b"<document />junk")
         it = iterparse(TESTFN)
@@ -2344,8 +2346,6 @@ class BasicElementTest(ElementTestCase, unittest.TestCase):
         gc_collect()
         self.assertIsNone(wref())
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_weakref(self):
         flag = False
         def wref_cb(w):
@@ -2515,7 +2515,6 @@ class BadElementTest(ElementTestCase, unittest.TestCase):
         e.append(ET.Element('child'))
         e[0:10:X()]  # shouldn't crash
 
-    @unittest.skip("TODO: RUSTPYTHON, hangs")
     def test_ass_subscr(self):
         # Issue #27863
         class X:
@@ -3029,8 +3028,6 @@ class ElementIterTest(unittest.TestCase):
         self.assertEqual(summarize_list(doc.getiterator(None)), all_tags)
         self.assertEqual(summarize_list(doc.getiterator('*')), all_tags)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_copy(self):
         a = ET.Element('a')
         it = a.iter()
@@ -3647,7 +3644,7 @@ class IOTest(unittest.TestCase):
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
     def test_write_to_filename(self):
-        self.addCleanup(support.unlink, TESTFN)
+        self.addCleanup(os_helper.unlink, TESTFN)
         tree = ET.ElementTree(ET.XML('''<site />'''))
         tree.write(TESTFN)
         with open(TESTFN, 'rb') as f:
@@ -3656,7 +3653,7 @@ class IOTest(unittest.TestCase):
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
     def test_write_to_text_file(self):
-        self.addCleanup(support.unlink, TESTFN)
+        self.addCleanup(os_helper.unlink, TESTFN)
         tree = ET.ElementTree(ET.XML('''<site />'''))
         with open(TESTFN, 'w', encoding='utf-8') as f:
             tree.write(f, encoding='unicode')
@@ -3667,7 +3664,7 @@ class IOTest(unittest.TestCase):
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
     def test_write_to_binary_file(self):
-        self.addCleanup(support.unlink, TESTFN)
+        self.addCleanup(os_helper.unlink, TESTFN)
         tree = ET.ElementTree(ET.XML('''<site />'''))
         with open(TESTFN, 'wb') as f:
             tree.write(f)
@@ -3678,7 +3675,7 @@ class IOTest(unittest.TestCase):
     # TODO: RUSTPYTHON
     @unittest.expectedFailure
     def test_write_to_binary_file_with_bom(self):
-        self.addCleanup(support.unlink, TESTFN)
+        self.addCleanup(os_helper.unlink, TESTFN)
         tree = ET.ElementTree(ET.XML('''<site />'''))
         # test BOM writing to buffered file
         with open(TESTFN, 'wb') as f:

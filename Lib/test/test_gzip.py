@@ -11,10 +11,10 @@ import sys
 import unittest
 from subprocess import PIPE, Popen
 from test import support
-from test.support import _4G, bigmemtest
+from test.support import _4G, bigmemtest, os_helper, import_helper
 from test.support.script_helper import assert_python_ok, assert_python_failure
 
-gzip = support.import_module('gzip')
+gzip = import_helper.import_module('gzip')
 
 data1 = b"""  int length=DEFAULTALLOC, err = Z_OK;
   PyObject *RetVal;
@@ -29,7 +29,7 @@ data2 = b"""/* zlibmodule.c -- gzip-compatible data compression */
 """
 
 
-TEMPDIR = os.path.abspath(support.TESTFN) + '-gzdir'
+TEMPDIR = os.path.abspath(os_helper.TESTFN) + '-gzdir'
 
 
 class UnseekableIO(io.BytesIO):
@@ -44,13 +44,13 @@ class UnseekableIO(io.BytesIO):
 
 
 class BaseTest(unittest.TestCase):
-    filename = support.TESTFN
+    filename = os_helper.TESTFN
 
     def setUp(self):
-        support.unlink(self.filename)
+        os_helper.unlink(self.filename)
 
     def tearDown(self):
-        support.unlink(self.filename)
+        os_helper.unlink(self.filename)
 
 
 class TestGzip(BaseTest):
@@ -91,7 +91,6 @@ class TestGzip(BaseTest):
     # The following test_write_xy methods test that write accepts
     # the corresponding bytes-like object type as input
     # and that the data written equals bytes(xy) in all cases.
-    @unittest.skip("TODO: RUSTPYTHON (memoryview.cast doesn't support shape= arg)")
     def test_write_memoryview(self):
         self.write_and_read_back(memoryview(data1 * 50))
         m = memoryview(bytes(range(256)))
@@ -287,7 +286,7 @@ class TestGzip(BaseTest):
         self.test_write()
         with gzip.GzipFile(self.filename, 'r') as f:
             self.assertEqual(f.myfileobj.mode, 'rb')
-        support.unlink(self.filename)
+        os_helper.unlink(self.filename)
         with gzip.GzipFile(self.filename, 'x') as f:
             self.assertEqual(f.myfileobj.mode, 'xb')
 
@@ -488,7 +487,7 @@ class TestGzip(BaseTest):
                     self.assertEqual(g.mode, gzip.READ)
         for mode in "wb", "ab", "xb":
             if "x" in mode:
-                support.unlink(self.filename)
+                os_helper.unlink(self.filename)
             with open(self.filename, mode) as f:
                 with gzip.GzipFile(fileobj=f) as g:
                     self.assertEqual(g.mode, gzip.WRITE)
@@ -600,7 +599,7 @@ class TestOpen(BaseTest):
 
         with self.assertRaises(FileExistsError):
             gzip.open(self.filename, "xb")
-        support.unlink(self.filename)
+        os_helper.unlink(self.filename)
         with gzip.open(self.filename, "xb") as f:
             f.write(uncompressed)
         with open(self.filename, "rb") as f:
@@ -637,7 +636,7 @@ class TestOpen(BaseTest):
 
         with self.assertRaises(FileExistsError):
             gzip.open(self.filename, "x")
-        support.unlink(self.filename)
+        os_helper.unlink(self.filename)
         with gzip.open(self.filename, "x") as f:
             f.write(uncompressed)
         with open(self.filename, "rb") as f:
@@ -687,7 +686,6 @@ class TestOpen(BaseTest):
         with self.assertRaises(ValueError):
             gzip.open(self.filename, "rb", newline="\n")
 
-    @unittest.skip("TODO: RUSTPYTHON (io.TextIOWrapper doesn't support non-UTF8)")
     def test_encoding(self):
         # Test non-default encoding.
         uncompressed = data1.decode("ascii") * 50
@@ -700,8 +698,11 @@ class TestOpen(BaseTest):
         with gzip.open(self.filename, "rt", encoding="utf-16") as f:
             self.assertEqual(f.read(), uncompressed)
 
+    # TODO: RUSTPYTHON
+    if sys.platform == "win32":
+        test_encoding = unittest.expectedFailure(test_encoding)
 
-    @unittest.skip("TODO: RUSTPYTHON (io.TextIOWrapper doesn't support errors= arg)")
+
     def test_encoding_error_handler(self):
         # Test with non-default encoding error handler.
         with gzip.open(self.filename, "wb") as f:
@@ -710,7 +711,8 @@ class TestOpen(BaseTest):
                 as f:
             self.assertEqual(f.read(), "foobar")
 
-    @unittest.skip("TODO: RUSTPYTHON (io.TextIOWrapper doesn't respect newline=)")
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
     def test_newline(self):
         # Test with explicit newline (universal newline mode disabled).
         uncompressed = data1.decode("ascii") * 50
@@ -728,7 +730,7 @@ def create_and_remove_directory(directory):
             try:
                 return function(*args, **kwargs)
             finally:
-                support.rmtree(directory)
+                os_helper.rmtree(directory)
         return wrapper
     return decorator
 

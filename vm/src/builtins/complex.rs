@@ -1,11 +1,11 @@
 use super::{float, PyStr, PyTypeRef};
 use crate::{
     function::{IntoPyObject, OptionalArg, OptionalOption},
-    slots::{Comparable, Hashable, PyComparisonOp, SlotConstructor},
+    types::{Comparable, Constructor, Hashable, PyComparisonOp},
     IdProtocol,
     PyArithmeticValue::{self, *},
-    PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
-    VirtualMachine,
+    PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
+    TypeProtocol, VirtualMachine,
 };
 use num_complex::Complex64;
 use num_traits::Zero;
@@ -73,7 +73,7 @@ pub fn init(context: &PyContext) {
     PyComplex::extend_class(context, &context.types.complex_type);
 }
 
-fn to_op_complex(value: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<Complex64>> {
+fn to_op_complex(value: &PyObject, vm: &VirtualMachine) -> PyResult<Option<Complex64>> {
     let r = if let Some(complex) = value.payload_if_subclass::<PyComplex>(vm) {
         Some(complex.value)
     } else {
@@ -110,7 +110,7 @@ fn inner_pow(v1: Complex64, v2: Complex64, vm: &VirtualMachine) -> PyResult<Comp
     }
 }
 
-impl SlotConstructor for PyComplex {
+impl Constructor for PyComplex {
     type Args = ComplexArgs;
 
     fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
@@ -196,7 +196,7 @@ impl PyComplex {
     }
 }
 
-#[pyimpl(flags(BASETYPE), with(Comparable, Hashable, SlotConstructor))]
+#[pyimpl(flags(BASETYPE), with(Comparable, Hashable, Constructor))]
 impl PyComplex {
     #[pymethod(magic)]
     fn complex(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyRef<PyComplex> {
@@ -340,6 +340,8 @@ impl PyComplex {
 
     #[pymethod(magic)]
     fn repr(&self) -> String {
+        // TODO: when you fix this, move it to rustpython_common::complex::repr and update
+        //       ast/src/unparse.rs + impl Display for Constant in ast/src/constant.rs
         let Complex64 { re, im } = self.value;
         // integer => drop ., fractional => float_ops
         let mut im_part = if im.fract() == 0.0 {
@@ -407,8 +409,8 @@ impl PyComplex {
 
 impl Comparable for PyComplex {
     fn cmp(
-        zelf: &PyRef<Self>,
-        other: &PyObjectRef,
+        zelf: &crate::PyObjectView<Self>,
+        other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<PyComparisonValue> {
@@ -428,7 +430,8 @@ impl Comparable for PyComplex {
 }
 
 impl Hashable for PyComplex {
-    fn hash(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
+    #[inline]
+    fn hash(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
         Ok(hash::hash_complex(&zelf.value))
     }
 }

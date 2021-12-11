@@ -1,10 +1,10 @@
-use super::{IterStatus, PositionIterInternal, PyIntRef, PyTupleRef, PyTypeRef};
+use super::{IterStatus, PositionIterInternal, PyGenericAlias, PyIntRef, PyTupleRef, PyTypeRef};
 use crate::common::lock::{PyMutex, PyRwLock};
 use crate::{
     function::{IntoPyObject, OptionalArg},
     protocol::{PyIter, PyIterReturn},
-    slots::{IteratorIterable, SlotConstructor, SlotIterator},
-    ItemProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+    types::{Constructor, IterNext, IterNextIterable},
+    PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol, VirtualMachine,
 };
 use num_bigint::BigInt;
 use num_traits::Zero;
@@ -29,7 +29,7 @@ pub struct EnumerateArgs {
     start: OptionalArg<PyIntRef>,
 }
 
-impl SlotConstructor for PyEnumerate {
+impl Constructor for PyEnumerate {
     type Args = EnumerateArgs;
 
     fn py_new(
@@ -46,12 +46,24 @@ impl SlotConstructor for PyEnumerate {
     }
 }
 
-#[pyimpl(with(SlotIterator, SlotConstructor), flags(BASETYPE))]
-impl PyEnumerate {}
+#[pyimpl(with(IterNext, Constructor), flags(BASETYPE))]
+impl PyEnumerate {
+    #[pyclassmethod(magic)]
+    fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
+        PyGenericAlias::new(cls, args, vm)
+    }
+    #[pymethod(magic)]
+    fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyIter, BigInt)) {
+        (
+            zelf.clone_class(),
+            (zelf.iterator.clone(), zelf.counter.read().clone()),
+        )
+    }
+}
 
-impl IteratorIterable for PyEnumerate {}
-impl SlotIterator for PyEnumerate {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl IterNextIterable for PyEnumerate {}
+impl IterNext for PyEnumerate {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         let next_obj = match zelf.iterator.next(vm)? {
             PyIterReturn::StopIteration(v) => return Ok(PyIterReturn::StopIteration(v)),
             PyIterReturn::Return(obj) => obj,
@@ -75,7 +87,7 @@ impl PyValue for PyReverseSequenceIterator {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(IterNext))]
 impl PyReverseSequenceIterator {
     pub fn new(obj: PyObjectRef, len: usize) -> Self {
         let position = len.saturating_sub(1);
@@ -88,7 +100,7 @@ impl PyReverseSequenceIterator {
     fn length_hint(&self, vm: &VirtualMachine) -> PyResult<usize> {
         let internal = self.internal.lock();
         if let IterStatus::Active(obj) = &internal.status {
-            if internal.position <= vm.obj_len(obj)? {
+            if internal.position <= obj.length(vm)? {
                 return Ok(internal.position + 1);
             }
         }
@@ -108,9 +120,9 @@ impl PyReverseSequenceIterator {
     }
 }
 
-impl IteratorIterable for PyReverseSequenceIterator {}
-impl SlotIterator for PyReverseSequenceIterator {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl IterNextIterable for PyReverseSequenceIterator {}
+impl IterNext for PyReverseSequenceIterator {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.internal
             .lock()
             .rev_next(|obj, pos| PyIterReturn::from_getitem_result(obj.get_item(pos, vm), vm))

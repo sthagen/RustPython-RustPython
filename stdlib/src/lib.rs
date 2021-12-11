@@ -11,10 +11,9 @@ mod bisect;
 mod cmath;
 mod csv;
 mod dis;
+mod gc;
 mod hashlib;
 mod json;
-#[cfg(feature = "rustpython-parser")]
-mod keyword;
 mod math;
 mod platform;
 mod pyexpat;
@@ -51,13 +50,10 @@ mod termios;
 use rustpython_common as common;
 use rustpython_vm as vm;
 
-use crate::vm::{
-    builtins,
-    stdlib::{StdlibInitFunc, StdlibMap},
-};
+use crate::vm::{builtins, stdlib::StdlibInitFunc};
 use std::borrow::Cow;
 
-pub fn get_module_inits() -> StdlibMap {
+pub fn get_module_inits() -> impl Iterator<Item = (Cow<'static, str>, StdlibInitFunc)> {
     macro_rules! modules {
         {
             $(
@@ -65,12 +61,12 @@ pub fn get_module_inits() -> StdlibMap {
                 { $( $key:expr => $val:expr),* $(,)? }
             )*
         } => {{
-            let iter = std::array::IntoIter::new([
+            [
                 $(
                     $(#[cfg($cfg)] (Cow::<'static, str>::from($key), Box::new($val) as StdlibInitFunc),)*
                 )*
-            ]);
-            iter.collect()
+            ]
+            .into_iter()
         }};
     }
     modules! {
@@ -81,7 +77,8 @@ pub fn get_module_inits() -> StdlibMap {
             "_bisect" => bisect::make_module,
             "cmath" => cmath::make_module,
             "_csv" => csv::make_module,
-            "dis" => dis::make_module,
+            "_dis" => dis::make_module,
+            "gc" => gc::make_module,
             "hashlib" => hashlib::make_module,
             "_json" => json::make_module,
             "math" => math::make_module,
@@ -96,10 +93,6 @@ pub fn get_module_inits() -> StdlibMap {
         #[cfg(feature = "rustpython-ast")]
         {
             "_ast" => ast::make_module,
-        }
-        #[cfg(feature = "rustpython-parser")]
-        {
-            "keyword" => keyword::make_module,
         }
         #[cfg(any(unix, target_os = "wasi"))]
         {

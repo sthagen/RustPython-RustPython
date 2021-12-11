@@ -14,11 +14,11 @@ import pickle
 import random
 import sys
 import unittest
-from test import support
 
 from decimal import Decimal
 from fractions import Fraction
 from test import support
+from test.support import import_helper
 
 
 # Module to be tested.
@@ -179,8 +179,8 @@ class _DoNothing:
 # We prefer this for testing numeric values that may not be exactly equal,
 # and avoid using TestCase.assertAlmostEqual, because it sucks :-)
 
-py_statistics = support.import_fresh_module('statistics', blocked=['_statistics'])
-c_statistics = support.import_fresh_module('statistics', fresh=['_statistics'])
+py_statistics = import_helper.import_fresh_module('statistics', blocked=['_statistics'])
+c_statistics = import_helper.import_fresh_module('statistics', fresh=['_statistics'])
 
 
 class TestModules(unittest.TestCase):
@@ -2133,8 +2133,6 @@ class TestGeometricMean(unittest.TestCase):
         self.assertTrue(math.isclose(small_gm, 36.0 * small))
         self.assertNotEqual(small_gm, 0.0)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_error_cases(self):
         geometric_mean = statistics.geometric_mean
         StatisticsError = statistics.StatisticsError
@@ -2155,8 +2153,6 @@ class TestGeometricMean(unittest.TestCase):
         with self.assertRaises(TypeError):
             geometric_mean([10, 20, 60], 70)        # too many arguments
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_special_values(self):
         # Rules for special values are inherited from math.fsum()
         geometric_mean = statistics.geometric_mean

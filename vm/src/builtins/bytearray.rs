@@ -3,53 +3,43 @@ use super::{
     PositionIterInternal, PyBytes, PyBytesRef, PyDictRef, PyIntRef, PyStrRef, PyTuple, PyTupleRef,
     PyTypeRef,
 };
-use crate::common::{
-    borrow::{BorrowedValue, BorrowedValueMut},
-    lock::{
-        PyMappedRwLockReadGuard, PyMappedRwLockWriteGuard, PyMutex, PyRwLock, PyRwLockReadGuard,
-        PyRwLockWriteGuard,
-    },
-};
 use crate::{
     anystr::{self, AnyStr},
+    builtins::PyType,
     bytesinner::{
         bytes_decode, bytes_from_object, value_from_object, ByteInnerFindOptions,
         ByteInnerNewOptions, ByteInnerPaddingOptions, ByteInnerSplitOptions,
         ByteInnerTranslateOptions, DecodeArgs, PyBytesInner,
     },
+    common::{
+        atomic::{AtomicUsize, Ordering},
+        lock::{
+            PyMappedRwLockReadGuard, PyMappedRwLockWriteGuard, PyMutex, PyRwLock,
+            PyRwLockReadGuard, PyRwLockWriteGuard,
+        },
+    },
     function::{ArgBytesLike, ArgIterable, FuncArgs, IntoPyObject, OptionalArg, OptionalOption},
     protocol::{
-        BufferInternal, BufferOptions, BufferResizeGuard, PyBuffer, PyIterReturn, PyMappingMethods,
+        BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn,
+        PyMappingMethods,
     },
     sliceable::{PySliceableSequence, PySliceableSequenceMut, SequenceIndex},
-    slots::{
-        AsBuffer, AsMapping, Callable, Comparable, Hashable, Iterable, IteratorIterable,
-        PyComparisonOp, SlotIterator, Unhashable,
+    types::{
+        AsBuffer, AsMapping, Callable, Comparable, Constructor, Hashable, IterNext,
+        IterNextIterable, Iterable, PyComparisonOp, Unconstructible, Unhashable,
     },
     utils::Either,
-    IdProtocol, PyClassDef, PyClassImpl, PyComparisonValue, PyContext, PyObjectRef, PyRef,
-    PyResult, PyValue, TypeProtocol, VirtualMachine,
+    IdProtocol, PyClassDef, PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef,
+    PyObjectView, PyObjectWrap, PyRef, PyResult, PyValue, TypeProtocol, VirtualMachine,
 };
 use bstr::ByteSlice;
-use crossbeam_utils::atomic::AtomicCell;
 use std::mem::size_of;
 
-/// "bytearray(iterable_of_ints) -> bytearray\n\
-///  bytearray(string, encoding[, errors]) -> bytearray\n\
-///  bytearray(bytes_or_buffer) -> mutable copy of bytes_or_buffer\n\
-///  bytearray(int) -> bytes array of size given by the parameter initialized with null bytes\n\
-///  bytearray() -> empty bytes array\n\n\
-///  Construct a mutable bytearray object from:\n  \
-///  - an iterable yielding integers in range(256)\n  \
-///  - a text string encoded using the specified encoding\n  \
-///  - a bytes or a buffer object\n  \
-///  - any object implementing the buffer API.\n  \
-///  - an integer";
 #[pyclass(module = false, name = "bytearray")]
 #[derive(Debug, Default)]
 pub struct PyByteArray {
     inner: PyRwLock<PyBytesInner>,
-    exports: AtomicCell<usize>,
+    exports: AtomicUsize,
 }
 
 pub type PyByteArrayRef = PyRef<PyByteArray>;
@@ -62,7 +52,7 @@ impl PyByteArray {
     fn from_inner(inner: PyBytesInner) -> Self {
         PyByteArray {
             inner: PyRwLock::new(inner),
-            exports: AtomicCell::new(0),
+            exports: AtomicUsize::new(0),
         }
     }
 
@@ -115,6 +105,12 @@ impl PyByteArray {
         let mut inner = options.get_bytearray_inner(vm)?;
         std::mem::swap(&mut *self.inner_mut(), &mut inner);
         Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    #[pyproperty]
+    fn exports(&self) -> usize {
+        self.exports.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -182,16 +178,17 @@ impl PyByteArray {
                 }
             }
             SequenceIndex::Slice(slice) => {
+                let slice = slice.to_saturated(vm)?;
                 let items = if zelf.is(&value) {
                     zelf.borrow_buf().to_vec()
                 } else {
                     bytes_from_object(vm, &value)?
                 };
                 if let Ok(mut w) = zelf.try_resizable(vm) {
-                    w.elements.set_slice_items(vm, &slice, items.as_slice())
+                    w.elements.set_slice_items(vm, slice, items.as_slice())
                 } else {
                     zelf.borrow_buf_mut()
-                        .set_slice_items_no_resize(vm, &slice, items.as_slice())
+                        .set_slice_items_no_resize(vm, slice, items.as_slice())
                 }
             }
         }
@@ -212,9 +209,9 @@ impl PyByteArray {
 
     #[pymethod(magic)]
     pub fn delitem(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
-        let elements = &mut self.try_resizable(vm)?.elements;
         match SequenceIndex::try_from_object_for(vm, needle, Self::NAME)? {
             SequenceIndex::Int(int) => {
+                let elements = &mut self.try_resizable(vm)?.elements;
                 if let Some(idx) = elements.wrap_index(int) {
                     elements.remove(idx);
                     Ok(())
@@ -222,13 +219,17 @@ impl PyByteArray {
                     Err(vm.new_index_error("index out of range".to_owned()))
                 }
             }
-            SequenceIndex::Slice(slice) => elements.delete_slice(vm, &slice),
+            SequenceIndex::Slice(slice) => {
+                let slice = slice.to_saturated(vm)?;
+                let elements = &mut self.try_resizable(vm)?.elements;
+                elements.delete_slice(vm, slice)
+            }
         }
     }
 
     #[pymethod]
-    fn maketrans(from: PyBytesInner, to: PyBytesInner) -> PyResult<Vec<u8>> {
-        PyBytesInner::maketrans(from, to)
+    fn maketrans(from: PyBytesInner, to: PyBytesInner, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        PyBytesInner::maketrans(from, to, vm)
     }
 
     #[pymethod]
@@ -284,7 +285,7 @@ impl PyByteArray {
         }
     }
 
-    fn irepeat(zelf: &PyRef<Self>, n: usize, vm: &VirtualMachine) -> PyResult<()> {
+    fn irepeat(zelf: &crate::PyObjectView<Self>, n: isize, vm: &VirtualMachine) -> PyResult<()> {
         if n == 1 {
             return Ok(());
         }
@@ -299,19 +300,8 @@ impl PyByteArray {
                 };
             }
         };
-        let elements = &mut w.elements;
 
-        if n == 0 {
-            elements.clear();
-        } else if n != 1 {
-            let old = elements.clone();
-
-            elements.reserve((n - 1) * old.len());
-            for _ in 1..n {
-                elements.extend(&old);
-            }
-        }
-        Ok(())
+        w.imul(n, vm)
     }
 
     #[pymethod]
@@ -388,7 +378,7 @@ impl PyByteArray {
     fn fromhex(cls: PyTypeRef, string: PyStrRef, vm: &VirtualMachine) -> PyResult {
         let bytes = PyBytesInner::fromhex(string.as_str(), vm)?;
         let bytes = vm.ctx.new_bytes(bytes);
-        Callable::call(&cls, vec![bytes.into()].into(), vm)
+        PyType::call(&cls, vec![bytes.into()].into(), vm)
     }
 
     #[pymethod]
@@ -430,8 +420,14 @@ impl PyByteArray {
 
     #[pymethod]
     fn endswith(&self, options: anystr::StartsEndsWithArgs, vm: &VirtualMachine) -> PyResult<bool> {
-        self.borrow_buf().py_startsendswith(
-            options,
+        let borrowed = self.borrow_buf();
+        let (affix, substr) =
+            match options.prepare(&*borrowed, borrowed.len(), |s, r| s.get_bytes(r)) {
+                Some(x) => x,
+                None => return Ok(false),
+            };
+        substr.py_startsendswith(
+            affix,
             "endswith",
             "bytes",
             |s, x: &PyBytesInner| s.ends_with(&x.elements[..]),
@@ -445,8 +441,14 @@ impl PyByteArray {
         options: anystr::StartsEndsWithArgs,
         vm: &VirtualMachine,
     ) -> PyResult<bool> {
-        self.borrow_buf().py_startsendswith(
-            options,
+        let borrowed = self.borrow_buf();
+        let (affix, substr) =
+            match options.prepare(&*borrowed, borrowed.len(), |s, r| s.get_bytes(r)) {
+                Some(x) => x,
+                None => return Ok(false),
+            };
+        substr.py_startsendswith(
+            affix,
             "startswith",
             "bytes",
             |s, x: &PyBytesInner| s.starts_with(&x.elements[..]),
@@ -622,14 +624,13 @@ impl PyByteArray {
     #[pymethod(name = "__rmul__")]
     #[pymethod(magic)]
     fn mul(&self, value: isize, vm: &VirtualMachine) -> PyResult<Self> {
-        vm.check_repeat_or_memory_error(self.len(), value)
-            .map(|value| self.inner().repeat(value).into())
+        self.inner().mul(value, vm).map(|x| x.into())
     }
 
     #[pymethod(magic)]
     fn imul(zelf: PyRef<Self>, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        vm.check_repeat_or_memory_error(zelf.len(), value)
-            .and_then(|value| Self::irepeat(&zelf, value, vm).map(|_| zelf))
+        Self::irepeat(&zelf, value, vm)?;
+        Ok(zelf)
     }
 
     #[pymethod(name = "__mod__")]
@@ -676,10 +677,27 @@ impl PyByteArray {
     }
 }
 
+impl PyByteArray {
+    const MAPPING_METHODS: PyMappingMethods = PyMappingMethods {
+        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
+        subscript: Some(|mapping, needle, vm| {
+            Self::mapping_downcast(mapping).getitem(needle.to_owned(), vm)
+        }),
+        ass_subscript: Some(|mapping, needle, value, vm| {
+            let zelf = Self::mapping_downcast(mapping);
+            if let Some(value) = value {
+                Self::setitem(zelf.to_owned(), needle.to_owned(), value, vm)
+            } else {
+                zelf.delitem(needle.to_owned(), vm)
+            }
+        }),
+    };
+}
+
 impl Comparable for PyByteArray {
     fn cmp(
-        zelf: &PyRef<Self>,
-        other: &PyObjectRef,
+        zelf: &crate::PyObjectView<Self>,
+        other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<PyComparisonValue> {
@@ -690,36 +708,35 @@ impl Comparable for PyByteArray {
     }
 }
 
+static BUFFER_METHODS: BufferMethods = BufferMethods {
+    obj_bytes: |buffer| buffer.obj_as::<PyByteArray>().borrow_buf().into(),
+    obj_bytes_mut: |buffer| {
+        PyMappedRwLockWriteGuard::map(buffer.obj_as::<PyByteArray>().borrow_buf_mut(), |x| {
+            x.as_mut_slice()
+        })
+        .into()
+    },
+    release: |buffer| {
+        buffer
+            .obj_as::<PyByteArray>()
+            .exports
+            .fetch_sub(1, Ordering::Release);
+    },
+    retain: |buffer| {
+        buffer
+            .obj_as::<PyByteArray>()
+            .exports
+            .fetch_add(1, Ordering::Release);
+    },
+};
+
 impl AsBuffer for PyByteArray {
-    fn as_buffer(zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<PyBuffer> {
-        let buffer = PyBuffer::new(
-            zelf.as_object().clone(),
-            zelf.clone(),
-            BufferOptions {
-                readonly: false,
-                len: zelf.len(),
-                ..Default::default()
-            },
-        );
-        Ok(buffer)
-    }
-}
-
-impl BufferInternal for PyRef<PyByteArray> {
-    fn obj_bytes(&self) -> BorrowedValue<[u8]> {
-        self.borrow_buf().into()
-    }
-
-    fn obj_bytes_mut(&self) -> BorrowedValueMut<[u8]> {
-        PyRwLockWriteGuard::map(self.inner_mut(), |inner| &mut *inner.elements).into()
-    }
-
-    fn release(&self) {
-        self.exports.fetch_sub(1);
-    }
-
-    fn retain(&self) {
-        self.exports.fetch_add(1);
+    fn as_buffer(zelf: &PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<PyBuffer> {
+        Ok(PyBuffer::new(
+            zelf.to_owned().into_object(),
+            BufferDescriptor::simple(zelf.len(), false),
+            &BUFFER_METHODS,
+        ))
     }
 }
 
@@ -728,7 +745,7 @@ impl<'a> BufferResizeGuard<'a> for PyByteArray {
 
     fn try_resizable(&'a self, vm: &VirtualMachine) -> PyResult<Self::Resizable> {
         let w = self.inner.upgradable_read();
-        if self.exports.load() == 0 {
+        if self.exports.load(Ordering::SeqCst) == 0 {
             Ok(parking_lot::lock_api::RwLockUpgradableReadGuard::upgrade(w))
         } else {
             Err(vm
@@ -738,37 +755,8 @@ impl<'a> BufferResizeGuard<'a> for PyByteArray {
 }
 
 impl AsMapping for PyByteArray {
-    fn as_mapping(_zelf: &PyRef<Self>, _vm: &VirtualMachine) -> PyResult<PyMappingMethods> {
-        Ok(PyMappingMethods {
-            length: Some(Self::length),
-            subscript: Some(Self::subscript),
-            ass_subscript: Some(Self::ass_subscript),
-        })
-    }
-
-    #[inline]
-    fn length(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
-        Self::downcast_ref(&zelf, vm).map(|zelf| Ok(zelf.len()))?
-    }
-
-    #[inline]
-    fn subscript(zelf: PyObjectRef, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        Self::downcast_ref(&zelf, vm).map(|zelf| zelf.getitem(needle, vm))?
-    }
-
-    #[inline]
-    fn ass_subscript(
-        zelf: PyObjectRef,
-        needle: PyObjectRef,
-        value: Option<PyObjectRef>,
-        vm: &VirtualMachine,
-    ) -> PyResult<()> {
-        match value {
-            Some(value) => {
-                Self::downcast(zelf, vm).map(|zelf| Self::setitem(zelf, needle, value, vm))
-            }
-            None => Self::downcast_ref(&zelf, vm).map(|zelf| zelf.delitem(needle, vm)),
-        }?
+    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+        Self::MAPPING_METHODS
     }
 }
 
@@ -783,7 +771,7 @@ impl Iterable for PyByteArray {
     }
 }
 
-// fn set_value(obj: &PyObjectRef, value: Vec<u8>) {
+// fn set_value(obj: &PyObject, value: Vec<u8>) {
 //     obj.borrow_mut().kind = PyObjectPayload::Bytes { value };
 // }
 
@@ -799,7 +787,7 @@ impl PyValue for PyByteArrayIterator {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(Constructor, IterNext))]
 impl PyByteArrayIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {
@@ -819,15 +807,16 @@ impl PyByteArrayIterator {
             .set_state(state, |obj, pos| pos.min(obj.len()), vm)
     }
 }
-impl IteratorIterable for PyByteArrayIterator {}
-impl SlotIterator for PyByteArrayIterator {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl Unconstructible for PyByteArrayIterator {}
+
+impl IterNextIterable for PyByteArrayIterator {}
+impl IterNext for PyByteArrayIterator {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.internal.lock().next(|bytearray, pos| {
             let buf = bytearray.borrow_buf();
-            Ok(match buf.get(pos) {
-                Some(&x) => PyIterReturn::Return(vm.ctx.new_int(x).into()),
-                None => PyIterReturn::StopIteration(None),
-            })
+            Ok(PyIterReturn::from_result(
+                buf.get(pos).map(|&x| vm.new_pyobj(x)).ok_or(None),
+            ))
         })
     }
 }

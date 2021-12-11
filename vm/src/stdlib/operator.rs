@@ -14,51 +14,50 @@ mod _operator {
         builtins::{PyInt, PyIntRef, PyStrRef, PyTupleRef, PyTypeRef},
         function::{ArgBytesLike, FuncArgs, KwArgs, OptionalArg},
         protocol::PyIter,
-        slots::{
-            Callable,
+        types::{
+            Callable, Constructor,
             PyComparisonOp::{Eq, Ge, Gt, Le, Lt, Ne},
-            SlotConstructor,
         },
         utils::Either,
         vm::ReprGuard,
-        IdProtocol, ItemProtocol, PyObjectRef, PyRef, PyResult, PyValue, TryIntoRef, TypeProtocol,
+        IdProtocol, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, TypeProtocol,
         VirtualMachine,
     };
 
     /// Same as a < b.
     #[pyfunction]
     fn lt(a: PyObjectRef, b: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        vm.obj_cmp(a, b, Lt)
+        a.rich_compare(b, Lt, vm)
     }
 
     /// Same as a <= b.
     #[pyfunction]
     fn le(a: PyObjectRef, b: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        vm.obj_cmp(a, b, Le)
+        a.rich_compare(b, Le, vm)
     }
 
     /// Same as a > b.
     #[pyfunction]
     fn gt(a: PyObjectRef, b: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        vm.obj_cmp(a, b, Gt)
+        a.rich_compare(b, Gt, vm)
     }
 
     /// Same as a >= b.
     #[pyfunction]
     fn ge(a: PyObjectRef, b: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        vm.obj_cmp(a, b, Ge)
+        a.rich_compare(b, Ge, vm)
     }
 
     /// Same as a == b.
     #[pyfunction]
     fn eq(a: PyObjectRef, b: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        vm.obj_cmp(a, b, Eq)
+        a.rich_compare(b, Eq, vm)
     }
 
     /// Same as a != b.
     #[pyfunction]
     fn ne(a: PyObjectRef, b: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        vm.obj_cmp(a, b, Ne)
+        a.rich_compare(b, Ne, vm)
     }
 
     /// Same as not a.
@@ -283,7 +282,7 @@ mod _operator {
                 v.payload::<PyInt>().unwrap().try_to_primitive(vm)
             })
             .unwrap_or(Ok(0))?;
-        vm.length_hint(obj).map(|v| v.unwrap_or(default))
+        obj.length_hint(default, vm)
     }
 
     // Inplace Operators
@@ -430,35 +429,14 @@ mod _operator {
         attrs: Vec<PyStrRef>,
     }
 
-    #[pyimpl(with(Callable))]
+    #[pyimpl(with(Callable, Constructor))]
     impl PyAttrGetter {
-        #[pyslot]
-        fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            let nattr = args.args.len();
-            // Check we get no keyword and at least one positional.
-            if !args.kwargs.is_empty() {
-                return Err(vm.new_type_error("attrgetter() takes no keyword arguments".to_owned()));
-            }
-            if nattr == 0 {
-                return Err(vm.new_type_error("attrgetter expected 1 argument, got 0.".to_owned()));
-            }
-            let mut attrs = Vec::with_capacity(nattr);
-            for o in args.args {
-                if let Ok(r) = o.try_into_ref(vm) {
-                    attrs.push(r);
-                } else {
-                    return Err(vm.new_type_error("attribute name must be a string".to_owned()));
-                }
-            }
-            PyAttrGetter { attrs }.into_pyresult_with_type(vm, cls)
-        }
-
         #[pymethod(magic)]
         fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
             let fmt = if let Some(_guard) = ReprGuard::enter(vm, zelf.as_object()) {
                 let mut parts = Vec::with_capacity(zelf.attrs.len());
                 for part in zelf.attrs.iter() {
-                    parts.push(vm.to_repr(part.as_object())?.as_str().to_owned());
+                    parts.push(part.as_object().repr(vm)?.as_str().to_owned());
                 }
                 parts.join(", ")
             } else {
@@ -469,9 +447,12 @@ mod _operator {
 
         #[pymethod(magic)]
         fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<(PyTypeRef, PyTupleRef)> {
-            let attrs = vm
-                .ctx
-                .new_tuple(zelf.attrs.iter().map(|v| v.as_object()).cloned().collect());
+            let attrs = vm.ctx.new_tuple(
+                zelf.attrs
+                    .iter()
+                    .map(|v| v.as_object().to_owned())
+                    .collect(),
+            );
             Ok((zelf.clone_class(), attrs))
         }
 
@@ -483,16 +464,43 @@ mod _operator {
         ) -> PyResult<PyObjectRef> {
             let parts = attr.split('.').collect::<Vec<_>>();
             if parts.len() == 1 {
-                return vm.get_attribute(obj, parts[0]);
+                return obj.get_attr(parts[0], vm);
             }
             let mut obj = obj;
             for part in parts {
-                obj = vm.get_attribute(obj, part)?;
+                obj = obj.get_attr(part, vm)?;
             }
             Ok(obj)
         }
+    }
 
-        fn call(zelf: &PyRef<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+    impl Constructor for PyAttrGetter {
+        type Args = FuncArgs;
+
+        fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
+            let nattr = args.args.len();
+            // Check we get no keyword and at least one positional.
+            if !args.kwargs.is_empty() {
+                return Err(vm.new_type_error("attrgetter() takes no keyword arguments".to_owned()));
+            }
+            if nattr == 0 {
+                return Err(vm.new_type_error("attrgetter expected 1 argument, got 0.".to_owned()));
+            }
+            let mut attrs = Vec::with_capacity(nattr);
+            for o in args.args {
+                if let Ok(r) = o.try_into_value(vm) {
+                    attrs.push(r);
+                } else {
+                    return Err(vm.new_type_error("attribute name must be a string".to_owned()));
+                }
+            }
+            PyAttrGetter { attrs }.into_pyresult_with_type(vm, cls)
+        }
+    }
+
+    impl Callable for PyAttrGetter {
+        type Args = PyObjectRef;
+        fn call(zelf: &PyObjectView<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
             // Handle case where we only have one attribute.
             if zelf.attrs.len() == 1 {
                 return Self::get_single_attr(obj, zelf.attrs[0].as_str(), vm);
@@ -503,13 +511,6 @@ mod _operator {
                 results.push(Self::get_single_attr(obj.clone(), o.as_str(), vm)?);
             }
             Ok(vm.ctx.new_tuple(results).into())
-        }
-    }
-
-    impl Callable for PyAttrGetter {
-        fn call(zelf: &PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            let obj = args.bind::<PyObjectRef>(vm)?;
-            PyAttrGetter::call(zelf, obj, vm)
         }
     }
 
@@ -525,26 +526,14 @@ mod _operator {
         items: Vec<PyObjectRef>,
     }
 
-    #[pyimpl(with(Callable))]
+    #[pyimpl(with(Callable, Constructor))]
     impl PyItemGetter {
-        #[pyslot]
-        fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            // Check we get no keyword and at least one positional.
-            if !args.kwargs.is_empty() {
-                return Err(vm.new_type_error("itemgetter() takes no keyword arguments".to_owned()));
-            }
-            if args.args.is_empty() {
-                return Err(vm.new_type_error("itemgetter expected 1 argument, got 0.".to_owned()));
-            }
-            PyItemGetter { items: args.args }.into_pyresult_with_type(vm, cls)
-        }
-
         #[pymethod(magic)]
         fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
             let fmt = if let Some(_guard) = ReprGuard::enter(vm, zelf.as_object()) {
                 let mut items = Vec::with_capacity(zelf.items.len());
                 for item in zelf.items.iter() {
-                    items.push(vm.to_repr(item)?.as_str().to_owned());
+                    items.push(item.repr(vm)?.as_str().to_owned());
                 }
                 items.join(", ")
             } else {
@@ -558,8 +547,25 @@ mod _operator {
             let items = vm.ctx.new_tuple(zelf.items.to_vec());
             vm.new_pyobj((zelf.clone_class(), items))
         }
+    }
+    impl Constructor for PyItemGetter {
+        type Args = FuncArgs;
 
-        fn call(zelf: &PyRef<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
+            // Check we get no keyword and at least one positional.
+            if !args.kwargs.is_empty() {
+                return Err(vm.new_type_error("itemgetter() takes no keyword arguments".to_owned()));
+            }
+            if args.args.is_empty() {
+                return Err(vm.new_type_error("itemgetter expected 1 argument, got 0.".to_owned()));
+            }
+            PyItemGetter { items: args.args }.into_pyresult_with_type(vm, cls)
+        }
+    }
+
+    impl Callable for PyItemGetter {
+        type Args = PyObjectRef;
+        fn call(zelf: &PyObjectView<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
             // Handle case where we only have one attribute.
             if zelf.items.len() == 1 {
                 return obj.get_item(zelf.items[0].clone(), vm);
@@ -570,13 +576,6 @@ mod _operator {
                 results.push(obj.get_item(item.clone(), vm)?);
             }
             Ok(vm.ctx.new_tuple(results).into())
-        }
-    }
-
-    impl Callable for PyItemGetter {
-        fn call(zelf: &PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            let obj = args.bind::<PyObjectRef>(vm)?;
-            PyItemGetter::call(zelf, obj, vm)
         }
     }
 
@@ -594,30 +593,18 @@ mod _operator {
         args: FuncArgs,
     }
 
-    impl SlotConstructor for PyMethodCaller {
-        type Args = (PyObjectRef, FuncArgs);
-
-        fn py_new(cls: PyTypeRef, (name, args): Self::Args, vm: &VirtualMachine) -> PyResult {
-            if let Ok(name) = name.try_into_ref(vm) {
-                PyMethodCaller { name, args }.into_pyresult_with_type(vm, cls)
-            } else {
-                Err(vm.new_type_error("method name must be a string".to_owned()))
-            }
-        }
-    }
-
-    #[pyimpl(with(Callable, SlotConstructor))]
+    #[pyimpl(with(Callable, Constructor))]
     impl PyMethodCaller {
         #[pymethod(magic)]
         fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
             let fmt = if let Some(_guard) = ReprGuard::enter(vm, zelf.as_object()) {
                 let args = &zelf.args.args;
                 let kwargs = &zelf.args.kwargs;
-                let mut fmt = vec![vm.to_repr(zelf.name.as_object())?.as_str().to_owned()];
+                let mut fmt = vec![zelf.name.as_object().repr(vm)?.as_str().to_owned()];
                 if !args.is_empty() {
                     let mut parts = Vec::with_capacity(args.len());
                     for v in args {
-                        parts.push(vm.to_repr(v)?.as_str().to_owned());
+                        parts.push(v.repr(vm)?.as_str().to_owned());
                     }
                     fmt.push(parts.join(", "));
                 }
@@ -625,7 +612,7 @@ mod _operator {
                 if !kwargs.is_empty() {
                     let mut parts = Vec::with_capacity(kwargs.len());
                     for (key, value) in kwargs {
-                        let value_repr = vm.to_repr(value)?;
+                        let value_repr = value.repr(vm)?;
                         parts.push(format!("{}={}", key, value_repr));
                     }
                     fmt.push(parts.join(", "));
@@ -647,7 +634,7 @@ mod _operator {
             } else {
                 // If we have kwargs, create a partial function that contains them and pass back that
                 // along with the args.
-                let partial = vm.get_attribute(vm.import("functools", None, 0)?, "partial")?;
+                let partial = vm.import("functools", None, 0)?.get_attr("partial", vm)?;
                 let callable = vm.invoke(
                     &partial,
                     FuncArgs::new(
@@ -658,16 +645,26 @@ mod _operator {
                 Ok(vm.new_tuple((callable, vm.ctx.new_tuple(zelf.args.args.clone()))))
             }
         }
+    }
 
-        fn call(zelf: &PyRef<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-            vm.call_method(&obj, zelf.name.as_str(), zelf.args.clone())
+    impl Constructor for PyMethodCaller {
+        type Args = (PyObjectRef, FuncArgs);
+
+        fn py_new(cls: PyTypeRef, (name, args): Self::Args, vm: &VirtualMachine) -> PyResult {
+            if let Ok(name) = name.try_into_value(vm) {
+                PyMethodCaller { name, args }.into_pyresult_with_type(vm, cls)
+            } else {
+                Err(vm.new_type_error("method name must be a string".to_owned()))
+            }
         }
     }
 
     impl Callable for PyMethodCaller {
-        fn call(zelf: &PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            let obj = args.bind::<PyObjectRef>(vm)?;
-            PyMethodCaller::call(zelf, obj, vm)
+        type Args = PyObjectRef;
+
+        #[inline]
+        fn call(zelf: &PyObjectView<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
+            vm.call_method(&obj, zelf.name.as_str(), zelf.args.clone())
         }
     }
 }

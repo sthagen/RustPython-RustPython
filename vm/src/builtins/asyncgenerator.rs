@@ -1,11 +1,11 @@
-use super::{PyCode, PyStrRef, PyTypeRef};
+use super::{PyCode, PyGenericAlias, PyStrRef, PyTypeRef};
 use crate::{
     builtins::PyBaseExceptionRef,
     coroutine::Coro,
     frame::FrameRef,
     function::OptionalArg,
     protocol::PyIterReturn,
-    slots::{IteratorIterable, SlotIterator},
+    types::{Constructor, IterNext, IterNextIterable, Unconstructible},
     IdProtocol, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
     VirtualMachine,
 };
@@ -26,7 +26,7 @@ impl PyValue for PyAsyncGen {
     }
 }
 
-#[pyimpl]
+#[pyimpl(with(Constructor))]
 impl PyAsyncGen {
     pub fn as_coro(&self) -> &Coro {
         &self.inner
@@ -123,7 +123,13 @@ impl PyAsyncGen {
     fn ag_code(&self, _vm: &VirtualMachine) -> PyRef<PyCode> {
         self.inner.frame().code.clone()
     }
+
+    #[pyclassmethod(magic)]
+    fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
+        PyGenericAlias::new(cls, args, vm)
+    }
 }
+impl Unconstructible for PyAsyncGen {}
 
 #[pyclass(module = false, name = "async_generator_wrapped_value")]
 #[derive(Debug)]
@@ -183,7 +189,7 @@ impl PyValue for PyAsyncGenASend {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(IterNext))]
 impl PyAsyncGenASend {
     #[pymethod(name = "__await__")]
     fn r#await(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyRef<Self> {
@@ -256,9 +262,9 @@ impl PyAsyncGenASend {
     }
 }
 
-impl IteratorIterable for PyAsyncGenASend {}
-impl SlotIterator for PyAsyncGenASend {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl IterNextIterable for PyAsyncGenASend {}
+impl IterNext for PyAsyncGenASend {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         PyIterReturn::from_pyresult(zelf.send(vm.ctx.none(), vm), vm)
     }
 }
@@ -278,7 +284,7 @@ impl PyValue for PyAsyncGenAThrow {
     }
 }
 
-#[pyimpl(with(SlotIterator))]
+#[pyimpl(with(IterNext))]
 impl PyAsyncGenAThrow {
     #[pymethod(name = "__await__")]
     fn r#await(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyRef<Self> {
@@ -402,9 +408,9 @@ impl PyAsyncGenAThrow {
     }
 }
 
-impl IteratorIterable for PyAsyncGenAThrow {}
-impl SlotIterator for PyAsyncGenAThrow {
-    fn next(zelf: &PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+impl IterNextIterable for PyAsyncGenAThrow {}
+impl IterNext for PyAsyncGenAThrow {
+    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         PyIterReturn::from_pyresult(zelf.send(vm.ctx.none(), vm), vm)
     }
 }
