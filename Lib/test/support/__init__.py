@@ -83,9 +83,6 @@ __all__ = [
     # io
     "record_original_stdout", "get_original_stdout", "captured_stdout",
     "captured_stdin", "captured_stderr",
-    # filesystem
-    "TESTFN", "SAVEDCWD", "unlink", "rmtree", "temp_cwd", "findfile",
-    "create_empty_file", "can_symlink", "fs_is_case_insensitive",
     # unittest
     "is_resource_enabled", "requires", "requires_freebsd_version",
     "requires_linux_version", "requires_mac_ver",
@@ -102,14 +99,11 @@ __all__ = [
     "is_jython", "is_android", "check_impl_detail", "unix_shell",
     "setswitchinterval",
     # network
-    "HOST", "IPV6_ENABLED", "find_unused_port", "bind_port", "open_urlresource",
-    "bind_unix_socket",
+    "open_urlresource",
     # processes
     'temp_umask', "reap_children",
     # logging
     "TestHandler",
-    # threads
-    "threading_setup", "threading_cleanup", "reap_threads", "start_threads",
     # miscellaneous
     "check_warnings", "check_no_resource_warning", "check_no_warnings",
     "EnvironmentVarGuard",
@@ -279,135 +273,6 @@ def _force_run(path, func, *args):
         os.chmod(path, stat.S_IRWXU)
         return func(*args)
 
-if sys.platform.startswith("win"):
-    def _waitfor(func, pathname, waitall=False):
-        # Perform the operation
-        func(pathname)
-        # Now setup the wait loop
-        if waitall:
-            dirname = pathname
-        else:
-            dirname, name = os.path.split(pathname)
-            dirname = dirname or '.'
-        # Check for `pathname` to be removed from the filesystem.
-        # The exponential backoff of the timeout amounts to a total
-        # of ~1 second after which the deletion is probably an error
-        # anyway.
-        # Testing on an i7@4.3GHz shows that usually only 1 iteration is
-        # required when contention occurs.
-        timeout = 0.001
-        while timeout < 1.0:
-            # Note we are only testing for the existence of the file(s) in
-            # the contents of the directory regardless of any security or
-            # access rights.  If we have made it this far, we have sufficient
-            # permissions to do that much using Python's equivalent of the
-            # Windows API FindFirstFile.
-            # Other Windows APIs can fail or give incorrect results when
-            # dealing with files that are pending deletion.
-            L = os.listdir(dirname)
-            if not (L if waitall else name in L):
-                return
-            # Increase the timeout and try again
-            time.sleep(timeout)
-            timeout *= 2
-        warnings.warn('tests may fail, delete still pending for ' + pathname,
-                      RuntimeWarning, stacklevel=4)
-
-    def _unlink(filename):
-        # XXX RUSTPYTHON: on ci, unlink() raises PermissionError when target doesn't exist.
-        # Might also happen locally, but not sure
-        if not os.path.exists(filename):
-            return
-        _waitfor(os.unlink, filename)
-
-    def _rmdir(dirname):
-        # XXX RUSTPYTHON: on ci, unlink() raises PermissionError when target doesn't exist.
-        # Might also happen locally, but not sure
-        if not os.path.exists(dirname):
-            return
-        _waitfor(os.rmdir, dirname)
-
-    def _rmtree(path):
-        # XXX RUSTPYTHON: on ci, unlink() raises PermissionError when target doesn't exist.
-        # Might also happen locally, but not sure
-        if not os.path.exists(path):
-            return
-        def _rmtree_inner(path):
-            for name in _force_run(path, os.listdir, path):
-                fullname = os.path.join(path, name)
-                try:
-                    mode = os.lstat(fullname).st_mode
-                except OSError as exc:
-                    print("os_helper.rmtree(): os.lstat(%r) failed with %s" % (fullname, exc),
-                          file=sys.__stderr__)
-                    mode = 0
-                if stat.S_ISDIR(mode):
-                    _waitfor(_rmtree_inner, fullname, waitall=True)
-                    _force_run(fullname, os.rmdir, fullname)
-                else:
-                    _force_run(fullname, os.unlink, fullname)
-        _waitfor(_rmtree_inner, path, waitall=True)
-        _waitfor(lambda p: _force_run(p, os.rmdir, p), path)
-
-    def _longpath(path):
-        try:
-            import ctypes
-        except ImportError:
-            # No ctypes means we can't expands paths.
-            pass
-        else:
-            buffer = ctypes.create_unicode_buffer(len(path) * 2)
-            length = ctypes.windll.kernel32.GetLongPathNameW(path, buffer,
-                                                             len(buffer))
-            if length:
-                return buffer[:length]
-        return path
-else:
-    _unlink = os.unlink
-    _rmdir = os.rmdir
-
-    def _rmtree(path):
-        try:
-            shutil.rmtree(path)
-            return
-        except OSError:
-            pass
-
-        def _rmtree_inner(path):
-            for name in _force_run(path, os.listdir, path):
-                fullname = os.path.join(path, name)
-                try:
-                    mode = os.lstat(fullname).st_mode
-                except OSError:
-                    mode = 0
-                if stat.S_ISDIR(mode):
-                    _rmtree_inner(fullname)
-                    _force_run(path, os.rmdir, fullname)
-                else:
-                    _force_run(path, os.unlink, fullname)
-        _rmtree_inner(path)
-        os.rmdir(path)
-
-    def _longpath(path):
-        return path
-
-def unlink(filename):
-    try:
-        _unlink(filename)
-    except (FileNotFoundError, NotADirectoryError):
-        pass
-
-def rmdir(dirname):
-    try:
-        _rmdir(dirname)
-    except FileNotFoundError:
-        pass
-
-def rmtree(path):
-    try:
-        _rmtree(path)
-    except FileNotFoundError:
-        pass
 
 # Check whether a gui is actually available
 def _is_gui_available():
@@ -588,135 +453,6 @@ def skip_if_buildbot(reason=None):
         isbuildbot = os.environ.get('USER') == 'buildbot'
     return unittest.skipIf(isbuildbot, reason)
 
-
-HOST = "localhost"
-HOSTv4 = "127.0.0.1"
-HOSTv6 = "::1"
-
-
-def find_unused_port(family=socket.AF_INET, socktype=socket.SOCK_STREAM):
-    """Returns an unused port that should be suitable for binding.  This is
-    achieved by creating a temporary socket with the same family and type as
-    the 'sock' parameter (default is AF_INET, SOCK_STREAM), and binding it to
-    the specified host address (defaults to 0.0.0.0) with the port set to 0,
-    eliciting an unused ephemeral port from the OS.  The temporary socket is
-    then closed and deleted, and the ephemeral port is returned.
-
-    Either this method or bind_port() should be used for any tests where a
-    server socket needs to be bound to a particular port for the duration of
-    the test.  Which one to use depends on whether the calling code is creating
-    a python socket, or if an unused port needs to be provided in a constructor
-    or passed to an external program (i.e. the -accept argument to openssl's
-    s_server mode).  Always prefer bind_port() over find_unused_port() where
-    possible.  Hard coded ports should *NEVER* be used.  As soon as a server
-    socket is bound to a hard coded port, the ability to run multiple instances
-    of the test simultaneously on the same host is compromised, which makes the
-    test a ticking time bomb in a buildbot environment. On Unix buildbots, this
-    may simply manifest as a failed test, which can be recovered from without
-    intervention in most cases, but on Windows, the entire python process can
-    completely and utterly wedge, requiring someone to log in to the buildbot
-    and manually kill the affected process.
-
-    (This is easy to reproduce on Windows, unfortunately, and can be traced to
-    the SO_REUSEADDR socket option having different semantics on Windows versus
-    Unix/Linux.  On Unix, you can't have two AF_INET SOCK_STREAM sockets bind,
-    listen and then accept connections on identical host/ports.  An EADDRINUSE
-    OSError will be raised at some point (depending on the platform and
-    the order bind and listen were called on each socket).
-
-    However, on Windows, if SO_REUSEADDR is set on the sockets, no EADDRINUSE
-    will ever be raised when attempting to bind two identical host/ports. When
-    accept() is called on each socket, the second caller's process will steal
-    the port from the first caller, leaving them both in an awkwardly wedged
-    state where they'll no longer respond to any signals or graceful kills, and
-    must be forcibly killed via OpenProcess()/TerminateProcess().
-
-    The solution on Windows is to use the SO_EXCLUSIVEADDRUSE socket option
-    instead of SO_REUSEADDR, which effectively affords the same semantics as
-    SO_REUSEADDR on Unix.  Given the propensity of Unix developers in the Open
-    Source world compared to Windows ones, this is a common mistake.  A quick
-    look over OpenSSL's 0.9.8g source shows that they use SO_REUSEADDR when
-    openssl.exe is called with the 's_server' option, for example. See
-    http://bugs.python.org/issue2550 for more info.  The following site also
-    has a very thorough description about the implications of both REUSEADDR
-    and EXCLUSIVEADDRUSE on Windows:
-    http://msdn2.microsoft.com/en-us/library/ms740621(VS.85).aspx)
-
-    XXX: although this approach is a vast improvement on previous attempts to
-    elicit unused ports, it rests heavily on the assumption that the ephemeral
-    port returned to us by the OS won't immediately be dished back out to some
-    other process when we close and delete our temporary socket but before our
-    calling code has a chance to bind the returned port.  We can deal with this
-    issue if/when we come across it.
-    """
-
-    with socket.socket(family, socktype) as tempsock:
-        port = bind_port(tempsock)
-    del tempsock
-    return port
-
-def bind_port(sock, host=HOST):
-    """Bind the socket to a free port and return the port number.  Relies on
-    ephemeral ports in order to ensure we are using an unbound port.  This is
-    important as many tests may be running simultaneously, especially in a
-    buildbot environment.  This method raises an exception if the sock.family
-    is AF_INET and sock.type is SOCK_STREAM, *and* the socket has SO_REUSEADDR
-    or SO_REUSEPORT set on it.  Tests should *never* set these socket options
-    for TCP/IP sockets.  The only case for setting these options is testing
-    multicasting via multiple UDP sockets.
-
-    Additionally, if the SO_EXCLUSIVEADDRUSE socket option is available (i.e.
-    on Windows), it will be set on the socket.  This will prevent anyone else
-    from bind()'ing to our host/port for the duration of the test.
-    """
-
-    if sock.family == socket.AF_INET and sock.type == socket.SOCK_STREAM:
-        if hasattr(socket, 'SO_REUSEADDR'):
-            if sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1:
-                raise TestFailed("tests should never set the SO_REUSEADDR "   \
-                                 "socket option on TCP/IP sockets!")
-        if hasattr(socket, 'SO_REUSEPORT'):
-            try:
-                if sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT) == 1:
-                    raise TestFailed("tests should never set the SO_REUSEPORT "   \
-                                     "socket option on TCP/IP sockets!")
-            except OSError:
-                # Python's socket module was compiled using modern headers
-                # thus defining SO_REUSEPORT but this process is running
-                # under an older kernel that does not support SO_REUSEPORT.
-                pass
-        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-
-    sock.bind((host, 0))
-    port = sock.getsockname()[1]
-    return port
-
-def bind_unix_socket(sock, addr):
-    """Bind a unix socket, raising SkipTest if PermissionError is raised."""
-    assert sock.family == socket.AF_UNIX
-    try:
-        sock.bind(addr)
-    except PermissionError:
-        sock.close()
-        raise unittest.SkipTest('cannot bind AF_UNIX sockets')
-
-def _is_ipv6_enabled():
-    """Check whether IPv6 is enabled on this host."""
-    if socket.has_ipv6:
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            sock.bind((HOSTv6, 0))
-            return True
-        except OSError:
-            pass
-        finally:
-            if sock:
-                sock.close()
-    return False
-
-IPV6_ENABLED = _is_ipv6_enabled()
 
 def system_must_validate_cert(f):
     """Skip the test on TLS certificate validation failures."""
@@ -1803,104 +1539,6 @@ print_warning.orig_stderr = sys.stderr
 # to cleanup threads.
 environment_altered = False
 
-# NOTE: we use thread._count() rather than threading.enumerate() (or the
-# moral equivalent thereof) because a threading.Thread object is still alive
-# until its __bootstrap() method has returned, even after it has been
-# unregistered from the threading module.
-# thread._count(), on the other hand, only gets decremented *after* the
-# __bootstrap() method has returned, which gives us reliable reference counts
-# at the end of a test run.
-
-def threading_setup():
-    return _thread._count(), threading._dangling.copy()
-
-def threading_cleanup(*original_values):
-    global environment_altered
-
-    _MAX_COUNT = 100
-
-    for count in range(_MAX_COUNT):
-        values = _thread._count(), threading._dangling
-        if values == original_values:
-            break
-
-        if not count: # Display a warning at the first iteration
-            environment_altered = True
-            dangling_threads = values[1]
-            print_warning(f"threading_cleanup() failed to cleanup "
-                          f"{values[0] - original_values[0]} threads "
-                          f"(count: {values[0]}, "
-                          f"dangling: {len(dangling_threads)})")
-            for thread in dangling_threads:
-                print_warning(f"Dangling thread: {thread!r}")
-
-            # Don't hold references to threads
-            dangling_threads = None
-        values = None
-
-        time.sleep(0.01)
-        gc_collect()
-
-
-def reap_threads(func):
-    """Use this function when threads are being used.  This will
-    ensure that the threads are cleaned up even when the test fails.
-    """
-    @functools.wraps(func)
-    def decorator(*args):
-        key = threading_setup()
-        try:
-            return func(*args)
-        finally:
-            threading_cleanup(*key)
-    return decorator
-
-
-@contextlib.contextmanager
-def wait_threads_exit(timeout=60.0):
-    """
-    bpo-31234: Context manager to wait until all threads created in the with
-    statement exit.
-
-    Use _thread.count() to check if threads exited. Indirectly, wait until
-    threads exit the internal t_bootstrap() C function of the _thread module.
-
-    threading_setup() and threading_cleanup() are designed to emit a warning
-    if a test leaves running threads in the background. This context manager
-    is designed to cleanup threads started by the _thread.start_new_thread()
-    which doesn't allow to wait for thread exit, whereas thread.Thread has a
-    join() method.
-    """
-    old_count = _thread._count()
-    try:
-        yield
-    finally:
-        start_time = time.monotonic()
-        deadline = start_time + timeout
-        while True:
-            count = _thread._count()
-            if count <= old_count:
-                break
-            if time.monotonic() > deadline:
-                dt = time.monotonic() - start_time
-                msg = (f"wait_threads() failed to cleanup {count - old_count} "
-                       f"threads after {dt:.1f} seconds "
-                       f"(count: {count}, old count: {old_count})")
-                raise AssertionError(msg)
-            time.sleep(0.010)
-            gc_collect()
-
-
-def join_thread(thread, timeout=30.0):
-    """Join a thread. Raise an AssertionError if the thread is still alive
-    after timeout seconds.
-    """
-    thread.join(timeout)
-    if thread.is_alive():
-        msg = f"failed to join the thread in {timeout:.1f} seconds"
-        raise AssertionError(msg)
-
-
 def reap_children():
     """Use this function at the end of test_main() whenever sub-processes
     are started.  This will help ensure that no extra children (zombies)
@@ -1928,42 +1566,6 @@ def reap_children():
         print_warning(f"reap_children() reaped child process {pid}")
         environment_altered = True
 
-
-@contextlib.contextmanager
-def start_threads(threads, unlock=None):
-    threads = list(threads)
-    started = []
-    try:
-        try:
-            for t in threads:
-                t.start()
-                started.append(t)
-        except:
-            if verbose:
-                print("Can't start %d threads, only %d threads started" %
-                      (len(threads), len(started)))
-            raise
-        yield
-    finally:
-        try:
-            if unlock:
-                unlock()
-            endtime = starttime = time.monotonic()
-            for timeout in range(1, 16):
-                endtime += 60
-                for t in started:
-                    t.join(max(endtime - time.monotonic(), 0.01))
-                started = [t for t in started if t.is_alive()]
-                if not started:
-                    break
-                if verbose:
-                    print('Unable to join %d threads during a period of '
-                          '%d minutes' % (len(started), timeout))
-        finally:
-            started = [t for t in started if t.is_alive()]
-            if started:
-                faulthandler.dump_traceback(sys.stdout)
-                raise AssertionError('Unable to join %d threads' % len(started))
 
 @contextlib.contextmanager
 def swap_attr(obj, attr, new_val):
@@ -2245,6 +1847,7 @@ def skip_unless_bind_unix_socket(test):
             except OSError as e:
                 _bind_nix_socket_error = e
             finally:
+                from .os_helper import unlink
                 unlink(path)
     if _bind_nix_socket_error:
         msg = 'Requires a functional unix bind(): %s' % _bind_nix_socket_error
@@ -2766,63 +2369,6 @@ class catch_unraisable_exception:
     def __exit__(self, *exc_info):
         sys.unraisablehook = self._old_hook
         del self.unraisable
-
-
-class catch_threading_exception:
-    """
-    Context manager catching threading.Thread exception using
-    threading.excepthook.
-
-    Attributes set when an exception is catched:
-
-    * exc_type
-    * exc_value
-    * exc_traceback
-    * thread
-
-    See threading.excepthook() documentation for these attributes.
-
-    These attributes are deleted at the context manager exit.
-
-    Usage:
-
-        with support.catch_threading_exception() as cm:
-            # code spawning a thread which raises an exception
-            ...
-
-            # check the thread exception, use cm attributes:
-            # exc_type, exc_value, exc_traceback, thread
-            ...
-
-        # exc_type, exc_value, exc_traceback, thread attributes of cm no longer
-        # exists at this point
-        # (to avoid reference cycles)
-    """
-
-    def __init__(self):
-        self.exc_type = None
-        self.exc_value = None
-        self.exc_traceback = None
-        self.thread = None
-        self._old_hook = None
-
-    def _hook(self, args):
-        self.exc_type = args.exc_type
-        self.exc_value = args.exc_value
-        self.exc_traceback = args.exc_traceback
-        self.thread = args.thread
-
-    def __enter__(self):
-        self._old_hook = threading.excepthook
-        threading.excepthook = self._hook
-        return self
-
-    def __exit__(self, *exc_info):
-        threading.excepthook = self._old_hook
-        del self.exc_type
-        del self.exc_value
-        del self.exc_traceback
-        del self.thread
 
 
 def wait_process(pid, *, exitcode, timeout=None):

@@ -20,7 +20,9 @@ except ImportError:
 
 from unittest import TestCase, skipUnless
 from test import support
-from test.support import HOST, HOSTv6
+from test.support import threading_helper
+from test.support import socket_helper
+from test.support.socket_helper import HOST, HOSTv6
 
 import sys
 if sys.platform == 'win32':
@@ -28,7 +30,8 @@ if sys.platform == 'win32':
 if getattr(sys, '_rustpython_debugbuild', False):
     raise unittest.SkipTest("something's weird on debug builds")
 
-TIMEOUT = 3
+
+TIMEOUT = support.LOOPBACK_TIMEOUT
 # the dummy data returned by server over the data channel when
 # RETR, LIST, NLST, MLSD commands are issued
 RETR_DATA = 'abcde12345\r\n' * 1000
@@ -750,7 +753,7 @@ class TestFTPClass(TestCase):
 
     def test_source_address(self):
         self.client.quit()
-        port = support.find_unused_port()
+        port = socket_helper.find_unused_port()
         try:
             self.client.connect(self.server.host, self.server.port,
                                 source_address=(HOST, port))
@@ -762,7 +765,7 @@ class TestFTPClass(TestCase):
             raise
 
     def test_source_address_passive_connection(self):
-        port = support.find_unused_port()
+        port = socket_helper.find_unused_port()
         self.client.source_address = (HOST, port)
         try:
             with self.client.transfercmd('list') as sock:
@@ -799,7 +802,7 @@ class TestFTPClass(TestCase):
         self.assertRaises(ftplib.Error, self.client.storlines, 'stor', f)
 
 
-@skipUnless(support.IPV6_ENABLED, "IPv6 not enabled")
+@skipUnless(socket_helper.IPV6_ENABLED, "IPv6 not enabled")
 class TestIPv6Environment(TestCase):
 
     def setUp(self):
@@ -987,7 +990,7 @@ class TestTimeouts(TestCase):
         self.evt = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.settimeout(20)
-        self.port = support.bind_port(self.sock)
+        self.port = socket_helper.bind_port(self.sock)
         self.server_thread = threading.Thread(target=self.server)
         self.server_thread.daemon = True
         self.server_thread.start()
@@ -1092,11 +1095,11 @@ def test_main():
              TestTLS_FTPClassMixin, TestTLS_FTPClass,
              MiscTestCase]
 
-    thread_info = support.threading_setup()
+    thread_info = threading_helper.threading_setup()
     try:
         support.run_unittest(*tests)
     finally:
-        support.threading_cleanup(*thread_info)
+        threading_helper.threading_cleanup(*thread_info)
 
 
 if __name__ == '__main__':

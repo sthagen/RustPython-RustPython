@@ -14,13 +14,16 @@ import unittest
 import socketserver
 
 import test.support
-from test.support import reap_children, reap_threads, verbose, os_helper
+from test.support import reap_children, verbose
+from test.support import os_helper
+from test.support import socket_helper
+from test.support import threading_helper
 
 
 test.support.requires("network")
 
 TEST_STR = b"hello world\n"
-HOST = test.support.HOST
+HOST = socket_helper.HOST
 
 HAVE_UNIX_SOCKETS = hasattr(socket, "AF_UNIX")
 requires_unix_sockets = unittest.skipUnless(HAVE_UNIX_SOCKETS,
@@ -121,7 +124,7 @@ class SocketServerTest(unittest.TestCase):
         self.assertEqual(server.server_address, server.socket.getsockname())
         return server
 
-    @reap_threads
+    @threading_helper.reap_threads
     def run_server(self, svrcls, hdlrbase, testfunc):
         server = self.make_server(self.pickaddr(svrcls.address_family),
                                   svrcls, hdlrbase)
@@ -250,7 +253,7 @@ class SocketServerTest(unittest.TestCase):
                         socketserver.DatagramRequestHandler,
                         self.dgram_examine)
 
-    @reap_threads
+    @threading_helper.reap_threads
     def test_shutdown(self):
         # Issue #2302: shutdown() should always succeed in making an
         # other thread leave serve_forever().
@@ -306,7 +309,7 @@ class ErrorHandlerTest(unittest.TestCase):
     KeyboardInterrupt are not passed."""
 
     def tearDown(self):
-        test.os_helper.unlink(test.os_helper.TESTFN)
+        os_helper.unlink(os_helper.TESTFN)
 
     def test_sync_handled(self):
         BaseErrorTestServer(ValueError)
@@ -336,7 +339,7 @@ class ErrorHandlerTest(unittest.TestCase):
         self.check_result(handled=False)
 
     def check_result(self, handled):
-        with open(test.os_helper.TESTFN) as log:
+        with open(os_helper.TESTFN) as log:
             expected = 'Handler called\n' + 'Error handled\n' * handled
             self.assertEqual(log.read(), expected)
 
@@ -354,7 +357,7 @@ class BaseErrorTestServer(socketserver.TCPServer):
         self.wait_done()
 
     def handle_error(self, request, client_address):
-        with open(test.os_helper.TESTFN, 'a') as log:
+        with open(os_helper.TESTFN, 'a') as log:
             log.write('Error handled\n')
 
     def wait_done(self):
@@ -363,7 +366,7 @@ class BaseErrorTestServer(socketserver.TCPServer):
 
 class BadHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        with open(test.os_helper.TESTFN, 'a') as log:
+        with open(os_helper.TESTFN, 'a') as log:
             log.write('Handler called\n')
         raise self.server.exception('Test error')
 
