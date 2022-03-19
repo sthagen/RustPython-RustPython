@@ -2,27 +2,34 @@ pub(crate) use decl::make_module;
 
 #[pymodule(name = "marshal")]
 mod decl {
-    /// TODO add support for Booleans, Sets, etc
-    use ascii::AsciiStr;
-    use num_bigint::{BigInt, Sign};
-    use std::slice::Iter;
-
     use crate::{
         builtins::{
-            dict::DictContentType, PyBytes, PyCode, PyDict, PyFloat, PyInt, PyList, PyStr, PyTuple,
+            dict::DictContentType, PyByteArray, PyBytes, PyCode, PyDict, PyFloat, PyFrozenSet,
+            PyInt, PyList, PySet, PyStr, PyTuple,
         },
         bytecode,
         function::{ArgBytesLike, IntoPyObject},
         protocol::PyBuffer,
+        pyobject::{IdProtocol, TypeProtocol},
         PyObjectRef, PyResult, TryFromObject, VirtualMachine,
     };
+    /// TODO
+    /// PyBytes: Currently getting recursion error with match_class!
+    use ascii::AsciiStr;
+    use num_bigint::{BigInt, Sign};
+    use std::ops::Deref;
+    use std::slice::Iter;
 
     const STR_BYTE: u8 = b's';
     const INT_BYTE: u8 = b'i';
     const FLOAT_BYTE: u8 = b'f';
+    const BOOL_BYTE: u8 = b'b';
     const LIST_BYTE: u8 = b'[';
     const TUPLE_BYTE: u8 = b'(';
     const DICT_BYTE: u8 = b',';
+    const SET_BYTE: u8 = b'~';
+    const FROZEN_SET_BYTE: u8 = b'<';
+    const BYTE_ARRAY: u8 = b'>';
 
     /// Safely convert usize to 4 le bytes
     fn size_to_bytes(x: usize, vm: &VirtualMachine) -> PyResult<[u8; 4]> {
@@ -48,19 +55,26 @@ mod decl {
         Ok(byte_list)
     }
 
+    /// Dumping helper function to turn a value into bytes.
     fn _dumps(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
         let r = match_class!(match value {
             pyint @ PyInt => {
-                let (sign, mut int_bytes) = pyint.as_bigint().to_bytes_le();
-                let sign_byte = match sign {
-                    Sign::Minus => b'-',
-                    Sign::NoSign => b'0',
-                    Sign::Plus => b'+',
-                };
-                // Return as [TYPE, SIGN, uint bytes]
-                int_bytes.insert(0, sign_byte);
-                int_bytes.push(INT_BYTE);
-                int_bytes
+                if pyint.class().is(&vm.ctx.types.bool_type) {
+                    let (_, mut bool_bytes) = pyint.as_bigint().to_bytes_le();
+                    bool_bytes.push(BOOL_BYTE);
+                    bool_bytes
+                } else {
+                    let (sign, mut int_bytes) = pyint.as_bigint().to_bytes_le();
+                    let sign_byte = match sign {
+                        Sign::Minus => b'-',
+                        Sign::NoSign => b'0',
+                        Sign::Plus => b'+',
+                    };
+                    // Return as [TYPE, SIGN, uint bytes]
+                    int_bytes.insert(0, sign_byte);
+                    int_bytes.push(INT_BYTE);
+                    int_bytes
+                }
             }
             pyfloat @ PyFloat => {
                 let mut float_bytes = pyfloat.to_f64().to_le_bytes().to_vec();
@@ -77,6 +91,18 @@ mod decl {
                 let mut list_bytes = dump_list(pylist_items.iter(), vm)?;
                 list_bytes.push(LIST_BYTE);
                 list_bytes
+            }
+            pyset @ PySet => {
+                let elements = pyset.elements();
+                let mut set_bytes = dump_list(elements.iter(), vm)?;
+                set_bytes.push(SET_BYTE);
+                set_bytes
+            }
+            pyfrozen @ PyFrozenSet => {
+                let elements = pyfrozen.elements();
+                let mut fset_bytes = dump_list(elements.iter(), vm)?;
+                fset_bytes.push(FROZEN_SET_BYTE);
+                fset_bytes
             }
             pytuple @ PyTuple => {
                 let mut tuple_bytes = dump_list(pytuple.as_slice().iter(), vm)?;
@@ -95,6 +121,11 @@ mod decl {
                 dict_bytes.push(LIST_BYTE);
                 dict_bytes.push(DICT_BYTE);
                 dict_bytes
+            }
+            pybyte_array @ PyByteArray => {
+                let mut pybytes = pybyte_array.borrow_buf_mut();
+                pybytes.push(BYTE_ARRAY);
+                pybytes.deref().to_owned()
             }
             co @ PyCode => {
                 // Code is default, doesn't have prefix.
@@ -190,6 +221,7 @@ mod decl {
             )
         })?;
         match *type_indicator {
+            BOOL_BYTE => Ok((buf[0] != 0).into_pyobject(vm)),
             INT_BYTE => {
                 let (sign_byte, uint_bytes) = buf
                     .split_first()
@@ -235,6 +267,19 @@ mod decl {
                 let elements = read_list(buf, vm)?;
                 Ok(elements.into_pyobject(vm))
             }
+            SET_BYTE => {
+                let elements = read_list(buf, vm)?;
+                let set = PySet::new_ref(&vm.ctx);
+                for element in elements {
+                    set.add(element, vm)?;
+                }
+                Ok(set.into_pyobject(vm))
+            }
+            FROZEN_SET_BYTE => {
+                let elements = read_list(buf, vm)?;
+                let set = PyFrozenSet::from_iter(vm, elements.into_iter())?;
+                Ok(set.into_pyobject(vm))
+            }
             TUPLE_BYTE => {
                 let elements = read_list(buf, vm)?;
                 let pytuple = PyTuple::new_ref(elements, &vm.ctx).into_pyobject(vm);
@@ -248,6 +293,11 @@ mod decl {
                         return Err(vm.new_value_error("Couldn't unmarshal dicitionary.".to_owned())),
                 });
                 Ok(pydict.into_pyobject(vm))
+            }
+            BYTE_ARRAY => {
+                // Following CPython, after marshaling, byte arrays are converted into bytes.
+                let byte_array = PyBytes::from(buf[..].to_vec());
+                Ok(byte_array.into_pyobject(vm))
             }
             _ => {
                 // If prefix is not identifiable, assume CodeObject, error out if it doesn't match.
