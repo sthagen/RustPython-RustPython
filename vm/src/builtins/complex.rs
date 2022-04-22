@@ -1,11 +1,14 @@
 use super::{float, PyStr, PyTypeRef};
 use crate::{
-    function::{IntoPyObject, OptionalArg, OptionalOption},
+    convert::ToPyObject,
+    function::{
+        OptionalArg, OptionalOption,
+        PyArithmeticValue::{self, *},
+        PyComparisonValue,
+    },
+    pyclass::PyClassImpl,
     types::{Comparable, Constructor, Hashable, PyComparisonOp},
-    IdProtocol,
-    PyArithmeticValue::{self, *},
-    PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
-    TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
 use num_complex::Complex64;
 use num_traits::Zero;
@@ -26,8 +29,8 @@ impl PyValue for PyComplex {
     }
 }
 
-impl IntoPyObject for Complex64 {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+impl ToPyObject for Complex64 {
+    fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         PyComplex::new_ref(self, &vm.ctx).into()
     }
 }
@@ -156,7 +159,7 @@ impl Constructor for PyComplex {
             OptionalArg::Present(obj) => {
                 if let Some(c) = obj.try_complex(vm)? {
                     c
-                } else if obj.class().issubclass(&vm.ctx.types.str_type) {
+                } else if obj.class().fast_issubclass(&vm.ctx.types.str_type) {
                     return Err(
                         vm.new_type_error("complex() second arg can't be a string".to_owned())
                     );

@@ -1,10 +1,12 @@
 use super::{IterStatus, PositionIterInternal, PyGenericAlias, PyIntRef, PyTupleRef, PyTypeRef};
 use crate::common::lock::{PyMutex, PyRwLock};
 use crate::{
-    function::{IntoPyObject, OptionalArg},
+    convert::ToPyObject,
+    function::OptionalArg,
     protocol::{PyIter, PyIterReturn},
+    pyclass::PyClassImpl,
     types::{Constructor, IterNext, IterNextIterable},
-    PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
 use num_bigint::BigInt;
 use num_traits::Zero;
@@ -55,7 +57,7 @@ impl PyEnumerate {
     #[pymethod(magic)]
     fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyIter, BigInt)) {
         (
-            zelf.clone_class(),
+            zelf.class().clone(),
             (zelf.iterator.clone(), zelf.counter.read().clone()),
         )
     }
@@ -71,7 +73,7 @@ impl IterNext for PyEnumerate {
         let mut counter = zelf.counter.write();
         let position = counter.clone();
         *counter += 1;
-        Ok(PyIterReturn::Return((position, next_obj).into_pyobject(vm)))
+        Ok(PyIterReturn::Return((position, next_obj).to_pyobject(vm)))
     }
 }
 

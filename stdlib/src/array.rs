@@ -17,9 +17,8 @@ mod array {
                 PyListRef, PyStr, PyStrRef, PyTupleRef, PyTypeRef,
             },
             class_or_notimplemented,
-            function::{
-                ArgBytesLike, ArgIntoFloat, ArgIterable, IntoPyObject, IntoPyResult, OptionalArg,
-            },
+            convert::{ToPyObject, ToPyResult, TryFromBorrowedObject, TryFromObject},
+            function::{ArgBytesLike, ArgIntoFloat, ArgIterable, OptionalArg, PyComparisonValue},
             protocol::{
                 BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn,
                 PyMappingMethods,
@@ -32,15 +31,13 @@ mod array {
                 AsBuffer, AsMapping, Comparable, Constructor, IterNext, IterNextIterable, Iterable,
                 PyComparisonOp,
             },
-            IdProtocol, PyComparisonValue, PyObject, PyObjectRef, PyObjectView, PyObjectWrap,
-            PyRef, PyResult, PyValue, TryFromBorrowedObject, TryFromObject, TypeProtocol,
+            AsObject, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
             VirtualMachine,
         },
     };
     use itertools::Itertools;
     use num_traits::ToPrimitive;
-    use std::cmp::Ordering;
-    use std::{fmt, os::raw};
+    use std::{cmp::Ordering, fmt, os::raw};
 
     macro_rules! def_array_enum {
         ($(($n:ident, $t:ty, $c:literal, $scode:literal)),*$(,)?) => {
@@ -49,7 +46,6 @@ mod array {
                 $($n(Vec<$t>),)*
             }
 
-            #[allow(clippy::naive_bytecount, clippy::float_cmp)]
             impl ArrayContentType {
                 fn from_char(c: char) -> Result<Self, String> {
                     match c {
@@ -119,7 +115,7 @@ mod array {
                         let i = v.wrap_index(i).ok_or_else(|| {
                             vm.new_index_error("pop index out of range".to_owned())
                         })?;
-                            v.remove(i).into_pyresult(vm)
+                            v.remove(i).to_pyresult(vm)
                         })*
                     }
                 }
@@ -260,7 +256,7 @@ mod array {
                 ) -> Option<PyResult> {
                     match self {
                         $(ArrayContentType::$n(v) => {
-                            v.get(i).map(|x| x.into_pyresult(vm))
+                            v.get(i).map(|x| x.to_pyresult(vm))
                         })*
                     }
                 }
@@ -268,7 +264,7 @@ mod array {
                 fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult {
                     match self {
                         $(ArrayContentType::$n(v) => {
-                            v.get_item_by_index(vm, i).map(|x| x.into_pyresult(vm))?
+                            v.get_item_by_index(vm, i).map(|x| x.to_pyresult(vm))?
                         })*
                     }
                 }
@@ -278,7 +274,7 @@ mod array {
                         $(ArrayContentType::$n(v) => {
                             let r = v.get_item_by_slice(vm, slice)?;
                             let array = PyArray::from(ArrayContentType::$n(r));
-                            array.into_pyresult(vm)
+                            array.to_pyresult(vm)
                         })*
                     }
                 }
@@ -484,7 +480,7 @@ mod array {
                     $f_swap(self)
                 }
                 fn to_object(self, vm: &VirtualMachine) -> PyObjectRef {
-                    $f_to(self).into_object(vm)
+                    $f_to(self).into_pyobject(vm)
                 }
             }
         )*};
@@ -570,11 +566,11 @@ mod array {
         }
     }
 
-    impl IntoPyResult for WideChar {
-        fn into_pyresult(self, vm: &VirtualMachine) -> PyResult {
+    impl ToPyResult for WideChar {
+        fn to_pyresult(self, vm: &VirtualMachine) -> PyResult {
             Ok(
                 String::from(char::try_from(self).map_err(|e| vm.new_unicode_encode_error(e))?)
-                    .into_pyobject(vm),
+                    .to_pyobject(vm),
             )
         }
     }
@@ -1117,11 +1113,11 @@ mod array {
                 return Self::reduce(zelf, vm);
             }
             let array = zelf.read();
-            let cls = zelf.as_object().clone_class();
+            let cls = zelf.class().clone();
             let typecode = vm.ctx.new_str(array.typecode_str());
             let bytes = vm.ctx.new_bytes(array.get_bytes().to_vec());
             let code = MachineFormatCode::from_typecode(array.typecode()).unwrap();
-            let code = PyInt::from(u8::from(code)).into_object(vm);
+            let code = PyInt::from(u8::from(code)).into_pyobject(vm);
             let module = vm.import("array", None, 0)?;
             let func = module.get_attr("_array_reconstructor", vm)?;
             Ok((
@@ -1137,11 +1133,11 @@ mod array {
             vm: &VirtualMachine,
         ) -> PyResult<(PyObjectRef, PyTupleRef, Option<PyDictRef>)> {
             let array = zelf.read();
-            let cls = zelf.as_object().clone_class();
+            let cls = zelf.class().clone();
             let typecode = vm.ctx.new_str(array.typecode_str());
             let values = if array.typecode() == 'u' {
                 let s = Self::_wchar_bytes_to_string(array.get_bytes(), array.itemsize(), vm)?;
-                s.chars().map(|x| x.into_pyobject(vm)).collect()
+                s.chars().map(|x| x.to_pyobject(vm)).collect()
             } else {
                 array.get_objects(vm)
             };
@@ -1269,7 +1265,7 @@ mod array {
                 position: AtomicUsize::new(0),
                 array: zelf,
             }
-            .into_object(vm))
+            .into_pyobject(vm))
         }
     }
 
@@ -1446,7 +1442,7 @@ mod array {
     }
 
     fn check_array_type(typ: PyTypeRef, vm: &VirtualMachine) -> PyResult<PyTypeRef> {
-        if !typ.issubclass(PyArray::class(vm)) {
+        if !typ.fast_issubclass(PyArray::class(vm)) {
             return Err(
                 vm.new_type_error(format!("{} is not a subtype of array.array", typ.name()))
             );
@@ -1474,15 +1470,15 @@ mod array {
             }
         }};
         ($VM:ident, $BYTE:ident, $TY:ty, $BIG_ENDIAN:ident) => {
-            chunk_to_obj!($BYTE, $TY, $BIG_ENDIAN).into_pyobject($VM)
+            chunk_to_obj!($BYTE, $TY, $BIG_ENDIAN).to_pyobject($VM)
         };
         ($VM:ident, $BYTE:ident, $SIGNED_TY:ty, $UNSIGNED_TY:ty, $SIGNED:ident, $BIG_ENDIAN:ident) => {{
             let b = <[u8; ::std::mem::size_of::<$SIGNED_TY>()]>::try_from($BYTE).unwrap();
             match ($SIGNED, $BIG_ENDIAN) {
-                (false, false) => <$UNSIGNED_TY>::from_le_bytes(b).into_pyobject($VM),
-                (false, true) => <$UNSIGNED_TY>::from_be_bytes(b).into_pyobject($VM),
-                (true, false) => <$SIGNED_TY>::from_le_bytes(b).into_pyobject($VM),
-                (true, true) => <$SIGNED_TY>::from_be_bytes(b).into_pyobject($VM),
+                (false, false) => <$UNSIGNED_TY>::from_le_bytes(b).to_pyobject($VM),
+                (false, true) => <$UNSIGNED_TY>::from_be_bytes(b).to_pyobject($VM),
+                (true, false) => <$SIGNED_TY>::from_le_bytes(b).to_pyobject($VM),
+                (true, true) => <$SIGNED_TY>::from_be_bytes(b).to_pyobject($VM),
             }
         }};
     }

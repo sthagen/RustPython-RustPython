@@ -2,19 +2,19 @@ use super::{float, PyByteArray, PyBytes, PyStr, PyStrRef, PyTypeRef};
 use crate::{
     bytesinner::PyBytesInner,
     common::hash,
+    convert::{ToPyObject, ToPyResult},
     format::FormatSpec,
-    function::{ArgIntoBool, IntoPyObject, IntoPyResult, OptionalArg, OptionalOption},
-    try_value_from_borrowed_object,
+    function::{ArgIntoBool, OptionalArg, OptionalOption, PyArithmeticValue, PyComparisonValue},
+    pyclass::PyClassImpl,
     types::{Comparable, Constructor, Hashable, PyComparisonOp},
-    IdProtocol, PyArithmeticValue, PyClassImpl, PyComparisonValue, PyContext, PyObject,
-    PyObjectRef, PyRef, PyResult, PyValue, TryFromBorrowedObject, TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromBorrowedObject,
+    VirtualMachine,
 };
 use bstr::ByteSlice;
 use num_bigint::{BigInt, BigUint, Sign};
 use num_integer::Integer;
 use num_traits::{One, Pow, PrimInt, Signed, ToPrimitive, Zero};
 use std::fmt;
-use std::mem::size_of;
 
 /// int(x=0) -> integer
 /// int(x, base=10) -> integer
@@ -58,7 +58,7 @@ impl PyValue for PyInt {
         &vm.ctx.types.int_type
     }
 
-    fn into_object(self, vm: &VirtualMachine) -> PyObjectRef {
+    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.new_int(self.value).into()
     }
 
@@ -69,8 +69,8 @@ impl PyValue for PyInt {
 
 macro_rules! impl_into_pyobject_int {
     ($($t:ty)*) => {$(
-        impl IntoPyObject for $t {
-            fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+        impl ToPyObject for $t {
+            fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
                 vm.ctx.new_int(self).into()
             }
         }
@@ -83,9 +83,9 @@ macro_rules! impl_try_from_object_int {
     ($(($t:ty, $to_prim:ident),)*) => {$(
         impl TryFromBorrowedObject for $t {
             fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Self> {
-                try_value_from_borrowed_object(vm, obj, |int: &PyInt| {
+                obj.try_value_with(|int: &PyInt| {
                     int.try_to_primitive(vm)
-                })
+                }, vm)
             }
         }
     )*};
@@ -225,7 +225,7 @@ impl Constructor for PyInt {
                 let val = if cls.is(&vm.ctx.types.int_type) {
                     match val.downcast_exact::<PyInt>(vm) {
                         Ok(i) => {
-                            return Ok(i.into_pyobject(vm));
+                            return Ok(i.to_pyobject(vm));
                         }
                         Err(val) => val,
                     }
@@ -241,7 +241,7 @@ impl Constructor for PyInt {
             Ok(Zero::zero())
         }?;
 
-        Self::with_value(cls, value, vm).into_pyresult(vm)
+        Self::with_value(cls, value, vm).to_pyresult(vm)
     }
 }
 
@@ -583,7 +583,7 @@ impl PyInt {
 
     #[pymethod(magic)]
     fn sizeof(&self) -> usize {
-        size_of::<Self>() + (((self.value.bits() + 7) & !7) / 8) as usize
+        std::mem::size_of::<Self>() + (((self.value.bits() + 7) & !7) / 8) as usize
     }
 
     #[pymethod]
@@ -715,7 +715,7 @@ impl PyInt {
 
     #[pymethod(magic)]
     fn getnewargs(&self, vm: &VirtualMachine) -> PyObjectRef {
-        (self.value.clone(),).into_pyobject(vm)
+        (self.value.clone(),).to_pyobject(vm)
     }
 }
 

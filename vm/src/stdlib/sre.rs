@@ -8,12 +8,13 @@ mod _sre {
             PyTupleRef, PyTypeRef,
         },
         common::{ascii, hash::PyHash},
-        function::{ArgCallable, IntoPyObject, OptionalArg, PosArgs},
+        convert::ToPyObject,
+        function::{ArgCallable, OptionalArg, PosArgs, PyComparisonValue},
         protocol::{PyBuffer, PyMappingMethods},
         stdlib::sys,
         types::{AsMapping, Comparable, Hashable},
-        PyComparisonValue, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromBorrowedObject,
-        TryFromObject, VirtualMachine,
+        PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromBorrowedObject, TryFromObject,
+        VirtualMachine,
     };
     use core::str;
     use crossbeam_utils::atomic::AtomicCell;
@@ -83,13 +84,14 @@ mod _sre {
         // isbytes will be hanging (-1)
         // here is just a hack to let re.Scanner works only with str not bytes
         let isbytes = !vm.is_none(&pattern) && !pattern.payload_is::<PyStr>();
+        let code = code.try_to_value(vm)?;
         Ok(Pattern {
             pattern,
             flags: SreFlag::from_bits_truncate(flags),
-            code: vm.extract_elements::<u32>(&code)?,
+            code,
             groups,
             groupindex,
-            indexgroup: vm.extract_elements(&indexgroup)?,
+            indexgroup: indexgroup.try_to_value(vm)?,
             isbytes,
         })
     }
@@ -482,7 +484,7 @@ mod _sre {
                 /* get segment following last match */
                 sublist.push(slice_drive(&state.string, last_pos, state.end, vm));
 
-                let list = PyList::from(sublist).into_object(vm);
+                let list = PyList::from(sublist).into_pyobject(vm);
 
                 let join_type: PyObjectRef = if zelf.isbytes {
                     vm.ctx.new_bytes(vec![]).into()
@@ -491,11 +493,7 @@ mod _sre {
                 };
                 let ret = vm.call_method(&join_type, "join", (list,))?;
 
-                Ok(if subn {
-                    (ret, n).into_pyobject(vm)
-                } else {
-                    ret
-                })
+                Ok(if subn { (ret, n).to_pyobject(vm) } else { ret })
             })
         }
 
@@ -612,7 +610,7 @@ mod _sre {
         #[pyproperty]
         fn regs(&self, vm: &VirtualMachine) -> PyTupleRef {
             PyTuple::new_ref(
-                self.regs.iter().map(|&x| x.into_pyobject(vm)).collect(),
+                self.regs.iter().map(|&x| x.to_pyobject(vm)).collect(),
                 &vm.ctx,
             )
         }
@@ -651,7 +649,7 @@ mod _sre {
                 .with_str_drive(self.string.clone(), vm, |str_drive| {
                     let args = args.into_vec();
                     if args.is_empty() {
-                        return Ok(self.get_slice(0, str_drive, vm).unwrap().into_pyobject(vm));
+                        return Ok(self.get_slice(0, str_drive, vm).unwrap().to_pyobject(vm));
                     }
                     let mut v: Vec<PyObjectRef> = args
                         .into_iter()
@@ -660,7 +658,7 @@ mod _sre {
                                 .ok_or_else(|| vm.new_index_error("no such group".to_owned()))
                                 .map(|index| {
                                     self.get_slice(index, str_drive, vm)
-                                        .map(|x| x.into_pyobject(vm))
+                                        .map(|x| x.to_pyobject(vm))
                                         .unwrap_or_else(|| vm.ctx.none())
                                 })
                         })
@@ -701,7 +699,7 @@ mod _sre {
                     let v: Vec<PyObjectRef> = (1..self.regs.len())
                         .map(|i| {
                             self.get_slice(i, str_drive, vm)
-                                .map(|s| s.into_pyobject(vm))
+                                .map(|s| s.to_pyobject(vm))
                                 .unwrap_or_else(|| default.clone())
                         })
                         .collect();
@@ -725,7 +723,7 @@ mod _sre {
                         let value = self
                             .get_index(index, vm)
                             .and_then(|x| self.get_slice(x, str_drive, vm))
-                            .map(|x| x.into_pyobject(vm))
+                            .map(|x| x.to_pyobject(vm))
                             .unwrap_or_else(|| default.clone());
                         dict.set_item(key, value, vm)?;
                     }
@@ -788,7 +786,7 @@ mod _sre {
             subscript: Some(|mapping, needle, vm| {
                 Self::mapping_downcast(mapping)
                     .getitem(needle.to_owned(), vm)
-                    .map(|x| x.into_pyobject(vm))
+                    .map(|x| x.to_pyobject(vm))
             }),
             ass_subscript: None,
         };

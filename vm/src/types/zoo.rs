@@ -1,12 +1,16 @@
-use crate::builtins::{
-    asyncgenerator, builtinfunc, bytearray, bytes, classmethod, code, complex, coroutine, dict,
-    enumerate, filter, float, frame, function, generator, genericalias, getset, int, iter, list,
-    map, mappingproxy, memory, module, namespace, object, property, pybool, pystr, pysuper,
-    pytype::{self, PyTypeRef},
-    pyunion, range, set, singletons, slice, staticmethod, traceback, tuple, weakproxy, weakref,
-    zip,
+use crate::{
+    builtins::{
+        asyncgenerator, builtinfunc, bytearray, bytes, classmethod, code, complex, coroutine, dict,
+        enumerate, filter, float, frame, function, generator, genericalias, getset, int, iter,
+        list, map, mappingproxy, memory, module, namespace, object, property, pybool, pystr,
+        pysuper,
+        pytype::{self, PyTypeRef},
+        pyunion, range, set, singletons, slice, staticmethod, traceback, tuple, weakproxy, weakref,
+        zip,
+    },
+    pyclass::StaticType,
+    pyobject::PyContext,
 };
-use crate::{PyContext, StaticType};
 
 /// Holder of references to builtin types.
 #[derive(Debug, Clone)]
@@ -87,8 +91,9 @@ pub struct TypeZoo {
 }
 
 impl TypeZoo {
+    #[cold]
     pub(crate) fn init() -> Self {
-        let (type_type, object_type, weakref_type) = crate::pyobjectrc::init_type_hierarchy();
+        let (type_type, object_type, weakref_type) = crate::pyobject::init_type_hierarchy();
         Self {
             // the order matters for type, object, weakref, and int
             type_type: pytype::PyType::init_manually(type_type).clone(),
@@ -175,6 +180,7 @@ impl TypeZoo {
     }
 
     /// Fill attributes of builtin types.
+    #[cold]
     pub(crate) fn extend(context: &PyContext) {
         pytype::init(context);
         object::init(context);

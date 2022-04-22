@@ -1,8 +1,7 @@
 use crate::{
     builtins::iter::PySequenceIterator,
-    function::{IntoPyObject, IntoPyResult},
-    PyObject, PyObjectRef, PyObjectWrap, PyResult, PyValue, TryFromObject, TypeProtocol,
-    VirtualMachine,
+    convert::{ToPyObject, ToPyResult},
+    AsObject, PyObject, PyObjectRef, PyResult, PyValue, TryFromObject, VirtualMachine,
 };
 use std::borrow::Borrow;
 use std::ops::Deref;
@@ -70,9 +69,19 @@ impl PyIter<PyObjectRef> {
     }
 }
 
-impl PyObjectWrap for PyIter<PyObjectRef> {
-    fn into_object(self) -> PyObjectRef {
-        self.0
+impl From<PyIter<PyObjectRef>> for PyObjectRef {
+    fn from(value: PyIter<PyObjectRef>) -> PyObjectRef {
+        value.0
+    }
+}
+
+impl<O> Borrow<PyObject> for PyIter<O>
+where
+    O: Borrow<PyObject>,
+{
+    #[inline(always)]
+    fn borrow(&self) -> &PyObject {
+        self.0.borrow()
     }
 }
 
@@ -80,6 +89,7 @@ impl<O> AsRef<PyObject> for PyIter<O>
 where
     O: Borrow<PyObject>,
 {
+    #[inline(always)]
     fn as_ref(&self) -> &PyObject {
         self.0.borrow()
     }
@@ -90,13 +100,15 @@ where
     O: Borrow<PyObject>,
 {
     type Target = PyObject;
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         self.0.borrow()
     }
 }
 
-impl IntoPyObject for PyIter<PyObjectRef> {
-    fn into_pyobject(self, _vm: &VirtualMachine) -> PyObjectRef {
+impl ToPyObject for PyIter<PyObjectRef> {
+    #[inline(always)]
+    fn to_pyobject(self, _vm: &VirtualMachine) -> PyObjectRef {
         self.into()
     }
 }
@@ -121,7 +133,7 @@ impl TryFromObject for PyIter<PyObjectRef> {
                 )))
             }
         } else if let Ok(seq_iter) = PySequenceIterator::new(iter_target.clone(), vm) {
-            Ok(Self(seq_iter.into_object(vm)))
+            Ok(Self(seq_iter.into_pyobject(vm)))
         } else {
             Err(vm.new_type_error(format!(
                 "'{}' object is not iterable",
@@ -141,7 +153,7 @@ impl PyIterReturn {
     pub fn from_pyresult(result: PyResult, vm: &VirtualMachine) -> PyResult<Self> {
         match result {
             Ok(obj) => Ok(Self::Return(obj)),
-            Err(err) if err.isinstance(&vm.ctx.exceptions.stop_iteration) => {
+            Err(err) if err.fast_isinstance(&vm.ctx.exceptions.stop_iteration) => {
                 let args = err.get_arg(0);
                 Ok(Self::StopIteration(args))
             }
@@ -152,10 +164,10 @@ impl PyIterReturn {
     pub fn from_getitem_result(result: PyResult, vm: &VirtualMachine) -> PyResult<Self> {
         match result {
             Ok(obj) => Ok(Self::Return(obj)),
-            Err(err) if err.isinstance(&vm.ctx.exceptions.index_error) => {
+            Err(err) if err.fast_isinstance(&vm.ctx.exceptions.index_error) => {
                 Ok(Self::StopIteration(None))
             }
-            Err(err) if err.isinstance(&vm.ctx.exceptions.stop_iteration) => {
+            Err(err) if err.fast_isinstance(&vm.ctx.exceptions.stop_iteration) => {
                 let args = err.get_arg(0);
                 Ok(Self::StopIteration(args))
             }
@@ -174,8 +186,8 @@ impl PyIterReturn {
     }
 }
 
-impl IntoPyResult for PyIterReturn {
-    fn into_pyresult(self, vm: &VirtualMachine) -> PyResult {
+impl ToPyResult for PyIterReturn {
+    fn to_pyresult(self, vm: &VirtualMachine) -> PyResult {
         match self {
             Self::Return(obj) => Ok(obj),
             Self::StopIteration(v) => Err(vm.new_stop_iteration(v)),
@@ -183,9 +195,9 @@ impl IntoPyResult for PyIterReturn {
     }
 }
 
-impl IntoPyResult for PyResult<PyIterReturn> {
-    fn into_pyresult(self, vm: &VirtualMachine) -> PyResult {
-        self.and_then(|obj| obj.into_pyresult(vm))
+impl ToPyResult for PyResult<PyIterReturn> {
+    fn to_pyresult(self, vm: &VirtualMachine) -> PyResult {
+        self.and_then(|obj| obj.to_pyresult(vm))
     }
 }
 

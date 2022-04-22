@@ -3,9 +3,10 @@ pub(crate) use resource::make_module;
 #[pymodule]
 mod resource {
     use crate::vm::{
-        function::{IntoPyException, IntoPyObject},
+        convert::{ToPyException, ToPyObject},
         stdlib::os,
-        PyObject, PyObjectRef, PyResult, PyStructSequence, TryFromBorrowedObject, VirtualMachine,
+        types::PyStructSequence,
+        PyObject, PyObjectRef, PyResult, TryFromBorrowedObject, VirtualMachine,
     };
     use std::{io, mem};
 
@@ -122,7 +123,7 @@ mod resource {
             if e.kind() == io::ErrorKind::InvalidInput {
                 vm.new_value_error("invalid who parameter".to_owned())
             } else {
-                e.into_pyexception(vm)
+                e.to_pyexception(vm)
             }
         })
     }
@@ -130,7 +131,7 @@ mod resource {
     struct Limits(libc::rlimit);
     impl TryFromBorrowedObject for Limits {
         fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Self> {
-            let seq = vm.extract_elements::<libc::rlim_t>(obj)?;
+            let seq: Vec<libc::rlim_t> = obj.try_to_value(vm)?;
             match *seq {
                 [cur, max] => Ok(Self(libc::rlimit {
                     rlim_cur: cur & RLIM_INFINITY,
@@ -140,9 +141,9 @@ mod resource {
             }
         }
     }
-    impl IntoPyObject for Limits {
-        fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
-            (self.0.rlim_cur, self.0.rlim_max).into_pyobject(vm)
+    impl ToPyObject for Limits {
+        fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+            (self.0.rlim_cur, self.0.rlim_max).to_pyobject(vm)
         }
     }
 
@@ -180,7 +181,7 @@ mod resource {
             io::ErrorKind::PermissionDenied => {
                 vm.new_value_error("not allowed to raise maximum limit".to_owned())
             }
-            _ => e.into_pyexception(vm),
+            _ => e.to_pyexception(vm),
         })
     }
 }

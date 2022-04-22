@@ -9,6 +9,7 @@ pub mod array;
 mod binascii;
 mod bisect;
 mod cmath;
+mod contextvars;
 mod csv;
 mod dis;
 mod gc;
@@ -17,12 +18,13 @@ mod json;
 mod math;
 mod platform;
 mod pyexpat;
+mod pystruct;
 mod random;
+mod statistics;
 // TODO: maybe make this an extension module, if we ever get those
 // mod re;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod socket;
-mod statistics;
 #[cfg(unix)]
 mod syslog;
 mod unicodedata;
@@ -77,6 +79,7 @@ pub fn get_module_inits() -> impl Iterator<Item = (Cow<'static, str>, StdlibInit
             "binascii" => binascii::make_module,
             "_bisect" => bisect::make_module,
             "cmath" => cmath::make_module,
+            "_contextvars" => contextvars::make_module,
             "_csv" => csv::make_module,
             "_dis" => dis::make_module,
             "gc" => gc::make_module,
@@ -87,8 +90,10 @@ pub fn get_module_inits() -> impl Iterator<Item = (Cow<'static, str>, StdlibInit
             "_platform" => platform::make_module,
             "_random" => random::make_module,
             "_statistics" => statistics::make_module,
+            "_struct" => pystruct::make_module,
             "unicodedata" => unicodedata::make_module,
             "zlib" => zlib::make_module,
+            "_statistics" => statistics::make_module,
             // crate::vm::sysmodule::sysconfigdata_name() => sysconfigdata::make_module,
         }
         // parser related modules:

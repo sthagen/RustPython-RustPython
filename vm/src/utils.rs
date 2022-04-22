@@ -1,16 +1,28 @@
 use crate::{
     builtins::{PyFloat, PyStr},
-    function::{IntoPyException, IntoPyObject},
-    PyObject, PyObjectRef, PyObjectWrap, PyResult, TryFromObject, TypeProtocol, VirtualMachine,
+    convert::{ToPyException, ToPyObject},
+    AsObject, PyObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
 };
 use num_traits::ToPrimitive;
+use std::borrow::Borrow;
 
 pub enum Either<A, B> {
     A(A),
     B(B),
 }
 
+impl<A: Borrow<PyObject>, B: Borrow<PyObject>> Borrow<PyObject> for Either<A, B> {
+    #[inline(always)]
+    fn borrow(&self) -> &PyObject {
+        match self {
+            Either::A(a) => a.borrow(),
+            Either::B(b) => b.borrow(),
+        }
+    }
+}
+
 impl<A: AsRef<PyObject>, B: AsRef<PyObject>> AsRef<PyObject> for Either<A, B> {
+    #[inline(always)]
     fn as_ref(&self) -> &PyObject {
         match self {
             Either::A(a) => a.as_ref(),
@@ -19,20 +31,22 @@ impl<A: AsRef<PyObject>, B: AsRef<PyObject>> AsRef<PyObject> for Either<A, B> {
     }
 }
 
-impl<A: PyObjectWrap, B: PyObjectWrap> PyObjectWrap for Either<A, B> {
-    fn into_object(self) -> PyObjectRef {
-        match self {
-            Either::A(a) => a.into_object(),
-            Either::B(b) => b.into_object(),
+impl<A: Into<PyObjectRef>, B: Into<PyObjectRef>> From<Either<A, B>> for PyObjectRef {
+    #[inline(always)]
+    fn from(value: Either<A, B>) -> Self {
+        match value {
+            Either::A(a) => a.into(),
+            Either::B(b) => b.into(),
         }
     }
 }
 
-impl<A: IntoPyObject, B: IntoPyObject> IntoPyObject for Either<A, B> {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+impl<A: ToPyObject, B: ToPyObject> ToPyObject for Either<A, B> {
+    #[inline(always)]
+    fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         match self {
-            Self::A(a) => a.into_pyobject(vm),
-            Self::B(b) => b.into_pyobject(vm),
+            Self::A(a) => a.to_pyobject(vm),
+            Self::B(b) => b.to_pyobject(vm),
         }
     }
 }
@@ -106,8 +120,8 @@ impl TryFromObject for std::time::Duration {
     }
 }
 
-impl IntoPyObject for std::convert::Infallible {
-    fn into_pyobject(self, _vm: &VirtualMachine) -> PyObjectRef {
+impl ToPyObject for std::convert::Infallible {
+    fn to_pyobject(self, _vm: &VirtualMachine) -> PyObjectRef {
         match self {}
     }
 }
@@ -118,13 +132,13 @@ pub trait ToCString {
 
 impl ToCString for &str {
     fn to_cstring(&self, vm: &VirtualMachine) -> PyResult<std::ffi::CString> {
-        std::ffi::CString::new(*self).map_err(|err| err.into_pyexception(vm))
+        std::ffi::CString::new(*self).map_err(|err| err.to_pyexception(vm))
     }
 }
 
 impl ToCString for PyStr {
     fn to_cstring(&self, vm: &VirtualMachine) -> PyResult<std::ffi::CString> {
-        std::ffi::CString::new(self.as_ref()).map_err(|err| err.into_pyexception(vm))
+        std::ffi::CString::new(self.as_ref()).map_err(|err| err.to_pyexception(vm))
     }
 }
 

@@ -9,14 +9,17 @@ use crate::common::{
 };
 use crate::{
     function::{FuncArgs, KwArgs, OptionalArg},
+    pyclass::{PyClassImpl, StaticType},
     types::{Callable, GetAttr, PyTypeFlags, PyTypeSlots, SetAttr},
-    IdProtocol, PyAttributes, PyClassImpl, PyContext, PyLease, PyObjectRef, PyObjectWeak, PyRef,
-    PyResult, PyValue, StaticType, TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObjectRef, PyObjectWeak, PyRef, PyResult, PyValue, VirtualMachine,
 };
 use itertools::Itertools;
-use std::collections::HashSet;
-use std::fmt;
-use std::ops::Deref;
+use std::{
+    borrow::Borrow,
+    collections::{HashMap, HashSet},
+    fmt,
+    ops::Deref,
+};
 
 /// type(object_or_name, bases, dict)
 /// type(object) -> the object's type
@@ -31,6 +34,13 @@ pub struct PyType {
     pub slots: PyTypeSlots,
 }
 
+pub type PyTypeRef = PyRef<PyType>;
+
+/// For attributes we do not use a dict, but a hashmap. This is probably
+/// faster, unordered, and only supports strings as keys.
+/// TODO: class attributes should maintain insertion order (use IndexMap here)
+pub type PyAttributes = HashMap<String, PyObjectRef, ahash::RandomState>;
+
 impl fmt::Display for PyType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.name(), f)
@@ -42,8 +52,6 @@ impl fmt::Debug for PyType {
         write!(f, "[PyType {}]", &self.name())
     }
 }
-
-pub type PyTypeRef = PyRef<PyType>;
 
 impl PyValue for PyType {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
@@ -152,9 +160,11 @@ impl PyType {
 
     // This is used for class initialisation where the vm is not yet available.
     pub fn set_str_attr<V: Into<PyObjectRef>>(&self, attr_name: &str, value: V) {
-        self.attributes
-            .write()
-            .insert(attr_name.to_owned(), value.into());
+        self._set_str_attr(attr_name, value.into())
+    }
+
+    fn _set_str_attr(&self, attr_name: &str, value: PyObjectRef) {
+        self.attributes.write().insert(attr_name.to_owned(), value);
     }
 
     /// This is the internal get_attr implementation for fast lookup on a class.
@@ -199,8 +209,11 @@ impl PyType {
 }
 
 impl PyTypeRef {
-    pub fn issubclass<R: IdProtocol>(&self, cls: R) -> bool {
-        self._issubclass(cls)
+    /// Determines if `subclass` is actually a subclass of `cls`, this doesn't call __subclasscheck__,
+    /// so only use this if `cls` is known to have not overridden the base __subclasscheck__ magic
+    /// method.
+    pub fn fast_issubclass(&self, cls: &impl Borrow<crate::PyObject>) -> bool {
+        self.as_object().is(cls.borrow()) || self.mro.iter().any(|c| c.is(cls.borrow()))
     }
 
     pub fn iter_mro(&self) -> impl Iterator<Item = &PyTypeRef> + DoubleEndedIterator {
@@ -217,7 +230,7 @@ impl PyType {
     // bound method for every type
     pub(crate) fn __new__(zelf: PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         let (subtype, args): (PyRef<Self>, FuncArgs) = args.bind(vm)?;
-        if !subtype.issubclass(&zelf) {
+        if !subtype.fast_issubclass(&zelf) {
             return Err(vm.new_type_error(format!(
                 "{zelf}.__new__({subtype}): {subtype} is not a subtype of {zelf}",
                 zelf = zelf.name(),
@@ -266,12 +279,12 @@ impl PyType {
 
     #[pymethod(magic)]
     fn instancecheck(zelf: PyRef<Self>, obj: PyObjectRef) -> bool {
-        obj.isinstance(&zelf)
+        obj.fast_isinstance(&zelf)
     }
 
     #[pymethod(magic)]
     fn subclasscheck(zelf: PyRef<Self>, subclass: PyTypeRef) -> bool {
-        subclass.issubclass(&zelf)
+        subclass.fast_issubclass(&zelf)
     }
 
     #[pyclassmethod(magic)]
@@ -325,7 +338,7 @@ impl PyType {
             .cloned()
             // We need to exclude this method from going into recursion:
             .and_then(|found| {
-                if found.isinstance(&vm.ctx.types.getset_type) {
+                if found.fast_isinstance(&vm.ctx.types.getset_type) {
                     None
                 } else {
                     Some(found)
@@ -336,14 +349,13 @@ impl PyType {
 
     #[pyproperty(magic)]
     pub fn module(&self, vm: &VirtualMachine) -> PyObjectRef {
-        // TODO: Implement getting the actual module a builtin type is from
         self.attributes
             .read()
             .get("__module__")
             .cloned()
             // We need to exclude this method from going into recursion:
             .and_then(|found| {
-                if found.isinstance(&vm.ctx.types.getset_type) {
+                if found.fast_isinstance(&vm.ctx.types.getset_type) {
                     None
                 } else {
                     Some(found)
@@ -404,7 +416,7 @@ impl PyType {
 
         let is_type_type = metatype.is(&vm.ctx.types.type_type);
         if is_type_type && args.args.len() == 1 && args.kwargs.is_empty() {
-            return Ok(args.args[0].clone_class().into());
+            return Ok(args.args[0].class().clone().into());
         }
 
         if args.args.len() != 3 {
@@ -420,6 +432,10 @@ impl PyType {
 
         let (name, bases, dict, kwargs): (PyStrRef, PyTupleRef, PyDictRef, KwArgs) =
             args.clone().bind(vm)?;
+
+        if name.as_str().contains(char::from(0)) {
+            return Err(vm.new_value_error("type name must not contain null characters".to_owned()));
+        }
 
         let bases = bases.as_slice();
         let (metatype, base, bases) = if bases.is_empty() {
@@ -446,8 +462,7 @@ impl PyType {
             // Search the bases for the proper metatype to deal with this:
             let winner = calculate_meta_class(metatype.clone(), &bases, vm)?;
             let metatype = if !winner.is(&metatype) {
-                #[allow(clippy::redundant_clone)] // false positive
-                if let Some(ref slot_new) = winner.clone().slots.new.load() {
+                if let Some(ref slot_new) = winner.slots.new.load() {
                     // Pass it to the winner
                     return slot_new(winner, args, vm);
                 }
@@ -464,38 +479,49 @@ impl PyType {
         let mut attributes = dict.to_attributes();
         if let Some(f) = attributes.get_mut("__new__") {
             if f.class().is(&vm.ctx.types.function_type) {
-                *f = PyStaticMethod::from(f.clone()).into_object(vm);
+                *f = PyStaticMethod::from(f.clone()).into_pyobject(vm);
             }
         }
 
         if let Some(f) = attributes.get_mut("__init_subclass__") {
             if f.class().is(&vm.ctx.types.function_type) {
-                *f = PyClassMethod::from(f.clone()).into_object(vm);
+                *f = PyClassMethod::from(f.clone()).into_pyobject(vm);
             }
         }
 
         if let Some(f) = attributes.get_mut("__class_getitem__") {
             if f.class().is(&vm.ctx.types.function_type) {
-                *f = PyClassMethod::from(f.clone()).into_object(vm);
+                *f = PyClassMethod::from(f.clone()).into_pyobject(vm);
             }
         }
+
+        if let Some(current_frame) = vm.current_frame() {
+            use std::collections::hash_map::Entry;
+            let entry = attributes.entry("__module__".to_owned());
+            if matches!(entry, Entry::Vacant(_)) {
+                let module_name =
+                    vm.unwrap_or_none(current_frame.globals.get_item_opt("__name__", vm)?);
+                entry.or_insert(module_name);
+            }
+        }
+
+        attributes
+            .entry("__qualname__".to_owned())
+            .or_insert_with(|| vm.ctx.new_str(name.as_str()).into());
 
         // All *classes* should have a dict. Exceptions are *instances* of
         // classes that define __slots__ and instances of built-in classes
         // (with exceptions, e.g function)
-        if !attributes.contains_key("__dict__") {
-            attributes.insert(
-                "__dict__".to_owned(),
-                vm.ctx
-                    .new_getset(
-                        "__dict__",
-                        vm.ctx.types.object_type.clone(),
-                        subtype_get_dict,
-                        subtype_set_dict,
-                    )
-                    .into(),
-            );
-        }
+        attributes.entry("__dict__".to_owned()).or_insert_with(|| {
+            vm.ctx
+                .new_getset(
+                    "__dict__",
+                    vm.ctx.types.object_type.clone(),
+                    subtype_get_dict,
+                    subtype_set_dict,
+                )
+                .into()
+        });
 
         // TODO: Flags is currently initialized with HAS_DICT. Should be
         // updated when __slots__ are supported (toggling the flag off if
@@ -569,6 +595,9 @@ impl PyType {
                 value.class().name()
             ))
         })?;
+        if name.as_str().contains(char::from(0)) {
+            return Err(vm.new_value_error("type name must not contain null characters".to_owned()));
+        }
         *self.slots.name.write() = Some(name.as_str().to_string());
         Ok(())
     }
@@ -619,7 +648,7 @@ impl GetAttr for PyType {
                 .is_some()
             {
                 if let Some(descr_get) = attr_class.mro_find_map(|cls| cls.slots.descr_get.load()) {
-                    let mcl = PyLease::into_pyref(mcl).into();
+                    let mcl = mcl.into_owned().into();
                     return descr_get(attr.clone(), Some(zelf.into()), Some(mcl), vm);
                 }
             }
@@ -690,7 +719,9 @@ impl Callable for PyType {
         vm_trace!("type_call: {:?}", zelf);
         let obj = call_slot_new(zelf.to_owned(), zelf.to_owned(), args.clone(), vm)?;
 
-        if (zelf.is(&vm.ctx.types.type_type) && args.kwargs.is_empty()) || !obj.isinstance(zelf) {
+        if (zelf.is(&vm.ctx.types.type_type) && args.kwargs.is_empty())
+            || !obj.fast_isinstance(zelf)
+        {
             return Ok(obj);
         }
 
@@ -719,7 +750,7 @@ fn find_base_dict_descr(cls: &PyTypeRef, vm: &VirtualMachine) -> Option<PyObject
 
 fn subtype_get_dict(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
     // TODO: obj.class().as_pyref() need to be supported
-    let cls = obj.clone_class();
+    let cls = obj.class().clone();
     let ret = match find_base_dict_descr(&cls, vm) {
         Some(descr) => vm.call_get_descriptor(descr, obj).unwrap_or_else(|_| {
             Err(vm.new_type_error(format!(
@@ -733,7 +764,7 @@ fn subtype_get_dict(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
 }
 
 fn subtype_set_dict(obj: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
-    let cls = obj.clone_class();
+    let cls = obj.class().clone();
     match find_base_dict_descr(&cls, vm) {
         Some(descr) => {
             let descr_set = descr
@@ -760,44 +791,6 @@ fn subtype_set_dict(obj: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -
 
 pub(crate) fn init(ctx: &PyContext) {
     PyType::extend_class(ctx, &ctx.types.type_type);
-}
-
-impl PyLease<'_, PyType> {
-    pub fn issubclass<R: IdProtocol>(&self, cls: R) -> bool {
-        self._issubclass(cls)
-    }
-}
-
-pub trait DerefToPyType {
-    fn deref_to_type(&self) -> &PyType;
-
-    /// Determines if `subclass` is actually a subclass of `cls`, this doesn't call __subclasscheck__,
-    /// so only use this if `cls` is known to have not overridden the base __subclasscheck__ magic
-    /// method.
-    fn _issubclass<R: IdProtocol>(&self, cls: R) -> bool
-    where
-        Self: IdProtocol,
-    {
-        self.is(&cls) || self.deref_to_type().mro.iter().any(|c| c.is(&cls))
-    }
-}
-
-impl DerefToPyType for PyTypeRef {
-    fn deref_to_type(&self) -> &PyType {
-        self.deref()
-    }
-}
-
-impl<'a> DerefToPyType for PyLease<'a, PyType> {
-    fn deref_to_type(&self) -> &PyType {
-        self.deref()
-    }
-}
-
-impl<T: DerefToPyType> DerefToPyType for &'_ T {
-    fn deref_to_type(&self) -> &PyType {
-        (&**self).deref_to_type()
-    }
 }
 
 pub(crate) fn call_slot_new(
@@ -879,10 +872,10 @@ fn calculate_meta_class(
     let mut winner = metatype;
     for base in bases {
         let base_type = base.class();
-        if winner.issubclass(&base_type) {
+        if winner.fast_issubclass(&base_type) {
             continue;
-        } else if base_type.issubclass(&winner) {
-            winner = PyLease::into_pyref(base_type);
+        } else if base_type.fast_issubclass(&winner) {
+            winner = base_type.into_owned();
             continue;
         }
 
@@ -953,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_linearise() {
-        let context = PyContext::new();
+        let context = PyContext::default();
         let object = &context.types.object_type;
         let type_type = &context.types.type_type;
 

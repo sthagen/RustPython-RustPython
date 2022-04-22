@@ -749,16 +749,12 @@ class TestEnum(unittest.TestCase):
         test_pickle_dump_load(self.assertIs, FloatStooges.CURLY)
         test_pickle_dump_load(self.assertIs, FloatStooges)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickle_enum_function(self):
         if isinstance(Answer, Exception):
             raise Answer
         test_pickle_dump_load(self.assertIs, Answer.him)
         test_pickle_dump_load(self.assertIs, Answer)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_pickle_enum_function_with_module(self):
         if isinstance(Question, Exception):
             raise Question
@@ -2637,8 +2633,6 @@ class TestIntFlag(unittest.TestCase):
         self.assertEqual(format(Perm.R, ''), '4')
         self.assertEqual(format(Perm.R | Perm.X, ''), '5')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_or(self):
         Perm = self.Perm
         for i in Perm:
@@ -2660,8 +2654,6 @@ class TestIntFlag(unittest.TestCase):
         Open = self.Open
         self.assertIs(Open.RO | Open.CE, Open.CE)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_and(self):
         Perm = self.Perm
         RW = Perm.R | Perm.W
@@ -2688,8 +2680,6 @@ class TestIntFlag(unittest.TestCase):
         Open = self.Open
         self.assertIs(Open.RO & Open.CE, Open.RO)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_xor(self):
         Perm = self.Perm
         for i in Perm:

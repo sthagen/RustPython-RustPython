@@ -10,14 +10,14 @@ use crate::function::ArgMapping;
 use crate::{
     bytecode,
     frame::Frame,
-    function::{FuncArgs, OptionalArg},
+    function::{FuncArgs, OptionalArg, PyComparisonValue},
+    pyclass::PyClassImpl,
     scope::Scope,
     types::{Callable, Comparable, Constructor, GetAttr, GetDescriptor, PyComparisonOp},
-    IdProtocol, PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyRef, PyResult,
-    PyValue, TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
 #[cfg(feature = "jit")]
-use crate::{common::lock::OnceCell, function::IntoPyObject};
+use crate::{common::lock::OnceCell, convert::ToPyObject};
 use itertools::Itertools;
 #[cfg(feature = "jit")]
 use rustpython_jit::CompiledCode;
@@ -275,7 +275,7 @@ impl PyFunction {
         if let Some(jitted_code) = self.jitted_code.get() {
             match jitfunc::get_jit_args(self, &func_args, jitted_code, vm) {
                 Ok(args) => {
-                    return Ok(args.invoke().into_pyobject(vm));
+                    return Ok(args.invoke().to_pyobject(vm));
                 }
                 Err(err) => info!(
                     "jit: function `{}` is falling back to being interpreted because of the \
@@ -311,9 +311,9 @@ impl PyFunction {
         let is_gen = code.flags.contains(bytecode::CodeFlags::IS_GENERATOR);
         let is_coro = code.flags.contains(bytecode::CodeFlags::IS_COROUTINE);
         match (is_gen, is_coro) {
-            (true, false) => Ok(PyGenerator::new(frame, self.name()).into_object(vm)),
-            (false, true) => Ok(PyCoroutine::new(frame, self.name()).into_object(vm)),
-            (true, true) => Ok(PyAsyncGen::new(frame, self.name()).into_object(vm)),
+            (true, false) => Ok(PyGenerator::new(frame, self.name()).into_pyobject(vm)),
+            (false, true) => Ok(PyCoroutine::new(frame, self.name()).into_pyobject(vm)),
+            (true, true) => Ok(PyAsyncGen::new(frame, self.name()).into_pyobject(vm)),
             (false, false) => vm.run_frame_full(frame),
         }
     }
@@ -461,7 +461,8 @@ impl Comparable for PyBoundMethod {
 
 impl GetAttr for PyBoundMethod {
     fn getattro(zelf: PyRef<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        if let Some(obj) = zelf.get_class_attr(name.as_str()) {
+        let class_attr = zelf.get_class_attr(name.as_str());
+        if let Some(obj) = class_attr {
             return vm.call_if_get_descriptor(obj, zelf.into());
         }
         zelf.function.clone().get_attr(name, vm)
@@ -506,6 +507,7 @@ impl PyBoundMethod {
 impl PyBoundMethod {
     #[pymethod(magic)]
     fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
+        #[allow(clippy::needless_match)] // False positive on nightly
         let funcname =
             if let Some(qname) = vm.get_attribute_opt(self.function.clone(), "__qualname__")? {
                 Some(qname)
@@ -544,7 +546,7 @@ impl PyBoundMethod {
     fn qualname(&self, vm: &VirtualMachine) -> PyResult {
         if self
             .function
-            .isinstance(&vm.ctx.types.builtin_function_or_method_type)
+            .fast_isinstance(&vm.ctx.types.builtin_function_or_method_type)
         {
             // Special case: we work with `__new__`, which is not really a method.
             // It is a function, so its `__qualname__` is just `__new__`.

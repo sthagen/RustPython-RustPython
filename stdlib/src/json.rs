@@ -6,10 +6,11 @@ mod _json {
     use super::machinery;
     use crate::vm::{
         builtins::{PyBaseExceptionRef, PyStrRef, PyTypeRef},
-        function::{IntoPyObject, IntoPyResult, OptionalArg},
+        convert::{ToPyObject, ToPyResult},
+        function::OptionalArg,
         protocol::PyIterReturn,
         types::{Callable, Constructor},
-        IdProtocol, PyObjectRef, PyObjectView, PyResult, PyValue, VirtualMachine,
+        AsObject, PyObjectRef, PyObjectView, PyResult, PyValue, VirtualMachine,
     };
     use num_bigint::BigInt;
     use std::str::FromStr;
@@ -85,7 +86,7 @@ mod _json {
             match c {
                 '"' => {
                     return scanstring(pystr, next_idx, OptionalArg::Present(self.strict), vm)
-                        .map(|x| PyIterReturn::Return(x.into_pyobject(vm)))
+                        .map(|x| PyIterReturn::Return(x.to_pyobject(vm)))
                 }
                 '{' => {
                     // TODO: parse the object in rust
@@ -206,7 +207,7 @@ mod _json {
             let idx = idx as usize;
             let mut chars = pystr.as_str().chars();
             if idx > 0 && chars.nth(idx - 1).is_none() {
-                PyIterReturn::StopIteration(Some(vm.ctx.new_int(idx).into())).into_pyresult(vm)
+                PyIterReturn::StopIteration(Some(vm.ctx.new_int(idx).into())).to_pyresult(vm)
             } else {
                 zelf.parse(
                     chars.as_str(),
@@ -215,7 +216,7 @@ mod _json {
                     zelf.to_owned().into(),
                     vm,
                 )
-                .and_then(|x| x.into_pyresult(vm))
+                .and_then(|x| x.to_pyresult(vm))
             }
         }
     }
@@ -246,7 +247,7 @@ mod _json {
     ) -> PyBaseExceptionRef {
         let get_error = || -> PyResult<_> {
             let cls = vm.try_class("json", "JSONDecodeError")?;
-            let exc = vm.invoke(cls.as_object(), (e.msg, s, e.pos))?;
+            let exc = vm.invoke(&cls, (e.msg, s, e.pos))?;
             exc.try_into_value(vm)
         };
         match get_error() {

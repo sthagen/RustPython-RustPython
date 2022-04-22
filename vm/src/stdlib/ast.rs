@@ -3,10 +3,12 @@
 //! This module makes use of the parser logic, and translates all ast nodes
 //! into python ast.AST objects.
 
+mod gen;
+
 use crate::{
     builtins::{self, PyStrRef, PyTypeRef},
-    IdProtocol, PyClassImpl, PyContext, PyObject, PyObjectRef, PyResult, PyValue, StaticType,
-    TryFromObject, TypeProtocol, VirtualMachine,
+    pyclass::{PyClassImpl, StaticType},
+    AsObject, PyContext, PyObject, PyObjectRef, PyResult, PyValue, TryFromObject, VirtualMachine,
 };
 use num_complex::Complex64;
 use num_traits::{ToPrimitive, Zero};
@@ -16,15 +18,10 @@ use rustpython_compiler as compile;
 #[cfg(feature = "rustpython-parser")]
 use rustpython_parser::parser;
 
-#[rustfmt::skip]
-#[allow(clippy::all)]
-mod gen;
-
-
 #[pymodule]
 mod _ast {
     use crate::{
-        builtins::PyStrRef, function::FuncArgs, PyObjectRef, PyResult, PyValue, TypeProtocol,
+        builtins::PyStrRef, function::FuncArgs, AsObject, PyObjectRef, PyResult, PyValue,
         VirtualMachine,
     };
     #[pyattr]
@@ -36,9 +33,9 @@ mod _ast {
     impl AstNode {
         #[pymethod(magic)]
         fn init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
-            let obj: PyObjectRef = zelf.clone_class().into();
+            let obj: PyObjectRef = zelf.class().clone().into();
             let fields = obj.get_attr("_fields", vm)?;
-            let fields = vm.extract_elements::<PyStrRef>(&fields)?;
+            let fields: Vec<PyStrRef> = fields.try_to_value(vm)?;
             let numargs = args.args.len();
             if numargs > fields.len() {
                 return Err(vm.new_type_error(format!(
@@ -108,7 +105,7 @@ impl<T: Node> Node for Vec<T> {
     }
 
     fn ast_from_object(vm: &VirtualMachine, object: PyObjectRef) -> PyResult<Self> {
-        vm.extract_elements_func(&object, |obj| Node::ast_from_object(vm, obj))
+        vm.extract_elements_with(&object, |obj| Node::ast_from_object(vm, obj))
     }
 }
 

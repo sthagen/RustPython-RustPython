@@ -1,9 +1,11 @@
 use super::{PyDict, PyDictRef, PyList, PyStr, PyStrRef, PyType, PyTypeRef};
 use crate::common::hash::PyHash;
 use crate::{
-    function::FuncArgs, types::PyComparisonOp, utils::Either, IdProtocol, PyArithmeticValue,
-    PyAttributes, PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyResult,
-    PyValue, TypeProtocol, VirtualMachine,
+    function::{FuncArgs, PyArithmeticValue, PyComparisonValue},
+    pyclass::PyClassImpl,
+    types::PyComparisonOp,
+    utils::Either,
+    AsObject, PyContext, PyObject, PyObjectRef, PyResult, PyValue, VirtualMachine,
 };
 
 /// object()
@@ -222,7 +224,7 @@ impl PyBaseObject {
 
     #[pymethod(magic)]
     pub fn dir(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyList> {
-        let attributes: PyAttributes = obj.class().get_attributes();
+        let attributes = obj.class().get_attributes();
 
         let dict = PyDict::from_attributes(attributes, vm)?.into_ref(vm);
 
@@ -253,7 +255,7 @@ impl PyBaseObject {
 
     #[pyproperty(name = "__class__")]
     fn get_class(obj: PyObjectRef) -> PyTypeRef {
-        obj.clone_class()
+        obj.class().clone()
     }
 
     #[pyproperty(name = "__class__", setter)]
@@ -298,7 +300,7 @@ impl PyBaseObject {
     fn reduce_ex(obj: PyObjectRef, proto: usize, vm: &VirtualMachine) -> PyResult {
         if let Some(reduce) = vm.get_attribute_opt(obj.clone(), "__reduce__")? {
             let object_reduce = vm.ctx.types.object_type.get_attr("__reduce__").unwrap();
-            let typ_obj: PyObjectRef = obj.clone_class().into();
+            let typ_obj: PyObjectRef = obj.class().clone().into();
             let class_reduce = typ_obj.get_attr("__reduce__", vm)?;
             if !class_reduce.is(&object_reduce) {
                 return vm.invoke(&reduce, ());
@@ -353,7 +355,7 @@ pub fn generic_setattr(
             dict.set_item(attr_name, value, vm)?;
         } else {
             dict.del_item(attr_name.clone(), vm).map_err(|e| {
-                if e.isinstance(&vm.ctx.exceptions.key_error) {
+                if e.fast_isinstance(&vm.ctx.exceptions.key_error) {
                     vm.new_attribute_error(format!(
                         "'{}' object has no attribute '{}'",
                         obj.class().name(),

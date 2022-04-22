@@ -1,10 +1,11 @@
 // sliceobject.{h,c} in CPython
 use super::{PyInt, PyIntRef, PyTupleRef, PyTypeRef};
 use crate::{
-    function::{FuncArgs, IntoPyObject, OptionalArg},
+    convert::ToPyObject,
+    function::{FuncArgs, OptionalArg, PyComparisonValue},
+    pyclass::PyClassImpl,
     types::{Comparable, Constructor, Hashable, PyComparisonOp, Unhashable},
-    PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
-    TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{One, Signed, ToPrimitive, Zero};
@@ -29,7 +30,7 @@ impl PyValue for PySlice {
 impl PySlice {
     #[pyproperty]
     fn start(&self, vm: &VirtualMachine) -> PyObjectRef {
-        self.start.clone().into_pyobject(vm)
+        self.start.clone().to_pyobject(vm)
     }
 
     fn start_ref<'a>(&'a self, vm: &'a VirtualMachine) -> &'a PyObject {
@@ -46,7 +47,7 @@ impl PySlice {
 
     #[pyproperty]
     fn step(&self, vm: &VirtualMachine) -> PyObjectRef {
-        self.step.clone().into_pyobject(vm)
+        self.step.clone().to_pyobject(vm)
     }
 
     fn step_ref<'a>(&'a self, vm: &'a VirtualMachine) -> &'a PyObject {
@@ -204,7 +205,7 @@ impl PySlice {
         (Option<PyObjectRef>, PyObjectRef, Option<PyObjectRef>),
     )> {
         Ok((
-            zelf.clone_class(),
+            zelf.class().clone(),
             (zelf.start.clone(), zelf.stop.clone(), zelf.step.clone()),
         ))
     }
@@ -451,5 +452,5 @@ impl PyEllipsis {
 
 pub fn init(context: &PyContext) {
     PySlice::extend_class(context, &context.types.slice_type);
-    PyEllipsis::extend_class(context, &context.ellipsis.clone_class());
+    PyEllipsis::extend_class(context, &context.ellipsis.class().clone());
 }

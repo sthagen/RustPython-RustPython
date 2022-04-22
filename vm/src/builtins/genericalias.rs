@@ -1,11 +1,13 @@
 use crate::{
     builtins::{PyList, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef},
     common::hash,
-    function::{FuncArgs, IntoPyObject},
+    convert::ToPyObject,
+    function::{FuncArgs, PyComparisonValue},
     protocol::PyMappingMethods,
+    pyclass::PyClassImpl,
     types::{AsMapping, Callable, Comparable, Constructor, GetAttr, Hashable, PyComparisonOp},
-    IdProtocol, PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyObjectView,
-    PyRef, PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
+    TryFromObject, VirtualMachine,
 };
 use std::fmt;
 
@@ -101,7 +103,7 @@ impl PyGenericAlias {
 
         Ok(format!(
             "{}[{}]",
-            repr_item(self.origin.as_object().to_owned(), vm)?,
+            repr_item(self.origin.clone().into(), vm)?,
             if self.args.len() == 0 {
                 "()".to_owned()
             } else {
@@ -117,17 +119,17 @@ impl PyGenericAlias {
 
     #[pyproperty(magic)]
     fn parameters(&self) -> PyObjectRef {
-        self.parameters.as_object().to_owned()
+        self.parameters.clone().into()
     }
 
     #[pyproperty(magic)]
     fn args(&self) -> PyObjectRef {
-        self.args.as_object().to_owned()
+        self.args.clone().into()
     }
 
     #[pyproperty(magic)]
     fn origin(&self) -> PyObjectRef {
-        self.origin.as_object().to_owned()
+        self.origin.clone().into()
     }
 
     #[pymethod(magic)]
@@ -141,8 +143,8 @@ impl PyGenericAlias {
         )?;
 
         Ok(
-            PyGenericAlias::new(self.origin.clone(), new_args.into_pyobject(vm), vm)
-                .into_object(vm),
+            PyGenericAlias::new(self.origin.clone(), new_args.to_pyobject(vm), vm)
+                .into_pyobject(vm),
         )
     }
 
@@ -150,8 +152,8 @@ impl PyGenericAlias {
     fn dir(&self, vm: &VirtualMachine) -> PyResult<PyList> {
         let dir = vm.dir(Some(self.origin()))?;
         for exc in ATTR_EXCEPTIONS.iter() {
-            if !dir.contains((*exc).into_pyobject(vm), vm)? {
-                dir.append((*exc).into_pyobject(vm));
+            if !dir.contains((*exc).to_pyobject(vm), vm)? {
+                dir.append((*exc).to_pyobject(vm));
             }
         }
         Ok(dir)
@@ -322,8 +324,8 @@ impl Callable for PyGenericAlias {
     fn call(zelf: &crate::PyObjectView<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         PyType::call(&zelf.origin, args, vm).map(|obj| {
             if let Err(exc) = obj.set_attr("__orig_class__", zelf.to_owned(), vm) {
-                if !exc.isinstance(&vm.ctx.exceptions.attribute_error)
-                    && !exc.isinstance(&vm.ctx.exceptions.type_error)
+                if !exc.fast_isinstance(&vm.ctx.exceptions.attribute_error)
+                    && !exc.fast_isinstance(&vm.ctx.exceptions.type_error)
                 {
                     return Err(exc);
                 }

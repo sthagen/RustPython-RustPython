@@ -1,6 +1,7 @@
 use crate::vm::{
+    function::ArgSequence,
     stdlib::{os::PyPathLike, posix},
-    {PyObjectRef, PyResult, PySequence, TryFromObject, VirtualMachine},
+    {PyObjectRef, PyResult, TryFromObject, VirtualMachine},
 };
 use nix::{errno::Errno, unistd};
 #[cfg(not(target_os = "redox"))]
@@ -18,7 +19,7 @@ pub(crate) use _posixsubprocess::make_module;
 #[pymodule]
 mod _posixsubprocess {
     use super::{exec, CStrPathLike, ForkExecArgs, ProcArgs};
-    use crate::vm::{function::IntoPyException, PyResult, VirtualMachine};
+    use crate::vm::{convert::ToPyException, PyResult, VirtualMachine};
 
     #[pyfunction]
     fn fork_exec(args: ForkExecArgs, vm: &VirtualMachine) -> PyResult<libc::pid_t> {
@@ -36,7 +37,7 @@ mod _posixsubprocess {
         let argv = &argv;
         let envp = args.env_list.as_ref().map(|s| cstrs_to_ptrs(s.as_slice()));
         let envp = envp.as_deref();
-        match unsafe { nix::unistd::fork() }.map_err(|err| err.into_pyexception(vm))? {
+        match unsafe { nix::unistd::fork() }.map_err(|err| err.to_pyexception(vm))? {
             nix::unistd::ForkResult::Child => exec(&args, ProcArgs { argv, envp }),
             nix::unistd::ForkResult::Parent { child } => Ok(child.as_raw()),
         }
@@ -63,9 +64,9 @@ impl TryFromObject for CStrPathLike {
 }
 
 gen_args! {
-    args: PySequence<CStrPathLike> /* list */, exec_list: PySequence<CStrPathLike> /* list */,
-    close_fds: bool, fds_to_keep: PySequence<i32>,
-    cwd: Option<CStrPathLike>, env_list: Option<PySequence<CStrPathLike>>,
+    args: ArgSequence<CStrPathLike> /* list */, exec_list: ArgSequence<CStrPathLike> /* list */,
+    close_fds: bool, fds_to_keep: ArgSequence<i32>,
+    cwd: Option<CStrPathLike>, env_list: Option<ArgSequence<CStrPathLike>>,
     p2cread: i32, p2cwrite: i32, c2pread: i32, c2pwrite: i32,
     errread: i32, errwrite: i32, errpipe_read: i32, errpipe_write: i32,
     restore_signals: bool, call_setsid: bool, preexec_fn: Option<PyObjectRef>,

@@ -8,8 +8,9 @@ use super::{PyInt, PyTupleRef, PyTypeRef};
 use crate::{
     function::ArgCallable,
     protocol::{PyIterReturn, PySequence, PySequenceMethods},
+    pyclass::PyClassImpl,
     types::{IterNext, IterNextIterable},
-    PyClassImpl, PyContext, PyObject, PyObjectRef, PyResult, PyValue, VirtualMachine,
+    PyContext, PyObject, PyObjectRef, PyResult, PyValue, VirtualMachine,
 };
 use rustpython_common::{
     lock::{PyMutex, PyRwLock, PyRwLockUpgradableReadGuard},
@@ -190,10 +191,10 @@ impl PySequenceIterator {
         if let IterStatus::Active(obj) = &internal.status {
             let seq = PySequence::with_methods(obj, self.seq_methods.clone());
             seq.length(vm)
-                .map(|x| PyInt::from(x).into_object(vm))
+                .map(|x| PyInt::from(x).into_pyobject(vm))
                 .unwrap_or_else(|_| vm.ctx.not_implemented())
         } else {
-            PyInt::from(0).into_object(vm)
+            PyInt::from(0).into_pyobject(vm)
         }
     }
 

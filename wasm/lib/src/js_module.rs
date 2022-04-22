@@ -14,11 +14,11 @@ mod _js {
     use js_sys::{Array, Object, Promise, Reflect};
     use rustpython_vm::{
         builtins::{PyBaseExceptionRef, PyFloat, PyStrRef, PyTypeRef},
-        function::{ArgCallable, IntoPyObject, OptionalArg, OptionalOption, PosArgs},
+        convert::{IntoObject, ToPyObject},
+        function::{ArgCallable, OptionalArg, OptionalOption, PosArgs},
         protocol::PyIterReturn,
         types::{IterNext, IterNextIterable},
-        PyObjectRef, PyObjectView, PyObjectWrap, PyRef, PyResult, PyValue, TryFromObject,
-        VirtualMachine,
+        PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, TryFromObject, VirtualMachine,
     };
     use std::{cell, fmt, future};
     use wasm_bindgen::{closure::Closure, prelude::*, JsCast};
@@ -321,11 +321,11 @@ mod _js {
                     }
                 };
                 stored_vm_from_wasm(&wasm_vm).interp.enter(move |vm| {
-                    let mut pyargs = vec![PyJsValue::new(this).into_object(vm)];
+                    let mut pyargs = vec![PyJsValue::new(this).into_pyobject(vm)];
                     pyargs.extend(
                         Vec::from(args)
                             .into_iter()
-                            .map(|arg| PyJsValue::new(arg).into_object(vm)),
+                            .map(|arg| PyJsValue::new(arg).into_pyobject(vm)),
                     );
                     let res = vm.invoke(&py_obj, pyargs);
                     convert::pyresult_to_jsresult(vm, res)
@@ -523,8 +523,8 @@ mod _js {
                     vm.invoke(
                         then,
                         (
-                            on_fulfill.map(|c| c.into_object()),
-                            on_reject.map(|c| c.into_object()),
+                            on_fulfill.map(IntoObject::into_object),
+                            on_reject.map(IntoObject::into_object),
                         ),
                     ),
                     vm,
@@ -614,7 +614,7 @@ mod _js {
     fn new_js_error(vm: &VirtualMachine, err: JsValue) -> PyBaseExceptionRef {
         vm.new_exception(
             vm.class("_js", "JSError"),
-            vec![PyJsValue::new(err).into_pyobject(vm)],
+            vec![PyJsValue::new(err).to_pyobject(vm)],
         )
     }
 }

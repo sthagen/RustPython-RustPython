@@ -5,37 +5,34 @@
 //!
 
 #[cfg(feature = "rustpython-compiler")]
-use crate::compile::{self, CompileError, CompileErrorType, CompileOpts};
+use crate::compile::{self, CompileError, CompileOpts};
 use crate::{
     builtins::{
         code::{self, PyCode},
         object,
         pystr::IntoPyStrRef,
-        tuple::{IntoPyTuple, PyTuple, PyTupleRef, PyTupleTyped},
-        PyBaseException, PyBaseExceptionRef, PyDictRef, PyInt, PyIntRef, PyList, PyModule, PyStr,
-        PyStrRef, PyTypeRef,
+        tuple::{PyTuple, PyTupleTyped},
+        PyBaseExceptionRef, PyDictRef, PyList, PyModule, PyStr, PyStrRef, PyTypeRef,
     },
     bytecode,
     codecs::CodecsRegistry,
     common::{ascii, hash::HashSecret, lock::PyMutex, rc::PyRc},
+    convert::ToPyObject,
     frame::{ExecutionResult, Frame, FrameRef},
     frozen,
-    function::{ArgMapping, FuncArgs, IntoFuncArgs, IntoPyObject},
+    function::{ArgMapping, FuncArgs},
     import,
-    protocol::{PyIterIter, PyIterReturn},
+    protocol::PyIterIter,
     scope::Scope,
-    signal, stdlib,
-    types::PyComparisonOp,
-    IdProtocol, PyArithmeticValue, PyContext, PyLease, PyMethod, PyObject, PyObjectRef,
-    PyObjectWrap, PyRef, PyRefExact, PyResult, PyValue, TryFromObject, TypeProtocol,
+    signal, stdlib, AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyRefExact, PyResult,
+    PyValue,
 };
 use crossbeam_utils::atomic::AtomicCell;
-use std::borrow::Cow;
-use std::cell::{Cell, Ref, RefCell};
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-
-// use objects::ects;
+use std::{
+    borrow::Cow,
+    cell::{Cell, Ref, RefCell},
+    collections::{HashMap, HashSet},
+};
 
 // Objects are live when they are on stack, or referenced by a name (for now)
 
@@ -70,11 +67,9 @@ struct ExceptionStack {
 }
 
 pub(crate) mod thread {
-    use super::{PyObject, TypeProtocol, VirtualMachine};
+    use super::{AsObject, PyObject, VirtualMachine};
     use itertools::Itertools;
-    use std::cell::RefCell;
-    use std::ptr::NonNull;
-    use std::thread_local;
+    use std::{cell::RefCell, ptr::NonNull, thread_local};
 
     thread_local! {
         pub(super) static VM_STACK: RefCell<Vec<NonNull<VirtualMachine>>> = Vec::with_capacity(1).into();
@@ -96,7 +91,7 @@ pub(crate) mod thread {
         let vm_owns_obj = |intp: NonNull<VirtualMachine>| {
             // SAFETY: all references in VM_STACK should be valid
             let vm = unsafe { intp.as_ref() };
-            obj.isinstance(&vm.ctx.types.object_type)
+            obj.fast_isinstance(&vm.ctx.types.object_type)
         };
         VM_STACK.with(|vms| {
             let intp = match vms.borrow().iter().copied().exactly_one() {
@@ -193,22 +188,6 @@ pub struct PySettings {
     pub stdio_unbuffered: bool,
 }
 
-/// Trace events for sys.settrace and sys.setprofile.
-enum TraceEvent {
-    Call,
-    Return,
-}
-
-impl fmt::Display for TraceEvent {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use TraceEvent::*;
-        match self {
-            Call => write!(f, "call"),
-            Return => write!(f, "return"),
-        }
-    }
-}
-
 /// Sensible default settings.
 impl Default for PySettings {
     fn default() -> Self {
@@ -243,7 +222,7 @@ impl VirtualMachine {
     /// Create a new `VirtualMachine` structure.
     fn new(settings: PySettings) -> VirtualMachine {
         flame_guard!("new VirtualMachine");
-        let ctx = PyContext::new();
+        let ctx = PyContext::default();
 
         // make a new module without access to the vm; doesn't
         // set __spec__, __loader__, etc. attributes
@@ -488,26 +467,6 @@ impl VirtualMachine {
         PyThread { thread_vm }
     }
 
-    pub fn run_atexit_funcs(&self) -> PyResult<()> {
-        let mut last_exc = None;
-        for (func, args) in self.state.atexit_funcs.lock().drain(..).rev() {
-            if let Err(e) = self.invoke(&func, args) {
-                last_exc = Some(e.clone());
-                if !e.isinstance(&self.ctx.exceptions.system_exit) {
-                    writeln!(
-                        stdlib::sys::PyStderr(self),
-                        "Error in atexit._run_exitfuncs:"
-                    );
-                    self.print_exception(e);
-                }
-            }
-        }
-        match last_exc {
-            None => Ok(()),
-            Some(e) => Err(e),
-        }
-    }
-
     pub fn run_code_obj(&self, code: PyRef<PyCode>, scope: Scope) -> PyResult {
         let frame = Frame::new(code, scope, self.builtins.dict(), &[], self).into_ref(self);
         self.run_frame_full(frame)
@@ -607,337 +566,6 @@ impl VirtualMachine {
         class.downcast().expect("not a class")
     }
 
-    /// Create a new python object
-    pub fn new_pyobj(&self, value: impl IntoPyObject) -> PyObjectRef {
-        value.into_pyobject(self)
-    }
-
-    pub fn new_tuple(&self, value: impl IntoPyTuple) -> PyTupleRef {
-        value.into_pytuple(self)
-    }
-
-    pub fn new_code_object(&self, code: impl code::IntoCodeObject) -> PyRef<PyCode> {
-        PyCode::new_ref(code.into_codeobj(self), &self.ctx)
-    }
-
-    pub fn new_module(&self, name: &str, dict: PyDictRef, doc: Option<&str>) -> PyObjectRef {
-        let module = PyRef::new_ref(PyModule {}, self.ctx.types.module_type.clone(), Some(dict));
-        module.init_module_dict(
-            self.new_pyobj(name.to_owned()),
-            doc.map(|doc| self.new_pyobj(doc.to_owned()))
-                .unwrap_or_else(|| self.ctx.none()),
-            self,
-        );
-        module.into_object()
-    }
-
-    /// Instantiate an exception with arguments.
-    /// This function should only be used with builtin exception types; if a user-defined exception
-    /// type is passed in, it may not be fully initialized; try using
-    /// [`vm.invoke_exception()`][Self::invoke_exception] or
-    /// [`exceptions::ExceptionCtor`][crate::exceptions::ExceptionCtor] instead.
-    pub fn new_exception(&self, exc_type: PyTypeRef, args: Vec<PyObjectRef>) -> PyBaseExceptionRef {
-        // TODO: add repr of args into logging?
-
-        PyRef::new_ref(
-            // TODO: this costructor might be invalid, because multiple
-            // exception (even builtin ones) are using custom constructors,
-            // see `OSError` as an example:
-            PyBaseException::new(args, self),
-            exc_type,
-            Some(self.ctx.new_dict()),
-        )
-    }
-
-    /// Instantiate an exception with no arguments.
-    /// This function should only be used with builtin exception types; if a user-defined exception
-    /// type is passed in, it may not be fully initialized; try using
-    /// [`vm.invoke_exception()`][Self::invoke_exception] or
-    /// [`exceptions::ExceptionCtor`][crate::exceptions::ExceptionCtor] instead.
-    pub fn new_exception_empty(&self, exc_type: PyTypeRef) -> PyBaseExceptionRef {
-        self.new_exception(exc_type, vec![])
-    }
-
-    /// Instantiate an exception with `msg` as the only argument.
-    /// This function should only be used with builtin exception types; if a user-defined exception
-    /// type is passed in, it may not be fully initialized; try using
-    /// [`vm.invoke_exception()`][Self::invoke_exception] or
-    /// [`exceptions::ExceptionCtor`][crate::exceptions::ExceptionCtor] instead.
-    pub fn new_exception_msg(&self, exc_type: PyTypeRef, msg: String) -> PyBaseExceptionRef {
-        self.new_exception(exc_type, vec![self.ctx.new_str(msg).into()])
-    }
-
-    pub fn new_lookup_error(&self, msg: String) -> PyBaseExceptionRef {
-        let lookup_error = self.ctx.exceptions.lookup_error.clone();
-        self.new_exception_msg(lookup_error, msg)
-    }
-
-    pub fn new_attribute_error(&self, msg: String) -> PyBaseExceptionRef {
-        let attribute_error = self.ctx.exceptions.attribute_error.clone();
-        self.new_exception_msg(attribute_error, msg)
-    }
-
-    pub fn new_type_error(&self, msg: String) -> PyBaseExceptionRef {
-        let type_error = self.ctx.exceptions.type_error.clone();
-        self.new_exception_msg(type_error, msg)
-    }
-
-    pub fn new_name_error(&self, msg: String, name: &PyStrRef) -> PyBaseExceptionRef {
-        let name_error_type = self.ctx.exceptions.name_error.clone();
-        let name_error = self.new_exception_msg(name_error_type, msg);
-        name_error
-            .as_object()
-            .set_attr("name", name.clone(), self)
-            .unwrap();
-        name_error
-    }
-
-    pub fn new_unsupported_unary_error(&self, a: &PyObject, op: &str) -> PyBaseExceptionRef {
-        self.new_type_error(format!(
-            "bad operand type for {}: '{}'",
-            op,
-            a.class().name()
-        ))
-    }
-
-    pub fn new_unsupported_binop_error(
-        &self,
-        a: &PyObject,
-        b: &PyObject,
-        op: &str,
-    ) -> PyBaseExceptionRef {
-        self.new_type_error(format!(
-            "'{}' not supported between instances of '{}' and '{}'",
-            op,
-            a.class().name(),
-            b.class().name()
-        ))
-    }
-
-    pub fn new_unsupported_ternop_error(
-        &self,
-        a: &PyObject,
-        b: &PyObject,
-        c: &PyObject,
-        op: &str,
-    ) -> PyBaseExceptionRef {
-        self.new_type_error(format!(
-            "Unsupported operand types for '{}': '{}', '{}', and '{}'",
-            op,
-            a.class().name(),
-            b.class().name(),
-            c.class().name()
-        ))
-    }
-
-    pub fn new_os_error(&self, msg: String) -> PyBaseExceptionRef {
-        let os_error = self.ctx.exceptions.os_error.clone();
-        self.new_exception_msg(os_error, msg)
-    }
-
-    pub fn new_unicode_decode_error(&self, msg: String) -> PyBaseExceptionRef {
-        let unicode_decode_error = self.ctx.exceptions.unicode_decode_error.clone();
-        self.new_exception_msg(unicode_decode_error, msg)
-    }
-
-    pub fn new_unicode_encode_error(&self, msg: String) -> PyBaseExceptionRef {
-        let unicode_encode_error = self.ctx.exceptions.unicode_encode_error.clone();
-        self.new_exception_msg(unicode_encode_error, msg)
-    }
-
-    /// Create a new python ValueError object. Useful for raising errors from
-    /// python functions implemented in rust.
-    pub fn new_value_error(&self, msg: String) -> PyBaseExceptionRef {
-        let value_error = self.ctx.exceptions.value_error.clone();
-        self.new_exception_msg(value_error, msg)
-    }
-
-    pub fn new_buffer_error(&self, msg: String) -> PyBaseExceptionRef {
-        let buffer_error = self.ctx.exceptions.buffer_error.clone();
-        self.new_exception_msg(buffer_error, msg)
-    }
-
-    // TODO: don't take ownership should make the success path faster
-    pub fn new_key_error(&self, obj: PyObjectRef) -> PyBaseExceptionRef {
-        let key_error = self.ctx.exceptions.key_error.clone();
-        self.new_exception(key_error, vec![obj])
-    }
-
-    pub fn new_index_error(&self, msg: String) -> PyBaseExceptionRef {
-        let index_error = self.ctx.exceptions.index_error.clone();
-        self.new_exception_msg(index_error, msg)
-    }
-
-    pub fn new_not_implemented_error(&self, msg: String) -> PyBaseExceptionRef {
-        let not_implemented_error = self.ctx.exceptions.not_implemented_error.clone();
-        self.new_exception_msg(not_implemented_error, msg)
-    }
-
-    pub fn new_recursion_error(&self, msg: String) -> PyBaseExceptionRef {
-        let recursion_error = self.ctx.exceptions.recursion_error.clone();
-        self.new_exception_msg(recursion_error, msg)
-    }
-
-    pub fn new_zero_division_error(&self, msg: String) -> PyBaseExceptionRef {
-        let zero_division_error = self.ctx.exceptions.zero_division_error.clone();
-        self.new_exception_msg(zero_division_error, msg)
-    }
-
-    pub fn new_overflow_error(&self, msg: String) -> PyBaseExceptionRef {
-        let overflow_error = self.ctx.exceptions.overflow_error.clone();
-        self.new_exception_msg(overflow_error, msg)
-    }
-
-    #[cfg(feature = "rustpython-compiler")]
-    pub fn new_syntax_error(&self, error: &CompileError) -> PyBaseExceptionRef {
-        let syntax_error_type = match &error.error {
-            CompileErrorType::Parse(p) if p.is_indentation_error() => {
-                self.ctx.exceptions.indentation_error.clone()
-            }
-            CompileErrorType::Parse(p) if p.is_tab_error() => self.ctx.exceptions.tab_error.clone(),
-            _ => self.ctx.exceptions.syntax_error.clone(),
-        };
-        let syntax_error = self.new_exception_msg(syntax_error_type, error.to_string());
-        let lineno = self.ctx.new_int(error.location.row());
-        let offset = self.ctx.new_int(error.location.column());
-        syntax_error
-            .as_object()
-            .set_attr("lineno", lineno, self)
-            .unwrap();
-        syntax_error
-            .as_object()
-            .set_attr("offset", offset, self)
-            .unwrap();
-        syntax_error
-            .as_object()
-            .set_attr("text", error.statement.clone().into_pyobject(self), self)
-            .unwrap();
-        syntax_error
-            .as_object()
-            .set_attr(
-                "filename",
-                self.ctx.new_str(error.source_path.clone()),
-                self,
-            )
-            .unwrap();
-        syntax_error
-    }
-
-    pub fn new_import_error(&self, msg: String, name: impl IntoPyStrRef) -> PyBaseExceptionRef {
-        let import_error = self.ctx.exceptions.import_error.clone();
-        let exc = self.new_exception_msg(import_error, msg);
-        exc.as_object()
-            .set_attr("name", name.into_pystr_ref(self), self)
-            .unwrap();
-        exc
-    }
-
-    pub fn new_runtime_error(&self, msg: String) -> PyBaseExceptionRef {
-        let runtime_error = self.ctx.exceptions.runtime_error.clone();
-        self.new_exception_msg(runtime_error, msg)
-    }
-
-    pub fn new_memory_error(&self, msg: String) -> PyBaseExceptionRef {
-        let memory_error_type = self.ctx.exceptions.memory_error.clone();
-        self.new_exception_msg(memory_error_type, msg)
-    }
-
-    pub fn new_stop_iteration(&self, value: Option<PyObjectRef>) -> PyBaseExceptionRef {
-        let args = if let Some(value) = value {
-            vec![value]
-        } else {
-            Vec::new()
-        };
-        self.new_exception(self.ctx.exceptions.stop_iteration.clone(), args)
-    }
-
-    #[track_caller]
-    #[cold]
-    fn _py_panic_failed(&self, exc: PyBaseExceptionRef, msg: &str) -> ! {
-        #[cfg(not(all(target_arch = "wasm32", not(target_os = "wasi"))))]
-        {
-            let show_backtrace = std::env::var_os("RUST_BACKTRACE").map_or(false, |v| &v != "0");
-            let after = if show_backtrace {
-                self.print_exception(exc);
-                "exception backtrace above"
-            } else {
-                "run with RUST_BACKTRACE=1 to see Python backtrace"
-            };
-            panic!("{}; {}", msg, after)
-        }
-        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-        {
-            use wasm_bindgen::prelude::*;
-            #[wasm_bindgen]
-            extern "C" {
-                #[wasm_bindgen(js_namespace = console)]
-                fn error(s: &str);
-            }
-            let mut s = String::new();
-            self.write_exception(&mut s, &exc).unwrap();
-            error(&s);
-            panic!("{}; exception backtrace above", msg)
-        }
-    }
-    #[track_caller]
-    pub fn unwrap_pyresult<T>(&self, result: PyResult<T>) -> T {
-        match result {
-            Ok(x) => x,
-            Err(exc) => {
-                self._py_panic_failed(exc, "called `vm.unwrap_pyresult()` on an `Err` value")
-            }
-        }
-    }
-    #[track_caller]
-    pub fn expect_pyresult<T>(&self, result: PyResult<T>, msg: &str) -> T {
-        match result {
-            Ok(x) => x,
-            Err(exc) => self._py_panic_failed(exc, msg),
-        }
-    }
-
-    pub fn new_scope_with_builtins(&self) -> Scope {
-        Scope::with_builtins(None, self.ctx.new_dict(), self)
-    }
-
-    /// Test whether a python object is `None`.
-    pub fn is_none(&self, obj: &PyObject) -> bool {
-        obj.is(&self.ctx.none)
-    }
-    pub fn option_if_none(&self, obj: PyObjectRef) -> Option<PyObjectRef> {
-        if self.is_none(&obj) {
-            None
-        } else {
-            Some(obj)
-        }
-    }
-    pub fn unwrap_or_none(&self, obj: Option<PyObjectRef>) -> PyObjectRef {
-        obj.unwrap_or_else(|| self.ctx.none())
-    }
-
-    pub fn to_index_opt(&self, obj: PyObjectRef) -> Option<PyResult<PyIntRef>> {
-        match obj.downcast() {
-            Ok(val) => Some(Ok(val)),
-            Err(obj) => self.get_method(obj, "__index__").map(|index| {
-                // TODO: returning strict subclasses of int in __index__ is deprecated
-                self.invoke(&index?, ())?.downcast().map_err(|bad| {
-                    self.new_type_error(format!(
-                        "__index__ returned non-int (type {})",
-                        bad.class().name()
-                    ))
-                })
-            }),
-        }
-    }
-    pub fn to_index(&self, obj: &PyObject) -> PyResult<PyIntRef> {
-        self.to_index_opt(obj.to_owned()).unwrap_or_else(|| {
-            Err(self.new_type_error(format!(
-                "'{}' object cannot be interpreted as an integer",
-                obj.class().name()
-            )))
-        })
-    }
-
     #[inline]
     pub fn import(
         &self,
@@ -993,7 +621,7 @@ impl VirtualMachine {
                     (None, None)
                 };
                 let from_list = match from_list {
-                    Some(tup) => tup.into_pyobject(self),
+                    Some(tup) => tup.to_pyobject(self),
                     None => self.new_tuple(()).into(),
                 };
                 self.invoke(&import_func, (module, globals, locals, from_list, level))
@@ -1002,181 +630,22 @@ impl VirtualMachine {
         }
     }
 
-    pub fn call_get_descriptor_specific(
-        &self,
-        descr: PyObjectRef,
-        obj: Option<PyObjectRef>,
-        cls: Option<PyObjectRef>,
-    ) -> Result<PyResult, PyObjectRef> {
-        let descr_get = descr.class().mro_find_map(|cls| cls.slots.descr_get.load());
-        match descr_get {
-            Some(descr_get) => Ok(descr_get(descr, obj, cls, self)),
-            None => Err(descr),
-        }
-    }
-
-    pub fn call_get_descriptor(
-        &self,
-        descr: PyObjectRef,
-        obj: PyObjectRef,
-    ) -> Result<PyResult, PyObjectRef> {
-        let cls = obj.clone_class().into();
-        self.call_get_descriptor_specific(descr, Some(obj), Some(cls))
-    }
-
-    pub fn call_if_get_descriptor(&self, attr: PyObjectRef, obj: PyObjectRef) -> PyResult {
-        self.call_get_descriptor(attr, obj).unwrap_or_else(Ok)
-    }
-
-    #[inline]
-    pub fn call_method<T>(&self, obj: &PyObject, method_name: &str, args: T) -> PyResult
-    where
-        T: IntoFuncArgs,
-    {
-        flame_guard!(format!("call_method({:?})", method_name));
-
-        PyMethod::get(
-            obj.to_owned(),
-            PyStr::from(method_name).into_ref(self),
-            self,
-        )?
-        .invoke(args, self)
-    }
-
-    pub fn dir(&self, obj: Option<PyObjectRef>) -> PyResult<PyList> {
-        let seq = match obj {
-            Some(obj) => self
-                .get_special_method(obj, "__dir__")?
-                .map_err(|_obj| self.new_type_error("object does not provide __dir__".to_owned()))?
-                .invoke((), self)?,
-            None => self.call_method(self.current_locals()?.as_object(), "keys", ())?,
-        };
-        let items = self.extract_elements(&seq)?;
-        let lst = PyList::from(items);
-        lst.sort(Default::default(), self)?;
-        Ok(lst)
-    }
-
-    #[inline]
-    pub(crate) fn get_special_method(
-        &self,
-        obj: PyObjectRef,
-        method: &str,
-    ) -> PyResult<Result<PyMethod, PyObjectRef>> {
-        PyMethod::get_special(obj, method, self)
-    }
-
-    /// NOT PUBLIC API
-    #[doc(hidden)]
-    pub fn call_special_method(
-        &self,
-        obj: PyObjectRef,
-        method: &str,
-        args: impl IntoFuncArgs,
-    ) -> PyResult {
-        self.get_special_method(obj, method)?
-            .map_err(|_obj| self.new_attribute_error(method.to_owned()))?
-            .invoke(args, self)
-    }
-
-    fn _invoke(&self, callable: &PyObject, args: FuncArgs) -> PyResult {
-        vm_trace!("Invoke: {:?} {:?}", callable, args);
-        let slot_call = callable.class().mro_find_map(|cls| cls.slots.call.load());
-        match slot_call {
-            Some(slot_call) => {
-                self.trace_event(TraceEvent::Call)?;
-                let result = slot_call(callable, args, self);
-                self.trace_event(TraceEvent::Return)?;
-                result
-            }
-            None => Err(self.new_type_error(format!(
-                "'{}' object is not callable",
-                callable.class().name()
-            ))),
-        }
-    }
-
-    #[inline(always)]
-    pub fn invoke<O, A>(&self, func: &O, args: A) -> PyResult
-    where
-        O: AsRef<PyObject>,
-        A: IntoFuncArgs,
-    {
-        self._invoke(func.as_ref(), args.into_args(self))
-    }
-
-    /// Call registered trace function.
-    #[inline]
-    fn trace_event(&self, event: TraceEvent) -> PyResult<()> {
-        if self.use_tracing.get() {
-            self._trace_event_inner(event)
-        } else {
-            Ok(())
-        }
-    }
-    fn _trace_event_inner(&self, event: TraceEvent) -> PyResult<()> {
-        let trace_func = self.trace_func.borrow().to_owned();
-        let profile_func = self.profile_func.borrow().to_owned();
-        if self.is_none(&trace_func) && self.is_none(&profile_func) {
-            return Ok(());
-        }
-
-        let frame_ref = self.current_frame();
-        if frame_ref.is_none() {
-            return Ok(());
-        }
-
-        let frame = frame_ref.unwrap().as_object().to_owned();
-        let event = self.ctx.new_str(event.to_string()).into();
-        let args = vec![frame, event, self.ctx.none()];
-
-        // temporarily disable tracing, during the call to the
-        // tracing function itself.
-        if !self.is_none(&trace_func) {
-            self.use_tracing.set(false);
-            let res = self.invoke(&trace_func, args.clone());
-            self.use_tracing.set(true);
-            res?;
-        }
-
-        if !self.is_none(&profile_func) {
-            self.use_tracing.set(false);
-            let res = self.invoke(&profile_func, args);
-            self.use_tracing.set(true);
-            res?;
-        }
-        Ok(())
-    }
-
-    pub fn extract_elements_func<T, F>(&self, value: &PyObject, func: F) -> PyResult<Vec<T>>
+    pub fn extract_elements_with<T, F>(&self, value: &PyObject, func: F) -> PyResult<Vec<T>>
     where
         F: Fn(PyObjectRef) -> PyResult<T>,
     {
         // Extract elements from item, if possible:
         let cls = value.class();
-        if cls.is(&self.ctx.types.tuple_type) {
-            value
-                .payload::<PyTuple>()
-                .unwrap()
-                .as_slice()
-                .iter()
-                .map(|obj| func(obj.clone()))
-                .collect()
+        let list_borrow;
+        let slice = if cls.is(&self.ctx.types.tuple_type) {
+            value.payload::<PyTuple>().unwrap().as_slice()
         } else if cls.is(&self.ctx.types.list_type) {
-            value
-                .payload::<PyList>()
-                .unwrap()
-                .borrow_vec()
-                .iter()
-                .map(|obj| func(obj.clone()))
-                .collect()
+            list_borrow = value.payload::<PyList>().unwrap().borrow_vec();
+            &list_borrow
         } else {
-            self.map_pyiter(value, func)
-        }
-    }
-
-    pub fn extract_elements<T: TryFromObject>(&self, value: &PyObject) -> PyResult<Vec<T>> {
-        self.extract_elements_func(value, |obj| T::try_from_object(self, obj))
+            return self.map_pyiter(value, func);
+        };
+        slice.iter().map(|obj| func(obj.clone())).collect()
     }
 
     pub fn map_iterable_object<F, R>(&self, obj: &PyObject, mut f: F) -> PyResult<PyResult<Vec<R>>>
@@ -1249,7 +718,7 @@ impl VirtualMachine {
     {
         match obj.get_attr(attr_name, self) {
             Ok(attr) => Ok(Some(attr)),
-            Err(e) if e.isinstance(&self.ctx.exceptions.attribute_error) => Ok(None),
+            Err(e) if e.fast_isinstance(&self.ctx.exceptions.attribute_error) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -1278,74 +747,17 @@ impl VirtualMachine {
     where
         F: FnOnce() -> String,
     {
-        match obj.get_class_attr(method_name) {
-            Some(method) => self.call_if_get_descriptor(method, obj),
-            None => Err(self.new_type_error(err_msg())),
-        }
+        let method = obj
+            .class()
+            .get_attr(method_name)
+            .ok_or_else(|| self.new_type_error(err_msg()))?;
+        self.call_if_get_descriptor(method, obj)
     }
 
     // TODO: remove + transfer over to get_special_method
     pub(crate) fn get_method(&self, obj: PyObjectRef, method_name: &str) -> Option<PyResult> {
         let method = obj.get_class_attr(method_name)?;
         Some(self.call_if_get_descriptor(method, obj))
-    }
-
-    /// Calls a method on `obj` passing `arg`, if the method exists.
-    ///
-    /// Otherwise, or if the result is the special `NotImplemented` built-in constant,
-    /// calls `unsupported` to determine fallback value.
-    pub fn call_or_unsupported<F>(
-        &self,
-        obj: &PyObject,
-        arg: &PyObject,
-        method: &str,
-        unsupported: F,
-    ) -> PyResult
-    where
-        F: Fn(&VirtualMachine, &PyObject, &PyObject) -> PyResult,
-    {
-        if let Some(method_or_err) = self.get_method(obj.to_owned(), method) {
-            let method = method_or_err?;
-            let result = self.invoke(&method, (arg.to_owned(),))?;
-            if let PyArithmeticValue::Implemented(x) = PyArithmeticValue::from_object(self, result)
-            {
-                return Ok(x);
-            }
-        }
-        unsupported(self, obj, arg)
-    }
-
-    /// Calls a method, falling back to its reflection with the operands
-    /// reversed, and then to the value provided by `unsupported`.
-    ///
-    /// For example: the following:
-    ///
-    /// `call_or_reflection(lhs, rhs, "__and__", "__rand__", unsupported)`
-    ///
-    /// 1. Calls `__and__` with `lhs` and `rhs`.
-    /// 2. If above is not implemented, calls `__rand__` with `rhs` and `lhs`.
-    /// 3. If above is not implemented, invokes `unsupported` for the result.
-    pub fn call_or_reflection(
-        &self,
-        lhs: &PyObject,
-        rhs: &PyObject,
-        default: &str,
-        reflection: &str,
-        unsupported: fn(&VirtualMachine, &PyObject, &PyObject) -> PyResult,
-    ) -> PyResult {
-        // Try to call the default method
-        self.call_or_unsupported(lhs, rhs, default, move |vm, lhs, rhs| {
-            // Try to call the reflection method
-            // don't call reflection method if operands are of the same type
-            if !lhs.class().is(&rhs.class()) {
-                vm.call_or_unsupported(rhs, lhs, reflection, |_, rhs, lhs| {
-                    // switch them around again
-                    unsupported(vm, lhs, rhs)
-                })
-            } else {
-                unsupported(vm, lhs, rhs)
-            }
-        })
     }
 
     pub fn generic_getattribute(&self, obj: PyObjectRef, name: PyStrRef) -> PyResult {
@@ -1372,7 +784,7 @@ impl VirtualMachine {
                         .is_some()
                     {
                         drop(descr_cls);
-                        let cls = PyLease::into_pyref(obj_cls).into();
+                        let cls = obj_cls.into_owned().into();
                         return descr_get(descr, Some(obj), Some(cls), self).map(Some);
                     }
                 }
@@ -1395,7 +807,7 @@ impl VirtualMachine {
         } else if let Some((attr, descr_get)) = cls_attr {
             match descr_get {
                 Some(descr_get) => {
-                    let cls = PyLease::into_pyref(obj_cls).into();
+                    let cls = obj_cls.into_owned().into();
                     descr_get(attr, Some(obj), Some(cls), self).map(Some)
                 }
                 None => Ok(Some(attr)),
@@ -1425,337 +837,6 @@ impl VirtualMachine {
         #[cfg(target_arch = "wasm32")]
         {
             Ok(())
-        }
-    }
-
-    /// Returns a basic CompileOpts instance with options accurate to the vm. Used
-    /// as the CompileOpts for `vm.compile()`.
-    #[cfg(feature = "rustpython-compiler")]
-    pub fn compile_opts(&self) -> CompileOpts {
-        CompileOpts {
-            optimize: self.state.settings.optimize,
-        }
-    }
-
-    #[cfg(feature = "rustpython-compiler")]
-    pub fn compile(
-        &self,
-        source: &str,
-        mode: compile::Mode,
-        source_path: String,
-    ) -> Result<PyRef<PyCode>, CompileError> {
-        self.compile_with_opts(source, mode, source_path, self.compile_opts())
-    }
-
-    #[cfg(feature = "rustpython-compiler")]
-    pub fn compile_with_opts(
-        &self,
-        source: &str,
-        mode: compile::Mode,
-        source_path: String,
-        opts: CompileOpts,
-    ) -> Result<PyRef<PyCode>, CompileError> {
-        compile::compile(source, mode, source_path, opts)
-            .map(|code| PyCode::new(self.map_codeobj(code)).into_ref(self))
-    }
-
-    pub fn _sub(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__sub__", "__rsub__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "-"))
-        })
-    }
-
-    pub fn _isub(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__isub__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__sub__", "__rsub__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "-="))
-            })
-        })
-    }
-
-    pub fn _add(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__add__", "__radd__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "+"))
-        })
-    }
-
-    pub fn _iadd(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__iadd__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__add__", "__radd__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "+="))
-            })
-        })
-    }
-
-    pub fn _mul(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__mul__", "__rmul__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "*"))
-        })
-    }
-
-    pub fn _imul(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__imul__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__mul__", "__rmul__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "*="))
-            })
-        })
-    }
-
-    pub fn _matmul(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__matmul__", "__rmatmul__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "@"))
-        })
-    }
-
-    pub fn _imatmul(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__imatmul__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__matmul__", "__rmatmul__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "@="))
-            })
-        })
-    }
-
-    pub fn _truediv(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__truediv__", "__rtruediv__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "/"))
-        })
-    }
-
-    pub fn _itruediv(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__itruediv__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__truediv__", "__rtruediv__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "/="))
-            })
-        })
-    }
-
-    pub fn _floordiv(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__floordiv__", "__rfloordiv__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "//"))
-        })
-    }
-
-    pub fn _ifloordiv(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__ifloordiv__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__floordiv__", "__rfloordiv__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "//="))
-            })
-        })
-    }
-
-    pub fn _pow(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__pow__", "__rpow__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "**"))
-        })
-    }
-
-    pub fn _ipow(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__ipow__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__pow__", "__rpow__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "**="))
-            })
-        })
-    }
-
-    pub fn _mod(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__mod__", "__rmod__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "%"))
-        })
-    }
-
-    pub fn _imod(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__imod__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__mod__", "__rmod__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "%="))
-            })
-        })
-    }
-
-    pub fn _divmod(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__divmod__", "__rdivmod__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "divmod"))
-        })
-    }
-
-    pub fn _lshift(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__lshift__", "__rlshift__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "<<"))
-        })
-    }
-
-    pub fn _ilshift(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__ilshift__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__lshift__", "__rlshift__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "<<="))
-            })
-        })
-    }
-
-    pub fn _rshift(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__rshift__", "__rrshift__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, ">>"))
-        })
-    }
-
-    pub fn _irshift(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__irshift__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__rshift__", "__rrshift__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, ">>="))
-            })
-        })
-    }
-
-    pub fn _xor(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__xor__", "__rxor__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "^"))
-        })
-    }
-
-    pub fn _ixor(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__ixor__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__xor__", "__rxor__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "^="))
-            })
-        })
-    }
-
-    pub fn _or(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__or__", "__ror__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "|"))
-        })
-    }
-
-    pub fn _ior(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__ior__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__or__", "__ror__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "|="))
-            })
-        })
-    }
-
-    pub fn _and(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_reflection(a, b, "__and__", "__rand__", |vm, a, b| {
-            Err(vm.new_unsupported_binop_error(a, b, "&"))
-        })
-    }
-
-    pub fn _iand(&self, a: &PyObject, b: &PyObject) -> PyResult {
-        self.call_or_unsupported(a, b, "__iand__", |vm, a, b| {
-            vm.call_or_reflection(a, b, "__and__", "__rand__", |vm, a, b| {
-                Err(vm.new_unsupported_binop_error(a, b, "&="))
-            })
-        })
-    }
-
-    pub fn _abs(&self, a: &PyObject) -> PyResult<PyObjectRef> {
-        self.get_special_method(a.to_owned(), "__abs__")?
-            .map_err(|_| self.new_unsupported_unary_error(a, "abs()"))?
-            .invoke((), self)
-    }
-
-    pub fn _pos(&self, a: &PyObject) -> PyResult {
-        self.get_special_method(a.to_owned(), "__pos__")?
-            .map_err(|_| self.new_unsupported_unary_error(a, "unary +"))?
-            .invoke((), self)
-    }
-
-    pub fn _neg(&self, a: &PyObject) -> PyResult {
-        self.get_special_method(a.to_owned(), "__neg__")?
-            .map_err(|_| self.new_unsupported_unary_error(a, "unary -"))?
-            .invoke((), self)
-    }
-
-    pub fn _invert(&self, a: &PyObject) -> PyResult {
-        self.get_special_method(a.to_owned(), "__invert__")?
-            .map_err(|_| self.new_unsupported_unary_error(a, "unary ~"))?
-            .invoke((), self)
-    }
-
-    pub fn length_hint_opt(&self, iter: PyObjectRef) -> PyResult<Option<usize>> {
-        match iter.length(self) {
-            Ok(len) => return Ok(Some(len)),
-            Err(e) => {
-                if !e.isinstance(&self.ctx.exceptions.type_error) {
-                    return Err(e);
-                }
-            }
-        }
-        let hint = match self.get_method(iter, "__length_hint__") {
-            Some(hint) => hint?,
-            None => return Ok(None),
-        };
-        let result = match self.invoke(&hint, ()) {
-            Ok(res) => {
-                if res.is(&self.ctx.not_implemented) {
-                    return Ok(None);
-                }
-                res
-            }
-            Err(e) => {
-                return if e.isinstance(&self.ctx.exceptions.type_error) {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            }
-        };
-        let hint = result
-            .payload_if_subclass::<PyInt>(self)
-            .ok_or_else(|| {
-                self.new_type_error(format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    result.class().name()
-                ))
-            })?
-            .try_to_primitive::<isize>(self)?;
-        if hint.is_negative() {
-            Err(self.new_value_error("__length_hint__() should return >= 0".to_owned()))
-        } else {
-            Ok(Some(hint as usize))
-        }
-    }
-
-    /// Checks that the multiplication is able to be performed. On Ok returns the
-    /// index as a usize for sequences to be able to use immediately.
-    pub fn check_repeat_or_overflow_error(&self, length: usize, n: isize) -> PyResult<usize> {
-        if n <= 0 {
-            Ok(0)
-        } else {
-            let n = n as usize;
-            if length > stdlib::sys::MAXSIZE as usize / n {
-                Err(self.new_overflow_error("repeated value are too long".to_owned()))
-            } else {
-                Ok(n)
-            }
-        }
-    }
-
-    // https://docs.python.org/3/reference/expressions.html#membership-test-operations
-    fn _membership_iter_search(
-        &self,
-        haystack: PyObjectRef,
-        needle: PyObjectRef,
-    ) -> PyResult<PyIntRef> {
-        let iter = haystack.get_iter(self)?;
-        loop {
-            if let PyIterReturn::Return(element) = iter.next(self)? {
-                if self.bool_eq(&needle, &element)? {
-                    return Ok(self.ctx.new_bool(true));
-                } else {
-                    continue;
-                }
-            } else {
-                return Ok(self.ctx.new_bool(false));
-            }
-        }
-    }
-
-    pub fn _membership(&self, haystack: PyObjectRef, needle: PyObjectRef) -> PyResult {
-        match PyMethod::get_special(haystack, "__contains__", self)? {
-            Ok(method) => method.invoke((needle,), self),
-            Err(haystack) => self
-                ._membership_iter_search(haystack, needle)
-                .map(Into::into),
         }
     }
 
@@ -1792,7 +873,7 @@ impl VirtualMachine {
             if !context_exc.is(exception) {
                 let mut o = context_exc.clone();
                 while let Some(context) = o.context() {
-                    if context.is(&exception) {
+                    if context.is(exception) {
                         o.set_context(None);
                         break;
                     }
@@ -1812,40 +893,6 @@ impl VirtualMachine {
             }
             cur = cur.prev.as_deref()?;
         }
-    }
-
-    pub fn bool_eq(&self, a: &PyObject, b: &PyObject) -> PyResult<bool> {
-        a.rich_compare_bool(b, PyComparisonOp::Eq, self)
-    }
-
-    pub fn identical_or_equal(&self, a: &PyObject, b: &PyObject) -> PyResult<bool> {
-        if a.is(b) {
-            Ok(true)
-        } else {
-            self.bool_eq(a, b)
-        }
-    }
-
-    pub fn bool_seq_lt(&self, a: &PyObject, b: &PyObject) -> PyResult<Option<bool>> {
-        let value = if a.rich_compare_bool(b, PyComparisonOp::Lt, self)? {
-            Some(true)
-        } else if !self.bool_eq(a, b)? {
-            Some(false)
-        } else {
-            None
-        };
-        Ok(value)
-    }
-
-    pub fn bool_seq_gt(&self, a: &PyObject, b: &PyObject) -> PyResult<Option<bool>> {
-        let value = if a.rich_compare_bool(b, PyComparisonOp::Gt, self)? {
-            Some(true)
-        } else if !self.bool_eq(a, b)? {
-            Some(false)
-        } else {
-            None
-        };
-        Ok(value)
     }
 
     pub fn map_codeobj(&self, code: bytecode::CodeObject) -> code::CodeObject {
@@ -1874,6 +921,37 @@ impl VirtualMachine {
     }
 }
 
+#[cfg(feature = "rustpython-compiler")]
+impl VirtualMachine {
+    /// Returns a basic CompileOpts instance with options accurate to the vm. Used
+    /// as the CompileOpts for `vm.compile()`.
+    pub fn compile_opts(&self) -> CompileOpts {
+        CompileOpts {
+            optimize: self.state.settings.optimize,
+        }
+    }
+
+    pub fn compile(
+        &self,
+        source: &str,
+        mode: compile::Mode,
+        source_path: String,
+    ) -> Result<PyRef<PyCode>, CompileError> {
+        self.compile_with_opts(source, mode, source_path, self.compile_opts())
+    }
+
+    pub fn compile_with_opts(
+        &self,
+        source: &str,
+        mode: compile::Mode,
+        source_path: String,
+        opts: CompileOpts,
+    ) -> Result<PyRef<PyCode>, CompileError> {
+        compile::compile(source, mode, source_path, opts)
+            .map(|code| PyCode::new(self.map_codeobj(code)).into_ref(self))
+    }
+}
+
 mod sealed {
     use super::*;
 
@@ -1887,10 +965,7 @@ mod sealed {
 }
 
 /// A sealed marker trait for `DictKey` types that always become an exact instance of `str`
-pub trait Internable:
-    sealed::SealedInternable + crate::dictdatatype::DictKey + IntoPyObject
-{
-}
+pub trait Internable: sealed::SealedInternable + crate::dictdatatype::DictKey + ToPyObject {}
 
 impl Internable for String {}
 

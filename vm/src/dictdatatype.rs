@@ -1,24 +1,19 @@
-use num_traits::ToPrimitive;
+//! Ordered dictionary implementation.
+//! Inspired by: https://morepypy.blogspot.com/2015/01/faster-more-memory-efficient-and-more.html
+//! And: https://www.youtube.com/watch?v=p33CVV29OG8
+//! And: http://code.activestate.com/recipes/578375/
 
-/// Ordered dictionary implementation.
-/// Inspired by: https://morepypy.blogspot.com/2015/01/faster-more-memory-efficient-and-more.html
-/// And: https://www.youtube.com/watch?v=p33CVV29OG8
-/// And: http://code.activestate.com/recipes/578375/
+use crate::common::{
+    hash,
+    lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard},
+};
 use crate::{
     builtins::{PyInt, PyStr, PyStrRef},
-    function::IntoPyObject,
-    IdProtocol, PyObject, PyObjectRef, PyRefExact, PyResult, TypeProtocol, VirtualMachine,
+    convert::ToPyObject,
+    AsObject, PyObject, PyObjectRef, PyRefExact, PyResult, VirtualMachine,
 };
-use crate::{
-    common::{
-        hash,
-        lock::{PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard},
-    },
-    PyObjectWrap,
-};
-use std::fmt;
-use std::mem::size_of;
-use std::ops::ControlFlow;
+use num_traits::ToPrimitive;
+use std::{fmt, mem::size_of, ops::ControlFlow};
 
 // HashIndex is intended to be same size with hash::PyHash
 // but it doesn't mean the values are compatible with actual pyhash value
@@ -259,7 +254,7 @@ impl<T: Clone> Dict<T> {
     /// Store a key
     pub fn insert<K>(&self, vm: &VirtualMachine, key: K, value: T) -> PyResult<()>
     where
-        K: DictKey + IntoPyObject,
+        K: DictKey + ToPyObject,
     {
         let hash = key.key_hash(vm)?;
         let _removed = loop {
@@ -283,7 +278,7 @@ impl<T: Clone> Dict<T> {
                 }
             } else {
                 // New key:
-                inner.unchecked_push(index_index, hash, key.into_pyobject(vm), value, entry_index);
+                inner.unchecked_push(index_index, hash, key.to_pyobject(vm), value, entry_index);
                 break None;
             }
         };
@@ -360,12 +355,12 @@ impl<T: Clone> Dict<T> {
     /// Delete a key
     pub fn delete<K>(&self, vm: &VirtualMachine, key: K) -> PyResult<()>
     where
-        K: DictKey + IntoPyObject,
+        K: DictKey + ToPyObject,
     {
         if self.delete_if_exists(vm, &key)? {
             Ok(())
         } else {
-            Err(vm.new_key_error(key.into_pyobject(vm)))
+            Err(vm.new_key_error(key.to_pyobject(vm)))
         }
     }
 
@@ -415,7 +410,7 @@ impl<T: Clone> Dict<T> {
 
     pub fn setdefault<K, F>(&self, vm: &VirtualMachine, key: K, default: F) -> PyResult<T>
     where
-        K: DictKey + IntoPyObject,
+        K: DictKey + ToPyObject,
         F: FnOnce() -> T,
     {
         let hash = key.key_hash(vm)?;
@@ -438,13 +433,7 @@ impl<T: Clone> Dict<T> {
             } else {
                 let value = default();
                 let mut inner = self.write();
-                inner.unchecked_push(
-                    index_index,
-                    hash,
-                    key.into_pyobject(vm),
-                    value.clone(),
-                    entry,
-                );
+                inner.unchecked_push(index_index, hash, key.to_pyobject(vm), value.clone(), entry);
                 break value;
             }
         };
@@ -458,7 +447,7 @@ impl<T: Clone> Dict<T> {
         default: F,
     ) -> PyResult<(PyObjectRef, T)>
     where
-        K: DictKey + IntoPyObject,
+        K: DictKey + ToPyObject,
         F: FnOnce() -> T,
     {
         let hash = key.key_hash(vm)?;
@@ -480,7 +469,7 @@ impl<T: Clone> Dict<T> {
                 }
             } else {
                 let value = default();
-                let key = key.into_pyobject(vm);
+                let key = key.to_pyobject(vm);
                 let mut inner = self.write();
                 let ret = (key.clone(), value.clone());
                 inner.unchecked_push(index_index, hash, key, value, entry);
@@ -851,7 +840,7 @@ impl DictKey for usize {
             }
         } else {
             let int = vm.ctx.new_int(*self);
-            vm.bool_eq(&int.into_object(), other_key)
+            vm.bool_eq(int.as_ref(), other_key)
         }
     }
 

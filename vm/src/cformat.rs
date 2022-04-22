@@ -7,15 +7,16 @@ use crate::{
     function::ArgIntoFloat,
     protocol::PyBuffer,
     stdlib::builtins,
-    PyObjectRef, PyResult, TryFromBorrowedObject, TryFromObject, TypeProtocol, VirtualMachine,
+    AsObject, PyObjectRef, PyResult, TryFromBorrowedObject, TryFromObject, VirtualMachine,
 };
 use itertools::Itertools;
 use num_bigint::{BigInt, Sign};
-use num_traits::cast::ToPrimitive;
-use num_traits::Signed;
-use std::iter::{Enumerate, Peekable};
-use std::str::FromStr;
-use std::{cmp, fmt};
+use num_traits::{cast::ToPrimitive, Signed};
+use std::{
+    cmp, fmt,
+    iter::{Enumerate, Peekable},
+    str::FromStr,
+};
 
 #[derive(Debug, PartialEq)]
 enum CFormatErrorType {
@@ -448,7 +449,7 @@ impl CFormatSpec {
                 let type_name = obj.class().name().to_string();
                 let value = ArgIntoFloat::try_from_object(vm, obj)
                     .map_err(|e| {
-                        if e.isinstance(&vm.ctx.exceptions.type_error) {
+                        if e.fast_isinstance(&vm.ctx.exceptions.type_error) {
                             // formatfloat in bytesobject.c generates its own specific exception
                             // text in this case, mirror it here.
                             vm.new_type_error(format!("float argument required, not {}", type_name))
@@ -599,8 +600,8 @@ fn try_update_quantity_from_tuple<'a, I: Iterator<Item = &'a PyObjectRef>>(
         Some(CFormatQuantity::FromValuesTuple) => match elements.next() {
             Some(width_obj) => {
                 if let Some(i) = width_obj.payload::<PyInt>() {
-                    let i = i.try_to_primitive::<i32>(vm)?.abs() as usize;
-                    *q = Some(CFormatQuantity::Amount(i));
+                    let i = i.try_to_primitive::<i32>(vm)?.unsigned_abs();
+                    *q = Some(CFormatQuantity::Amount(i as usize));
                     Ok(())
                 } else {
                     Err(vm.new_type_error("* wants int".to_owned()))
@@ -691,9 +692,9 @@ impl CFormatBytes {
         let mut result = vec![];
 
         let is_mapping = values_obj.class().has_attr("__getitem__")
-            && !values_obj.isinstance(&vm.ctx.types.tuple_type)
-            && !values_obj.isinstance(&vm.ctx.types.bytes_type)
-            && !values_obj.isinstance(&vm.ctx.types.bytearray_type);
+            && !values_obj.fast_isinstance(&vm.ctx.types.tuple_type)
+            && !values_obj.fast_isinstance(&vm.ctx.types.bytes_type)
+            && !values_obj.fast_isinstance(&vm.ctx.types.bytearray_type);
 
         if num_specifiers == 0 {
             // literal only
@@ -843,8 +844,8 @@ impl CFormatString {
         let mut result = String::new();
 
         let is_mapping = values_obj.class().has_attr("__getitem__")
-            && !values_obj.isinstance(&vm.ctx.types.tuple_type)
-            && !values_obj.isinstance(&vm.ctx.types.str_type);
+            && !values_obj.fast_isinstance(&vm.ctx.types.tuple_type)
+            && !values_obj.fast_isinstance(&vm.ctx.types.str_type);
 
         if num_specifiers == 0 {
             // literal only
@@ -953,7 +954,7 @@ where
                     break;
                 }
             }
-            return Ok(Some(CFormatQuantity::Amount(num.abs() as usize)));
+            return Ok(Some(CFormatQuantity::Amount(num.unsigned_abs() as usize)));
         }
     }
     Ok(None)

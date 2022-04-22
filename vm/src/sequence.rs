@@ -1,13 +1,13 @@
-use itertools::Itertools;
-use optional::Optioned;
-use std::{collections::VecDeque, ops::Range};
-
 use crate::{
+    function::PyComparisonValue,
     types::{richcompare_wrapper, PyComparisonOp, RichCompareFunc},
     utils::Either,
     vm::VirtualMachine,
-    IdProtocol, PyComparisonValue, PyObject, PyObjectRef, PyResult, TypeProtocol,
+    AsObject, PyObject, PyObjectRef, PyResult,
 };
+use itertools::Itertools;
+use optional::Optioned;
+use std::{collections::VecDeque, ops::Range};
 
 pub trait ObjectSequenceOp<'a> {
     type Iter: ExactSizeIterator<Item = &'a PyObjectRef>;
@@ -143,7 +143,8 @@ pub trait MutObjectSequenceOp<'a> {
                 borrower = Some(guard);
             } else {
                 let elem_cls = elem.class();
-                let reverse_first = !elem_cls.is(&needle_cls) && elem_cls.issubclass(&needle_cls);
+                let reverse_first =
+                    !elem_cls.is(&needle_cls) && elem_cls.fast_issubclass(&needle_cls);
 
                 let eq = if reverse_first {
                     let elem_cmp = elem_cls

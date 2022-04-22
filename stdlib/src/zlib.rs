@@ -6,7 +6,7 @@ mod zlib {
     use crate::vm::{
         builtins::{PyBaseExceptionRef, PyBytes, PyBytesRef, PyIntRef, PyTypeRef},
         function::{ArgBytesLike, OptionalArg, OptionalOption},
-        IntoPyRef, PyResult, PyValue, VirtualMachine,
+        PyResult, PyValue, VirtualMachine,
     };
     use adler32::RollingAdler32 as Adler32;
     use crossbeam_utils::atomic::AtomicCell;
@@ -154,7 +154,7 @@ mod zlib {
     fn header_from_wbits(wbits: OptionalArg<i8>, vm: &VirtualMachine) -> PyResult<InitOptions> {
         let wbits = wbits.unwrap_or(MAX_WBITS as i8);
         let header = wbits > 0;
-        let wbits = wbits.abs() as u8;
+        let wbits = wbits.unsigned_abs();
         match wbits {
             9..=15 => Ok(InitOptions::Standard {
                 header,
@@ -321,7 +321,7 @@ mod zlib {
                     .chain(leftover)
                     .copied()
                     .collect();
-                *unused_data = unused.into_pyref(vm);
+                *unused_data = vm.new_pyref(unused);
             }
         }
 

@@ -1,7 +1,7 @@
 use super::PyTypeRef;
 use crate::{
-    function::IntoPyObject, types::Constructor, PyClassImpl, PyContext, PyObjectRef, PyResult,
-    PyValue, TypeProtocol, VirtualMachine,
+    convert::ToPyObject, pyclass::PyClassImpl, types::Constructor, AsObject, PyContext,
+    PyObjectRef, PyResult, PyValue, VirtualMachine,
 };
 
 #[pyclass(module = false, name = "NoneType")]
@@ -16,16 +16,16 @@ impl PyValue for PyNone {
 
 // This allows a built-in function to not return a value, mapping to
 // Python's behavior of returning `None` in this situation.
-impl IntoPyObject for () {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+impl ToPyObject for () {
+    fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.none()
     }
 }
 
-impl<T: IntoPyObject> IntoPyObject for Option<T> {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+impl<T: ToPyObject> ToPyObject for Option<T> {
+    fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         match self {
-            Some(x) => x.into_pyobject(vm),
+            Some(x) => x.to_pyobject(vm),
             None => vm.ctx.none(),
         }
     }
@@ -87,6 +87,6 @@ impl PyNotImplemented {
 }
 
 pub fn init(context: &PyContext) {
-    PyNone::extend_class(context, &context.none.clone_class());
-    PyNotImplemented::extend_class(context, &context.not_implemented.clone_class());
+    PyNone::extend_class(context, &context.none.class());
+    PyNotImplemented::extend_class(context, &context.not_implemented.class());
 }

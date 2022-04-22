@@ -6,7 +6,7 @@ mod math {
         builtins::{try_bigint_to_f64, try_f64_to_bigint, PyFloat, PyInt, PyIntRef},
         function::{ArgIntoFloat, ArgIterable, OptionalArg, PosArgs},
         utils::Either,
-        PyObject, PyObjectRef, PyRef, PyResult, PySequence, TypeProtocol, VirtualMachine,
+        AsObject, PyObject, PyObjectRef, PyRef, PyResult, VirtualMachine,
     };
     use num_bigint::BigInt;
     use num_traits::{One, Signed, Zero};
@@ -72,7 +72,6 @@ mod math {
         abs_tol: OptionalArg<ArgIntoFloat>,
     }
 
-    #[allow(clippy::float_cmp)]
     #[pyfunction]
     fn isclose(args: IsCloseArgs, vm: &VirtualMachine) -> PyResult<bool> {
         let a = args.a.to_f64();
@@ -289,16 +288,12 @@ mod math {
     }
 
     #[pyfunction]
-    fn dist(
-        p: PySequence<ArgIntoFloat>,
-        q: PySequence<ArgIntoFloat>,
-        vm: &VirtualMachine,
-    ) -> PyResult<f64> {
+    fn dist(p: Vec<ArgIntoFloat>, q: Vec<ArgIntoFloat>, vm: &VirtualMachine) -> PyResult<f64> {
         let mut max = 0.0;
         let mut has_nan = false;
 
-        let p = ArgIntoFloat::vec_into_f64(p.into_vec());
-        let q = ArgIntoFloat::vec_into_f64(q.into_vec());
+        let p = ArgIntoFloat::vec_into_f64(p);
+        let q = ArgIntoFloat::vec_into_f64(q);
         let mut diffs = vec![];
 
         if p.len() != q.len() {
@@ -628,7 +623,6 @@ mod math {
                 // digit to two instead of down to zero (the 1e-16 makes the 1
                 // slightly closer to two).  With a potential 1 ULP rounding
                 // error fixed-up, math.fsum() can guarantee commutativity.
-                #[allow(clippy::float_cmp)]
                 if y == x - hi {
                     hi = x;
                 }

@@ -1,16 +1,17 @@
 //! Implementation of the _thread module
-#[cfg_attr(target_os = "wasi", allow(unused_imports))]
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 pub(crate) use _thread::{make_module, RawRMutex};
 
 #[pymodule]
 pub(crate) mod _thread {
     use crate::{
         builtins::{PyDictRef, PyStrRef, PyTupleRef, PyTypeRef},
-        function::{ArgCallable, FuncArgs, IntoPyException, KwArgs, OptionalArg},
+        convert::ToPyException,
+        function::{ArgCallable, FuncArgs, KwArgs, OptionalArg},
         py_io,
         types::{Constructor, GetAttr, SetAttr},
         utils::Either,
-        IdProtocol, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol, VirtualMachine,
+        AsObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
     };
     use parking_lot::{
         lock_api::{RawMutex as RawMutexT, RawMutexTimed, RawReentrantMutex},
@@ -110,7 +111,6 @@ pub(crate) mod _thread {
         #[pymethod]
         #[pymethod(name = "acquire_lock")]
         #[pymethod(name = "__enter__")]
-        #[allow(clippy::float_cmp, clippy::match_bool)]
         fn acquire(&self, args: AcquireArgs, vm: &VirtualMachine) -> PyResult<bool> {
             acquire_lock_impl!(&self.mu, args, vm)
         }
@@ -174,7 +174,6 @@ pub(crate) mod _thread {
         #[pymethod]
         #[pymethod(name = "acquire_lock")]
         #[pymethod(name = "__enter__")]
-        #[allow(clippy::float_cmp, clippy::match_bool)]
         fn acquire(&self, args: AcquireArgs, vm: &VirtualMachine) -> PyResult<bool> {
             acquire_lock_impl!(&self.mu, args, vm)
         }
@@ -248,13 +247,13 @@ pub(crate) mod _thread {
                 vm.state.thread_count.fetch_add(1);
                 thread_to_id(handle.thread())
             })
-            .map_err(|err| err.into_pyexception(vm))
+            .map_err(|err| err.to_pyexception(vm))
     }
 
     fn run_thread(func: ArgCallable, args: FuncArgs, vm: &VirtualMachine) {
         match func.invoke(args, vm) {
             Ok(_obj) => {}
-            Err(e) if e.isinstance(&vm.ctx.exceptions.system_exit) => {}
+            Err(e) if e.fast_isinstance(&vm.ctx.exceptions.system_exit) => {}
             Err(exc) => {
                 // TODO: sys.unraisablehook
                 let stderr = std::io::stderr();

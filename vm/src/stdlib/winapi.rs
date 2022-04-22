@@ -5,9 +5,10 @@ pub(crate) use _winapi::make_module;
 mod _winapi {
     use crate::{
         builtins::PyStrRef,
-        function::{ArgMapping, IntoPyException, OptionalArg},
+        convert::ToPyException,
+        function::{ArgMapping, ArgSequence, OptionalArg},
         stdlib::os::errno_err,
-        PyObjectRef, PyResult, PySequence, TryFromObject, VirtualMachine,
+        PyObjectRef, PyResult, TryFromObject, VirtualMachine,
     };
     use std::ptr::{null, null_mut};
     use winapi::shared::winerror;
@@ -197,7 +198,7 @@ mod _winapi {
 
         let wstr = |s: PyStrRef| {
             let ws = widestring::WideCString::from_str(s.as_str())
-                .map_err(|err| err.into_pyexception(vm))?;
+                .map_err(|err| err.to_pyexception(vm))?;
             Ok(ws.into_vec_with_nul())
         };
 
@@ -248,8 +249,8 @@ mod _winapi {
         let keys = env.mapping().keys(vm)?;
         let values = env.mapping().values(vm)?;
 
-        let keys = PySequence::try_from_object(vm, keys)?.into_vec();
-        let values = PySequence::try_from_object(vm, values)?.into_vec();
+        let keys = ArgSequence::try_from_object(vm, keys)?.into_vec();
+        let values = ArgSequence::try_from_object(vm, values)?.into_vec();
 
         if keys.len() != values.len() {
             return Err(
@@ -298,7 +299,7 @@ mod _winapi {
                     .get_item("handle_list", vm)
                     .ok()
                     .and_then(|obj| {
-                        <Option<PySequence<usize>>>::try_from_object(vm, obj)
+                        <Option<ArgSequence<usize>>>::try_from_object(vm, obj)
                             .map(|s| match s {
                                 Some(s) if !s.as_slice().is_empty() => Some(s.into_vec()),
                                 _ => None,

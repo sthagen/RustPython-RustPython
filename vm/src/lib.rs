@@ -5,13 +5,9 @@
 //! - Import mechanics
 //! - Base objects
 
-// for methods like vm.to_str(), not the typical use of 'to' as a method prefix
-#![allow(clippy::wrong_self_convention)]
 // to allow `mod foo {}` in foo.rs; clippy thinks this is a mistake/misunderstanding of
 // how `mod` works, but we want this sometimes for pymodule declarations
 #![allow(clippy::module_inception)]
-// to encourage good API design, see https://github.com/rust-lang/rust-clippy/issues/6726
-#![allow(clippy::unnecessary_wraps)]
 // we want to mirror python naming conventions when defining python structs, so that does mean
 // uppercase acronyms, e.g. TextIOWrapper instead of TextIoWrapper
 #![allow(clippy::upper_case_acronyms)]
@@ -42,11 +38,17 @@ pub use rustpython_derive::*;
 #[macro_use]
 pub(crate) mod macros;
 
+#[path = "pyobject.rs"]
+mod _pyobject;
+#[path = "pyobjectrc.rs"]
+mod _pyobjectrc;
 mod anystr;
+pub mod buffer;
 pub mod builtins;
 mod bytesinner;
 pub mod cformat;
 mod codecs;
+pub mod convert;
 mod coroutine;
 #[cfg(any(unix, windows, target_os = "wasi"))]
 mod crt_fd;
@@ -62,8 +64,7 @@ pub mod import;
 pub mod protocol;
 pub mod py_io;
 pub mod py_serde;
-mod pyobject;
-mod pyobjectrc;
+pub mod pyclass;
 pub mod readline;
 pub mod scope;
 pub mod sequence;
@@ -75,10 +76,24 @@ pub mod types;
 pub mod utils;
 pub mod version;
 mod vm;
+mod vm_new;
+mod vm_object;
+mod vm_ops;
+
+mod pyobject {
+    pub use super::_pyobject::*;
+    pub use super::_pyobjectrc::*;
+}
 
 // pub use self::Executor;
-pub use self::pyobject::*;
+pub use self::convert::{TryFromBorrowedObject, TryFromObject};
+// pyobject items
+pub use self::pyobject::{AsObject, PyContext, PyMethod, PyRefExact, PyResult, PyValue};
+// pyobjectrc items
+pub use self::pyobject::{PyObject, PyObjectRef, PyObjectView, PyObjectWeak, PyRef, PyWeakRef};
+pub use self::types::PyStructSequence;
 pub use self::vm::{InitParameter, Interpreter, PySettings, VirtualMachine};
+
 pub use rustpython_bytecode as bytecode;
 pub use rustpython_common as common;
 #[cfg(feature = "rustpython-compiler")]

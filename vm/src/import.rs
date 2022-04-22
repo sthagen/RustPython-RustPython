@@ -8,7 +8,7 @@ use crate::{
     scope::Scope,
     version::get_git_revision,
     vm::{InitParameter, VirtualMachine},
-    PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol,
+    AsObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
 };
 use rand::Rng;
 
@@ -127,7 +127,7 @@ pub fn import_codeobj(
     let attrs = vm.ctx.new_dict();
     attrs.set_item("__name__", vm.ctx.new_str(module_name).into(), vm)?;
     if set_file_attr {
-        attrs.set_item("__file__", code_obj.source_path.as_object().to_owned(), vm)?;
+        attrs.set_item("__file__", code_obj.source_path.clone().into(), vm)?;
     }
     let module = vm.new_module(module_name, attrs.clone(), None);
 
@@ -189,7 +189,7 @@ pub fn remove_importlib_frames(
     vm: &VirtualMachine,
     exc: &PyBaseExceptionRef,
 ) -> PyBaseExceptionRef {
-    let always_trim = exc.isinstance(&vm.ctx.exceptions.import_error);
+    let always_trim = exc.fast_isinstance(&vm.ctx.exceptions.import_error);
 
     if let Some(tb) = exc.traceback() {
         let trimmed_tb = remove_importlib_frames_inner(vm, Some(tb), always_trim).0;

@@ -1,7 +1,7 @@
 //! Builtin function definitions.
 //!
 //! Implements the list of [builtin Python functions](https://docs.python.org/3/library/builtins.html).
-use crate::{PyClassImpl, PyObjectRef, VirtualMachine};
+use crate::{pyclass::PyClassImpl, PyObjectRef, VirtualMachine};
 
 /// Built-in functions, exceptions, and other objects.
 ///
@@ -12,6 +12,7 @@ mod builtins {
     use crate::compile;
     use crate::{
         builtins::{
+            asyncgenerator::PyAsyncGen,
             enumerate::PyReverseSequenceIterator,
             function::{PyCellRef, PyFunctionRef},
             int::PyIntRef,
@@ -23,17 +24,17 @@ mod builtins {
         common::{hash::PyHash, str::to_ascii},
         function::{
             ArgBytesLike, ArgCallable, ArgIntoBool, ArgIterable, ArgMapping, FuncArgs, KwArgs,
-            OptionalArg, OptionalOption, PosArgs,
+            OptionalArg, OptionalOption, PosArgs, PyArithmeticValue,
         },
         protocol::{PyIter, PyIterReturn},
         py_io,
+        pyclass::PyClassImpl,
         readline::{Readline, ReadlineResult},
         scope::Scope,
         stdlib::sys,
         types::PyComparisonOp,
         utils::Either,
-        IdProtocol, PyArithmeticValue, PyClassImpl, PyObject, PyObjectRef, PyObjectWrap, PyRef,
-        PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
+        AsObject, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, VirtualMachine,
     };
     use num_traits::{Signed, ToPrimitive, Zero};
 
@@ -125,7 +126,10 @@ mod builtins {
 
             let mode_str = args.mode.as_str();
 
-            if args.source.isinstance(&ast::AstNode::make_class(&vm.ctx)) {
+            if args
+                .source
+                .fast_isinstance(&ast::AstNode::make_class(&vm.ctx))
+            {
                 #[cfg(not(feature = "rustpython-compiler"))]
                 {
                     return Err(vm.new_value_error("can't compile ast nodes when the `compiler` feature of rustpython is disabled"));
@@ -424,13 +428,22 @@ mod builtins {
     }
 
     #[pyfunction]
+    fn aiter(iter_target: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if iter_target.payload_is::<PyAsyncGen>() {
+            vm.call_special_method(iter_target, "__aiter__", ())
+        } else {
+            Err(vm.new_type_error("wrong argument type".to_owned()))
+        }
+    }
+
+    #[pyfunction]
     fn len(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
         obj.length(vm)
     }
 
     #[pyfunction]
-    fn locals(vm: &VirtualMachine) -> PyResult {
-        vm.current_locals().map(|x| x.into_object())
+    fn locals(vm: &VirtualMachine) -> PyResult<ArgMapping> {
+        vm.current_locals()
     }
 
     fn min_or_max(
@@ -456,7 +469,7 @@ mod builtins {
                 }
                 args.args
             }
-            std::cmp::Ordering::Equal => vm.extract_elements(&args.args[0])?,
+            std::cmp::Ordering::Equal => args.args[0].try_to_value(vm)?,
             std::cmp::Ordering::Less => {
                 // zero arguments means type error:
                 return Err(vm.new_type_error("Expected 1 or more arguments".to_owned()));
@@ -576,7 +589,6 @@ mod builtins {
         modulus: Option<PyObjectRef>,
     }
 
-    #[allow(clippy::suspicious_else_formatting)]
     #[pyfunction]
     fn pow(args: PowArgs, vm: &VirtualMachine) -> PyResult {
         let PowArgs {
@@ -592,18 +604,12 @@ mod builtins {
                 let try_pow_value = |obj: &PyObject,
                                      args: (PyObjectRef, PyObjectRef, PyObjectRef)|
                  -> Option<PyResult> {
-                    if let Some(method) = obj.get_class_attr("__pow__") {
-                        let result = match vm.invoke(&method, args) {
-                            Ok(x) => x,
-                            Err(e) => return Some(Err(e)),
-                        };
-                        if let PyArithmeticValue::Implemented(x) =
-                            PyArithmeticValue::from_object(vm, result)
-                        {
-                            return Some(Ok(x));
-                        }
-                    }
-                    None
+                    let method = obj.get_class_attr("__pow__")?;
+                    let result = match vm.invoke(&method, args) {
+                        Ok(x) => x,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    Some(Ok(PyArithmeticValue::from_object(vm, result).into_option()?))
                 };
 
                 if let Some(val) = try_pow_value(&x, (x.clone(), y.clone(), z.clone())) {
@@ -693,7 +699,7 @@ mod builtins {
             })?;
             let len = obj.length(vm)?;
             let obj_iterator = PyReverseSequenceIterator::new(obj, len);
-            Ok(obj_iterator.into_object(vm))
+            Ok(obj_iterator.into_pyobject(vm))
         }
     }
 
@@ -741,7 +747,7 @@ mod builtins {
 
     #[pyfunction]
     fn sorted(iterable: PyObjectRef, opts: SortOptions, vm: &VirtualMachine) -> PyResult<PyList> {
-        let items = vm.extract_elements(&iterable)?;
+        let items: Vec<_> = iterable.try_to_value(vm)?;
         let lst = PyList::from(items);
         lst.sort(opts, vm)?;
         Ok(lst)
@@ -796,7 +802,7 @@ mod builtins {
                 vm.new_type_error("vars() argument must have __dict__ attribute".to_owned())
             })
         } else {
-            Ok(vm.current_locals()?.into_object())
+            Ok(vm.current_locals()?.into())
         }
     }
 
@@ -815,7 +821,7 @@ mod builtins {
         let mut new_bases: Option<Vec<PyObjectRef>> = None;
         let bases = PyTuple::new_ref(bases.into_vec(), &vm.ctx);
         for (i, base) in bases.as_slice().iter().enumerate() {
-            if base.isinstance(&vm.ctx.types.type_type) {
+            if base.fast_isinstance(&vm.ctx.types.type_type) {
                 if let Some(bases) = &mut new_bases {
                     bases.push(base.clone());
                 }
@@ -854,9 +860,9 @@ mod builtins {
             Ok(mut metaclass) => {
                 for base in bases.as_slice().iter() {
                     let base_class = base.class();
-                    if base_class.issubclass(&metaclass) {
-                        metaclass = base.clone_class();
-                    } else if !metaclass.issubclass(&base_class) {
+                    if base_class.fast_issubclass(&metaclass) {
+                        metaclass = base.class().clone();
+                    } else if !metaclass.fast_issubclass(&base_class) {
                         return Err(vm.new_type_error(
                             "metaclass conflict: the metaclass of a derived class must be a (non-strict) \
                             subclass of the metaclasses of all its bases"

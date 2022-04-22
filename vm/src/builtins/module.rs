@@ -1,9 +1,8 @@
 use super::pystr::IntoPyStrRef;
 use super::{PyDictRef, PyStr, PyStrRef, PyTypeRef};
 use crate::{
-    function::{FuncArgs, IntoPyObject},
-    types::GetAttr,
-    PyClassImpl, PyContext, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, VirtualMachine,
+    convert::ToPyObject, function::FuncArgs, pyclass::PyClassImpl, types::GetAttr, AsObject,
+    PyContext, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, VirtualMachine,
 };
 
 #[pyclass(module = false, name = "module")]
@@ -41,16 +40,17 @@ impl PyModule {
 
     #[pymethod(magic)]
     fn init(zelf: PyRef<Self>, args: ModuleInitArgs, vm: &VirtualMachine) {
-        debug_assert!(crate::TypeProtocol::class(zelf.as_object())
+        debug_assert!(zelf
+            .class()
             .slots
             .flags
             .has_feature(crate::types::PyTypeFlags::HAS_DICT));
-        zelf.init_module_dict(args.name.into(), args.doc.into_pyobject(vm), vm);
+        zelf.init_module_dict(args.name.into(), args.doc.to_pyobject(vm), vm);
     }
 
     fn getattr_inner(zelf: &PyObjectView<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
         if let Some(attr) =
-            vm.generic_getattribute_opt(zelf.as_object().to_owned(), name.clone(), None)?
+            vm.generic_getattribute_opt(zelf.to_owned().into(), name.clone(), None)?
         {
             return Ok(attr);
         }

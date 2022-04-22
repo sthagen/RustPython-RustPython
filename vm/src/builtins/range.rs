@@ -1,22 +1,22 @@
 use super::{PyInt, PyIntRef, PySlice, PyTupleRef, PyTypeRef};
-use crate::builtins::builtins_iter;
 use crate::common::hash::PyHash;
 use crate::{
-    function::{FuncArgs, OptionalArg},
+    builtins::builtins_iter,
+    function::{FuncArgs, OptionalArg, PyComparisonValue},
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
+    pyclass::PyClassImpl,
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, IterNextIterable,
         Iterable, PyComparisonOp, Unconstructible,
     },
-    IdProtocol, IntoPyRef, PyClassImpl, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
-    TryFromObject, TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
+    TryFromObject, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{One, Signed, ToPrimitive, Zero};
-use std::borrow::Cow;
-use std::cmp::max;
+use std::{borrow::Cow, cmp::max};
 
 // Search flag passed to iter_search
 enum SearchType {
@@ -183,9 +183,9 @@ pub fn init(context: &PyContext) {
 impl PyRange {
     fn new(cls: PyTypeRef, stop: PyIntRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         PyRange {
-            start: (0).into_pyref(vm),
+            start: vm.new_pyref(0),
             stop,
-            step: (1).into_pyref(vm),
+            step: vm.new_pyref(1),
         }
         .into_ref_with_type(vm, cls)
     }
@@ -197,7 +197,7 @@ impl PyRange {
         step: OptionalArg<PyIntRef>,
         vm: &VirtualMachine,
     ) -> PyResult<PyRef<Self>> {
-        let step = step.unwrap_or_else(|| (1).into_pyref(vm));
+        let step = step.unwrap_or_else(|| vm.new_pyref(1));
         if step.as_bigint().is_zero() {
             return Err(vm.new_value_error("range() arg 3 must not be zero".to_owned()));
         }
@@ -242,7 +242,7 @@ impl PyRange {
                     // always fit in a usize.
                     length: length.to_usize().unwrap_or(0),
                 }
-                .into_object(vm)
+                .into_pyobject(vm)
             } else {
                 PyLongRangeIterator {
                     index: AtomicCell::new(0),
@@ -250,7 +250,7 @@ impl PyRange {
                     step,
                     length,
                 }
-                .into_object(vm)
+                .into_pyobject(vm)
             },
         )
     }
@@ -284,7 +284,7 @@ impl PyRange {
             }
         } else {
             iter_search(
-                self.clone().into_object(vm),
+                self.clone().into_pyobject(vm),
                 needle,
                 SearchType::Contains,
                 vm,
@@ -315,8 +315,13 @@ impl PyRange {
             // Fallback to iteration.
             Ok(BigInt::from_bytes_be(
                 Sign::Plus,
-                &iter_search(self.clone().into_object(vm), needle, SearchType::Index, vm)?
-                    .to_be_bytes(),
+                &iter_search(
+                    self.clone().into_pyobject(vm),
+                    needle,
+                    SearchType::Index,
+                    vm,
+                )?
+                .to_be_bytes(),
             ))
         }
     }
@@ -332,7 +337,7 @@ impl PyRange {
         } else {
             // Dealing with classes who might compare equal with ints in their
             // __eq__, slow search.
-            iter_search(self.clone().into_object(vm), item, SearchType::Count, vm)
+            iter_search(self.clone().into_pyobject(vm), item, SearchType::Count, vm)
         }
     }
 
@@ -350,9 +355,9 @@ impl PyRange {
                 substop = (substop * range_step.as_bigint()) + range_start.as_bigint();
 
                 Ok(PyRange {
-                    start: substart.into_pyref(vm),
-                    stop: substop.into_pyref(vm),
-                    step: substep.into_pyref(vm),
+                    start: vm.new_pyref(substart),
+                    stop: vm.new_pyref(substop),
+                    step: vm.new_pyref(substep),
                 }
                 .into_ref(vm)
                 .into())
@@ -447,11 +452,11 @@ impl Hashable for PyRange {
 
 impl Comparable for PyRange {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &PyObjectView<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         _vm: &VirtualMachine,
-    ) -> PyResult<crate::PyComparisonValue> {
+    ) -> PyResult<PyComparisonValue> {
         op.eq_only(|| {
             if zelf.is(other) {
                 return Ok(true.into());
@@ -493,7 +498,7 @@ impl Iterable for PyRange {
                 // always fit in a usize.
                 length: length.to_usize().unwrap_or(0),
             }
-            .into_object(vm))
+            .into_pyobject(vm))
         } else {
             Ok(PyLongRangeIterator {
                 index: AtomicCell::new(0),
@@ -501,7 +506,7 @@ impl Iterable for PyRange {
                 step: step.clone(),
                 length,
             }
-            .into_object(vm))
+            .into_pyobject(vm))
         }
     }
 }

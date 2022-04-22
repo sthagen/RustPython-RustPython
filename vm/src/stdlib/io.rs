@@ -9,8 +9,34 @@ cfg_if::cfg_if! {
     }
 }
 
-use crate::{PyObjectRef, PyResult, TryFromObject, VirtualMachine};
-pub(crate) use _io::io_open as open;
+use crate::{
+    builtins::PyBaseExceptionRef,
+    convert::{ToPyException, ToPyObject},
+    PyObjectRef, PyResult, TryFromObject, VirtualMachine,
+};
+pub use _io::io_open as open;
+
+impl ToPyException for &'_ std::io::Error {
+    fn to_pyexception(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+        use std::io::ErrorKind;
+
+        let excs = &vm.ctx.exceptions;
+        #[allow(unreachable_patterns)] // some errors are just aliases of each other
+        let exc_type = match self.kind() {
+            ErrorKind::NotFound => excs.file_not_found_error.clone(),
+            ErrorKind::PermissionDenied => excs.permission_error.clone(),
+            ErrorKind::AlreadyExists => excs.file_exists_error.clone(),
+            ErrorKind::WouldBlock => excs.blocking_io_error.clone(),
+            _ => self
+                .raw_os_error()
+                .and_then(|errno| crate::exceptions::raw_os_error_to_exc_type(errno, vm))
+                .unwrap_or_else(|| excs.os_error.clone()),
+        };
+        let errno = self.raw_os_error().to_pyobject(vm);
+        let msg = vm.ctx.new_str(self.to_string()).into();
+        vm.new_exception(exc_type, vec![errno, msg])
+    }
+}
 
 pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let ctx = &vm.ctx;
@@ -77,24 +103,27 @@ mod _io {
             PyMappedThreadMutexGuard, PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard,
             PyThreadMutex, PyThreadMutexGuard,
         },
+        convert::ToPyObject,
         function::{
-            ArgBytesLike, ArgIterable, ArgMemoryBuffer, FuncArgs, IntoPyObject, OptionalArg,
-            OptionalOption,
+            ArgBytesLike, ArgIterable, ArgMemoryBuffer, FuncArgs, OptionalArg, OptionalOption,
         },
         protocol::{
             BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn, VecBuffer,
         },
+        pyclass::StaticType,
         types::{Constructor, Destructor, IterNext, Iterable},
         utils::Either,
         vm::{ReprGuard, VirtualMachine},
-        IdProtocol, PyContext, PyObject, PyObjectRef, PyObjectWrap, PyRef, PyResult, PyValue,
-        StaticType, TryFromBorrowedObject, TryFromObject, TypeProtocol,
+        AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
+        TryFromBorrowedObject, TryFromObject,
     };
     use bstr::ByteSlice;
     use crossbeam_utils::atomic::AtomicCell;
     use num_traits::ToPrimitive;
-    use std::io::{self, prelude::*, Cursor, SeekFrom};
-    use std::ops::Range;
+    use std::{
+        io::{self, prelude::*, Cursor, SeekFrom},
+        ops::Range,
+    };
 
     #[allow(clippy::let_and_return)]
     fn validate_whence(whence: i32) -> bool {
@@ -136,6 +165,7 @@ mod _io {
     }
 
     impl OptionalSize {
+        #[allow(clippy::wrong_self_convention)]
         pub fn to_usize(self) -> Option<usize> {
             self.size.and_then(|v| v.to_usize())
         }
@@ -156,8 +186,8 @@ mod _io {
     fn os_err(vm: &VirtualMachine, err: io::Error) -> PyBaseExceptionRef {
         #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
-            use crate::function::IntoPyException;
-            err.into_pyexception(vm)
+            use crate::convert::ToPyException;
+            err.to_pyexception(vm)
         }
         #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         {
@@ -447,7 +477,7 @@ mod _io {
         ) -> PyResult<Vec<PyObjectRef>> {
             let hint = hint.flatten().unwrap_or(-1);
             if hint <= 0 {
-                return vm.extract_elements(&instance);
+                return instance.try_to_value(vm);
             }
             let hint = hint as usize;
             let mut ret = Vec::new();
@@ -567,7 +597,7 @@ mod _io {
                     // FIXME: try to use Arc::unwrap on the bytearray to get at the inner buffer
                     bytes.clone()
                 })
-                .into_pyobject(vm))
+                .to_pyobject(vm))
             } else {
                 vm.call_method(&instance, "readall", ())
             }
@@ -869,7 +899,7 @@ mod _io {
         ) -> PyResult<Option<usize>> {
             let len = buf_range.len();
             let res = if let Some(buf) = buf {
-                let memobj = PyMemoryView::from_buffer_range(buf, buf_range, vm)?.into_pyobject(vm);
+                let memobj = PyMemoryView::from_buffer_range(buf, buf_range, vm)?.to_pyobject(vm);
 
                 // TODO: loop if write() raises an interrupt
                 vm.call_method(self.raw.as_ref().unwrap(), "write", (memobj,))?
@@ -1306,8 +1336,8 @@ mod _io {
         let name = match obj.to_owned().get_attr("name", vm) {
             Ok(name) => Some(name),
             Err(e)
-                if e.isinstance(&vm.ctx.exceptions.attribute_error)
-                    || e.isinstance(&vm.ctx.exceptions.value_error) =>
+                if e.fast_isinstance(&vm.ctx.exceptions.attribute_error)
+                    || e.fast_isinstance(&vm.ctx.exceptions.value_error) =>
             {
                 None
             }
@@ -1418,7 +1448,7 @@ mod _io {
             pos: OptionalOption<PyObjectRef>,
             vm: &VirtualMachine,
         ) -> PyResult {
-            let pos = pos.flatten().into_pyobject(vm);
+            let pos = pos.flatten().to_pyobject(vm);
             let mut data = zelf.lock(vm)?;
             data.check_init(vm)?;
             if data.writable() {
@@ -2416,7 +2446,7 @@ mod _io {
                 ..Default::default()
             };
             if textio.decoded_chars_used.bytes == 0 {
-                return Ok(cookie.build().into_pyobject(vm));
+                return Ok(cookie.build().to_pyobject(vm));
             }
             let decoder_getstate = || {
                 let state = vm.call_method(decoder, "getstate", ())?;
@@ -2495,7 +2525,7 @@ mod _io {
             }
             vm.call_method(decoder, "setstate", (saved_state,))?;
             cookie.set_num_to_skip(num_to_skip);
-            Ok(cookie.build().into_pyobject(vm))
+            Ok(cookie.build().to_pyobject(vm))
         }
 
         #[pyproperty]
@@ -3283,7 +3313,7 @@ mod _io {
         fn getbuffer(self, vm: &VirtualMachine) -> PyResult<PyMemoryView> {
             let len = self.buffer.read().cursor.get_ref().len();
             let buffer = PyBuffer::new(
-                self.into_object(),
+                self.into(),
                 BufferDescriptor::simple(len, false),
                 &BYTES_IO_BUFFER_METHODS,
             );
@@ -3520,7 +3550,7 @@ mod _io {
             )
         })?;
         let raw = vm.invoke(
-            file_io_class.as_object(),
+            file_io_class,
             (file, mode.rawmode(), opts.closefd, opts.opener),
         )?;
 
@@ -3554,13 +3584,13 @@ mod _io {
         } else {
             BufferedWriter::static_type()
         };
-        let buffered = vm.invoke(cls.as_object(), (raw, buffering))?;
+        let buffered = vm.invoke(cls, (raw, buffering))?;
 
         match mode.encode {
             EncodeMode::Text => {
                 let tio = TextIOWrapper::static_type();
                 let wrapper = vm.invoke(
-                    tio.as_object(),
+                    tio,
                     (
                         buffered,
                         opts.encoding,
@@ -3649,16 +3679,14 @@ mod _io {
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 #[pymodule]
 mod fileio {
-    use super::Offset;
-    use super::_io::*;
+    use super::{Offset, _io::*};
     use crate::{
         builtins::{PyStr, PyStrRef, PyTypeRef},
+        convert::ToPyException,
         crt_fd::Fd,
-        function::{
-            ArgBytesLike, ArgMemoryBuffer, FuncArgs, IntoPyException, OptionalArg, OptionalOption,
-        },
+        function::{ArgBytesLike, ArgMemoryBuffer, FuncArgs, OptionalArg, OptionalOption},
         stdlib::os,
-        PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
+        AsObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use std::io::{Read, Write};
@@ -3807,7 +3835,7 @@ mod fileio {
             zelf.mode.store(mode);
             let fd = if let Some(opener) = args.opener {
                 let fd = vm.invoke(&opener, (name.clone(), flags))?;
-                if !fd.isinstance(&vm.ctx.types.int_type) {
+                if !fd.fast_isinstance(&vm.ctx.types.int_type) {
                     return Err(vm.new_type_error("expected integer from opener".to_owned()));
                 }
                 let fd = i32::try_from_object(vm, fd)?;
@@ -3930,14 +3958,14 @@ mod fileio {
                 let mut bytes = vec![0; read_byte as usize];
                 let n = handle
                     .read(&mut bytes)
-                    .map_err(|err| err.into_pyexception(vm))?;
+                    .map_err(|err| err.to_pyexception(vm))?;
                 bytes.truncate(n);
                 bytes
             } else {
                 let mut bytes = vec![];
                 handle
                     .read_to_end(&mut bytes)
-                    .map_err(|err| err.into_pyexception(vm))?;
+                    .map_err(|err| err.to_pyexception(vm))?;
                 bytes
             };
 
@@ -3957,7 +3985,7 @@ mod fileio {
 
             let mut buf = obj.borrow_buf_mut();
             let mut f = handle.take(buf.len() as _);
-            let ret = f.read(&mut buf).map_err(|e| e.into_pyexception(vm))?;
+            let ret = f.read(&mut buf).map_err(|e| e.to_pyexception(vm))?;
 
             Ok(ret)
         }
@@ -3975,7 +4003,7 @@ mod fileio {
 
             let len = obj
                 .with_ref(|b| handle.write(b))
-                .map_err(|err| err.into_pyexception(vm))?;
+                .map_err(|err| err.to_pyexception(vm))?;
 
             //return number of bytes written
             Ok(len)
@@ -3990,7 +4018,7 @@ mod fileio {
             }
             let fd = zelf.fd.swap(-1);
             if fd >= 0 {
-                Fd(fd).close().map_err(|e| e.into_pyexception(vm))?;
+                Fd(fd).close().map_err(|e| e.to_pyexception(vm))?;
             }
             res
         }

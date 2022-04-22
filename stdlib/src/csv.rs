@@ -1,11 +1,4 @@
-use crate::vm::{PyClassImpl, PyObjectRef, VirtualMachine};
-
-pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
-    let ctx = &vm.ctx;
-    _csv::Reader::make_class(ctx);
-    _csv::Writer::make_class(ctx);
-    _csv::make_module(vm)
-}
+pub(crate) use _csv::make_module;
 
 #[pymodule]
 mod _csv {
@@ -16,7 +9,7 @@ mod _csv {
         match_class,
         protocol::{PyIter, PyIterReturn},
         types::{IterNext, IterNextIterable},
-        PyObjectRef, PyObjectView, PyResult, PyValue, TryFromObject, TypeProtocol, VirtualMachine,
+        AsObject, PyObjectRef, PyObjectView, PyResult, PyValue, TryFromObject, VirtualMachine,
     };
     use itertools::{self, Itertools};
     use std::fmt;

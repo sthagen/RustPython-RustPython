@@ -18,20 +18,23 @@ use crate::{
             PyRwLockReadGuard, PyRwLockWriteGuard,
         },
     },
-    function::{ArgBytesLike, ArgIterable, FuncArgs, IntoPyObject, OptionalArg, OptionalOption},
+    convert::ToPyObject,
+    function::{
+        ArgBytesLike, ArgIterable, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue,
+    },
     protocol::{
         BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn,
         PyMappingMethods, PySequenceMethods,
     },
+    pyclass::PyClassImpl,
     sliceable::{SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
         AsBuffer, AsMapping, AsSequence, Callable, Comparable, Constructor, Hashable, IterNext,
         IterNextIterable, Iterable, PyComparisonOp, Unconstructible, Unhashable,
     },
     utils::Either,
-    IdProtocol, PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyObjectView,
-    PyObjectWrap, PyRef, PyResult, PyValue, TryFromBorrowedObject, TryFromObject, TypeProtocol,
-    VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
+    TryFromBorrowedObject, TryFromObject, VirtualMachine,
 };
 use bstr::ByteSlice;
 use std::{borrow::Cow, mem::size_of};
@@ -683,9 +686,9 @@ impl PyByteArray {
         zelf: PyRef<Self>,
         vm: &VirtualMachine,
     ) -> (PyTypeRef, PyTupleRef, Option<PyDictRef>) {
-        let bytes = PyBytes::from(zelf.borrow_buf().to_vec()).into_pyobject(vm);
+        let bytes = PyBytes::from(zelf.borrow_buf().to_vec()).to_pyobject(vm);
         (
-            zelf.as_object().clone_class(),
+            zelf.class().clone(),
             PyTuple::new_ref(vec![bytes], &vm.ctx),
             zelf.as_object().dict(),
         )
@@ -716,7 +719,7 @@ impl Comparable for PyByteArray {
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<PyComparisonValue> {
-        if let Some(res) = op.identical_optimization(&zelf, &other) {
+        if let Some(res) = op.identical_optimization(zelf, other) {
             return Ok(res.into());
         }
         Ok(zelf.inner().cmp(other, op, vm))
@@ -748,7 +751,7 @@ static BUFFER_METHODS: BufferMethods = BufferMethods {
 impl AsBuffer for PyByteArray {
     fn as_buffer(zelf: &PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<PyBuffer> {
         Ok(PyBuffer::new(
-            zelf.to_owned().into_object(),
+            zelf.to_owned().into(),
             BufferDescriptor::simple(zelf.len(), false),
             &BUFFER_METHODS,
         ))
@@ -786,12 +789,12 @@ impl PyByteArray {
             Self::sequence_downcast(seq)
                 .inner()
                 .concat(other, vm)
-                .map(|x| PyByteArray::from(x).into_object(vm))
+                .map(|x| PyByteArray::from(x).into_pyobject(vm))
         }),
         repeat: Some(|seq, n, vm| {
             Self::sequence_downcast(seq)
                 .mul(n as isize, vm)
-                .map(|x| x.into_object(vm))
+                .map(|x| x.into_pyobject(vm))
         }),
         item: Some(|seq, i, vm| {
             Self::sequence_downcast(seq)
@@ -830,7 +833,7 @@ impl Iterable for PyByteArray {
         Ok(PyByteArrayIterator {
             internal: PyMutex::new(PositionIterInternal::new(zelf, 0)),
         }
-        .into_object(vm))
+        .into_pyobject(vm))
     }
 }
 

@@ -1,12 +1,12 @@
 use super::{PositionIterInternal, PyGenericAlias, PyTypeRef};
 use crate::common::{hash::PyHash, lock::PyMutex};
-use crate::sliceable::SequenceIndex;
-use crate::TryFromBorrowedObject;
 use crate::{
-    function::{IntoPyObject, OptionalArg},
+    convert::{ToPyObject, TransmuteFromObject, TryFromBorrowedObject},
+    function::{OptionalArg, PyArithmeticValue, PyComparisonValue},
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
+    pyclass::PyClassImpl,
     sequence::{ObjectSequenceOp, SequenceOp},
-    sliceable::SliceableSequenceOp,
+    sliceable::{SequenceIndex, SliceableSequenceOp},
     stdlib::sys,
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, IterNextIterable,
@@ -14,12 +14,9 @@ use crate::{
     },
     utils::collection_repr,
     vm::{ReprGuard, VirtualMachine},
-    IdProtocol, PyArithmeticValue, PyClassImpl, PyComparisonValue, PyContext, PyObject,
-    PyObjectRef, PyRef, PyResult, PyValue, TransmuteFromObject, TryFromObject, TypeProtocol,
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
 };
-use std::borrow::Cow;
-use std::fmt;
-use std::marker::PhantomData;
+use std::{borrow::Cow, fmt, marker::PhantomData};
 
 /// tuple() -> empty tuple
 /// tuple(iterable) -> tuple initialized from iterable's items
@@ -61,14 +58,14 @@ impl IntoPyTuple for Vec<PyObjectRef> {
 
 macro_rules! impl_intopyobj_tuple {
     ($(($T:ident, $idx:tt)),+) => {
-        impl<$($T: IntoPyObject),*> IntoPyTuple for ($($T,)*) {
+        impl<$($T: ToPyObject),*> IntoPyTuple for ($($T,)*) {
             fn into_pytuple(self, vm: &VirtualMachine) -> PyTupleRef {
-                PyTuple::new_ref(vec![$(self.$idx.into_pyobject(vm)),*], &vm.ctx)
+                PyTuple::new_ref(vec![$(self.$idx.to_pyobject(vm)),*], &vm.ctx)
             }
         }
 
-        impl<$($T: IntoPyObject),*> IntoPyObject for ($($T,)*) {
-            fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+        impl<$($T: ToPyObject),*> ToPyObject for ($($T,)*) {
+            fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
                 self.into_pytuple(vm).into()
             }
         }
@@ -104,7 +101,7 @@ impl Constructor for PyTuple {
             } else {
                 iterable
             };
-            vm.extract_elements(&iterable)?
+            iterable.try_to_value(vm)?
         } else {
             vec![]
         };
@@ -397,7 +394,7 @@ impl Iterable for PyTuple {
         Ok(PyTupleIterator {
             internal: PyMutex::new(PositionIterInternal::new(zelf, 0)),
         }
-        .into_object(vm))
+        .into_pyobject(vm))
     }
 }
 
@@ -510,9 +507,9 @@ impl<T: TransmuteFromObject> From<PyTupleTyped<T>> for PyTupleRef {
     }
 }
 
-impl<T: TransmuteFromObject> IntoPyObject for PyTupleTyped<T> {
+impl<T: TransmuteFromObject> ToPyObject for PyTupleTyped<T> {
     #[inline]
-    fn into_pyobject(self, _vm: &VirtualMachine) -> PyObjectRef {
+    fn to_pyobject(self, _vm: &VirtualMachine) -> PyObjectRef {
         self.tuple.into()
     }
 }

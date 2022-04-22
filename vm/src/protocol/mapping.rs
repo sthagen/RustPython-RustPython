@@ -4,8 +4,8 @@ use crate::{
         PyDict,
     },
     common::lock::OnceCell,
-    function::IntoPyResult,
-    IdProtocol, PyObject, PyObjectRef, PyResult, TypeProtocol, VirtualMachine,
+    convert::ToPyResult,
+    AsObject, PyObject, PyObjectRef, PyResult, VirtualMachine,
 };
 
 // Mapping protocol
@@ -26,6 +26,7 @@ pub struct PyMapping<'a> {
 }
 
 impl<'a> From<&'a PyObject> for PyMapping<'a> {
+    #[inline(always)]
     fn from(obj: &'a PyObject) -> Self {
         Self {
             obj,
@@ -35,12 +36,14 @@ impl<'a> From<&'a PyObject> for PyMapping<'a> {
 }
 
 impl AsRef<PyObject> for PyMapping<'_> {
+    #[inline(always)]
     fn as_ref(&self) -> &PyObject {
         self.obj
     }
 }
 
 impl<'a> PyMapping<'a> {
+    #[inline(always)]
     pub fn with_methods(obj: &'a PyObject, methods: PyMappingMethods) -> Self {
         Self {
             obj,
@@ -60,6 +63,7 @@ impl<'a> PyMapping<'a> {
 
 impl PyMapping<'_> {
     // PyMapping::Check
+    #[inline]
     pub fn check(&self, vm: &VirtualMachine) -> bool {
         self.methods(vm).subscript.is_some()
     }
@@ -91,7 +95,20 @@ impl PyMapping<'_> {
         })?
     }
 
-    pub fn subscript(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
+    pub fn subscript(&self, needle: &impl AsObject, vm: &VirtualMachine) -> PyResult {
+        self._subscript(needle.as_object(), vm)
+    }
+
+    pub fn ass_subscript(
+        &self,
+        needle: &impl AsObject,
+        value: Option<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
+        self._ass_subscript(needle.as_object(), value, vm)
+    }
+
+    fn _subscript(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
         let f = self
             .methods(vm)
             .subscript
@@ -99,7 +116,7 @@ impl PyMapping<'_> {
         f(self, needle, vm)
     }
 
-    pub fn ass_subscript(
+    fn _ass_subscript(
         &self,
         needle: &PyObject,
         value: Option<PyObjectRef>,
@@ -116,7 +133,7 @@ impl PyMapping<'_> {
 
     pub fn keys(&self, vm: &VirtualMachine) -> PyResult {
         if let Some(dict) = self.obj.downcast_ref_if_exact::<PyDict>(vm) {
-            PyDictKeys::new(dict.to_owned()).into_pyresult(vm)
+            PyDictKeys::new(dict.to_owned()).to_pyresult(vm)
         } else {
             self.method_output_as_list("keys", vm)
         }
@@ -124,7 +141,7 @@ impl PyMapping<'_> {
 
     pub fn values(&self, vm: &VirtualMachine) -> PyResult {
         if let Some(dict) = self.obj.downcast_ref_if_exact::<PyDict>(vm) {
-            PyDictValues::new(dict.to_owned()).into_pyresult(vm)
+            PyDictValues::new(dict.to_owned()).to_pyresult(vm)
         } else {
             self.method_output_as_list("values", vm)
         }
@@ -132,7 +149,7 @@ impl PyMapping<'_> {
 
     pub fn items(&self, vm: &VirtualMachine) -> PyResult {
         if let Some(dict) = self.obj.downcast_ref_if_exact::<PyDict>(vm) {
-            PyDictItems::new(dict.to_owned()).into_pyresult(vm)
+            PyDictItems::new(dict.to_owned()).to_pyresult(vm)
         } else {
             self.method_output_as_list("items", vm)
         }
@@ -155,8 +172,6 @@ impl PyMapping<'_> {
 
         // TODO
         // PySequence::from(&iter).list(vm).map(|x| x.into())
-        vm.ctx
-            .new_list(vm.extract_elements(&iter)?)
-            .into_pyresult(vm)
+        vm.ctx.new_list(iter.try_to_value(vm)?).to_pyresult(vm)
     }
 }

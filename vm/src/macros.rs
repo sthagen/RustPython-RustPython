@@ -49,7 +49,7 @@ macro_rules! py_namespace {
         {
             let namespace = $crate::builtins::PyNamespace::new_ref(&$vm.ctx);
             $(
-                $vm.__module_set_attr(namespace.as_object(), $name, $value).unwrap();
+                $vm.__module_set_attr($crate::pyobject::AsObject::as_object(&namespace), $name, $value).unwrap();
             )*
             namespace
         }
@@ -72,7 +72,7 @@ macro_rules! py_namespace {
 /// use rustpython_vm::{PyValue};
 ///
 /// # rustpython_vm::Interpreter::default().enter(|vm| {
-/// let obj = PyInt::from(0).into_object(vm);
+/// let obj = PyInt::from(0).into_pyobject(vm);
 /// assert_eq!(
 ///     "int",
 ///     match_class!(match obj {
@@ -96,7 +96,7 @@ macro_rules! py_namespace {
 /// use rustpython_vm::{ PyValue};
 ///
 /// # rustpython_vm::Interpreter::default().enter(|vm| {
-/// let obj = PyInt::from(0).into_object(vm);
+/// let obj = PyInt::from(0).into_pyobject(vm);
 ///
 /// let int_value = match_class!(match obj {
 ///     i @ PyInt => i.as_bigint().clone(),
@@ -200,7 +200,7 @@ macro_rules! class_or_notimplemented {
         let a: &$crate::PyObject = &*$obj;
         match $crate::PyObject::downcast_ref::<$t>(&a) {
             Some(pyref) => pyref,
-            None => return Ok($crate::PyArithmeticValue::NotImplemented),
+            None => return Ok($crate::function::PyArithmeticValue::NotImplemented),
         }
     }};
 }

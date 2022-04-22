@@ -8,9 +8,11 @@ mod _browser {
     use js_sys::Promise;
     use rustpython_vm::{
         builtins::{PyDictRef, PyStrRef},
-        function::{ArgCallable, IntoPyObject, OptionalArg},
+        convert::ToPyObject,
+        function::{ArgCallable, OptionalArg},
         import::import_file,
-        PyClassImpl, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+        pyclass::PyClassImpl,
+        PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
     };
     use wasm_bindgen::{prelude::*, JsCast};
     use wasm_bindgen_futures::JsFuture;
@@ -110,7 +112,7 @@ mod _browser {
             JsFuture::from(response_format.get_response(&response)?).await
         };
 
-        Ok(PyPromise::from_future(future).into_object(vm))
+        Ok(PyPromise::from_future(future).into_pyobject(vm))
     }
 
     #[pyfunction]
@@ -173,7 +175,7 @@ mod _browser {
                 .query_selector(query.as_str())
                 .map_err(|err| convert::js_py_typeerror(vm, err))?
                 .map(|elem| Element { elem })
-                .into_pyobject(vm);
+                .to_pyobject(vm);
             Ok(elem)
         }
     }
@@ -251,7 +253,7 @@ mod _browser {
             })
         };
 
-        Ok(PyPromise::from_future(future).into_object(vm))
+        Ok(PyPromise::from_future(future).into_pyobject(vm))
     }
 }
 

@@ -35,7 +35,7 @@
 //!
 //! The binary will have all the standard arguments of a python interpreter (including a REPL!) but
 //! it will have your modules loaded into the vm.
-#![allow(clippy::needless_doctest_main, clippy::unnecessary_wraps)]
+#![allow(clippy::needless_doctest_main)]
 
 #[macro_use]
 extern crate clap;
@@ -43,21 +43,20 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 
-use clap::{App, AppSettings, Arg, ArgMatches};
-use rustpython_vm::{
-    builtins::PyDictRef, builtins::PyInt, compile, match_class, scope::Scope, stdlib::sys,
-    InitParameter, Interpreter, PyObjectRef, PyResult, PySettings, TryFromObject, TypeProtocol,
-    VirtualMachine,
-};
-
-use std::env;
-use std::path::Path;
-use std::process;
-use std::str::FromStr;
-
 mod shell;
 
-pub use rustpython_vm;
+use clap::{App, AppSettings, Arg, ArgMatches};
+use rustpython_vm::{
+    builtins::{PyDictRef, PyInt},
+    compile, match_class,
+    scope::Scope,
+    stdlib::{atexit, sys},
+    AsObject, InitParameter, Interpreter, PyObjectRef, PyResult, PySettings, TryFromObject,
+    VirtualMachine,
+};
+use std::{env, path::Path, process, str::FromStr};
+
+pub use rustpython_vm as vm;
 
 /// The main cli of the `rustpython` interpreter. This function will exit with `process::exit()`
 /// based on the return code of the python code ran through the cli.
@@ -107,7 +106,7 @@ where
         // See if any exception leaked out:
         let exitcode = match res {
             Ok(()) => 0,
-            Err(err) if err.isinstance(&vm.ctx.exceptions.system_exit) => {
+            Err(err) if err.fast_isinstance(&vm.ctx.exceptions.system_exit) => {
                 let args = err.args();
                 match args.as_slice() {
                     [] => 0,
@@ -141,7 +140,7 @@ where
             }
         };
 
-        let _ = vm.run_atexit_funcs();
+        let _ = atexit::_run_exitfuncs(vm);
 
         flush_std(vm);
 
@@ -537,12 +536,8 @@ fn setup_main_module(vm: &VirtualMachine) -> PyResult<Scope> {
     main_module
         .dict()
         .and_then(|d| {
-            d.set_item(
-                "__annotations__",
-                vm.ctx.new_dict().as_object().to_owned(),
-                vm,
-            )
-            .ok()
+            d.set_item("__annotations__", vm.ctx.new_dict().into(), vm)
+                .ok()
         })
         .expect("Failed to initialize __main__.__annotations__");
 
@@ -650,14 +645,14 @@ fn get_importer(path: &str, vm: &VirtualMachine) -> PyResult<Option<PyObjectRef>
     let path = vm.ctx.new_str(path);
     let path_hooks = vm.sys_module.clone().get_attr("path_hooks", vm)?;
     let mut importer = None;
-    let path_hooks: Vec<PyObjectRef> = vm.extract_elements(&path_hooks)?;
+    let path_hooks: Vec<PyObjectRef> = path_hooks.try_into_value(vm)?;
     for path_hook in path_hooks {
         match vm.invoke(&path_hook, (path.clone(),)) {
             Ok(imp) => {
                 importer = Some(imp);
                 break;
             }
-            Err(e) if e.isinstance(&vm.ctx.exceptions.import_error) => continue,
+            Err(e) if e.fast_isinstance(&vm.ctx.exceptions.import_error) => continue,
             Err(e) => return Err(e),
         }
     }

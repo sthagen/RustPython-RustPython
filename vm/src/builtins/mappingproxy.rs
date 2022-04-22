@@ -2,12 +2,13 @@ use std::borrow::Cow;
 
 use super::{PyDict, PyGenericAlias, PyList, PyStr, PyStrRef, PyTuple, PyTypeRef};
 use crate::{
-    function::{IntoPyObject, OptionalArg},
+    convert::ToPyObject,
+    function::OptionalArg,
     protocol::{PyMapping, PyMappingMethods, PySequence, PySequenceMethods},
-    pyref_type_error,
+    pyclass::PyClassImpl,
     types::{AsMapping, AsSequence, Constructor, Iterable},
-    PyClassImpl, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
-    TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    VirtualMachine,
 };
 
 #[pyclass(module = false, name = "mappingproxy")]
@@ -94,7 +95,7 @@ impl PyMappingProxy {
                 // let key = PyStrRef::try_from_object(vm, key)?;
                 let key = key
                     .payload::<PyStr>()
-                    .ok_or_else(|| pyref_type_error(vm, PyStr::class(vm), key))?;
+                    .ok_or_else(|| vm.new_downcast_type_error(PyStr::class(vm), key))?;
                 Ok(class.attributes.read().contains_key(key.as_str()))
             }
             MappingProxyInner::Dict(obj) => PySequence::from(obj.as_ref()).contains(key, vm),
@@ -111,7 +112,7 @@ impl PyMappingProxy {
         let obj = match &self.mapping {
             MappingProxyInner::Dict(d) => d.clone(),
             MappingProxyInner::Class(c) => {
-                PyDict::from_attributes(c.attributes.read().clone(), vm)?.into_pyobject(vm)
+                PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
         vm.call_method(&obj, "items", ())
@@ -121,7 +122,7 @@ impl PyMappingProxy {
         let obj = match &self.mapping {
             MappingProxyInner::Dict(d) => d.clone(),
             MappingProxyInner::Class(c) => {
-                PyDict::from_attributes(c.attributes.read().clone(), vm)?.into_pyobject(vm)
+                PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
         vm.call_method(&obj, "keys", ())
@@ -131,7 +132,7 @@ impl PyMappingProxy {
         let obj = match &self.mapping {
             MappingProxyInner::Dict(d) => d.clone(),
             MappingProxyInner::Class(c) => {
-                PyDict::from_attributes(c.attributes.read().clone(), vm)?.into_pyobject(vm)
+                PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
         vm.call_method(&obj, "values", ())
@@ -141,7 +142,7 @@ impl PyMappingProxy {
         match &self.mapping {
             MappingProxyInner::Dict(d) => vm.call_method(d, "copy", ()),
             MappingProxyInner::Class(c) => {
-                Ok(PyDict::from_attributes(c.attributes.read().clone(), vm)?.into_pyobject(vm))
+                Ok(PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm))
             }
         }
     }
@@ -150,7 +151,7 @@ impl PyMappingProxy {
         let obj = match &self.mapping {
             MappingProxyInner::Dict(d) => d.clone(),
             MappingProxyInner::Class(c) => {
-                PyDict::from_attributes(c.attributes.read().clone(), vm)?.into_pyobject(vm)
+                PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
         Ok(format!("mappingproxy({})", obj.repr(vm)?))
@@ -200,7 +201,7 @@ impl Iterable for PyMappingProxy {
             MappingProxyInner::Dict(d) => d.clone(),
             MappingProxyInner::Class(c) => {
                 // TODO: something that's much more efficient than this
-                PyDict::from_attributes(c.attributes.read().clone(), vm)?.into_pyobject(vm)
+                PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
         let iter = obj.get_iter(vm)?;

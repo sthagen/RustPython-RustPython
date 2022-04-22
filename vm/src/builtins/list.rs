@@ -4,8 +4,10 @@ use crate::common::lock::{
 };
 use crate::TryFromBorrowedObject;
 use crate::{
-    function::{FuncArgs, IntoPyObject, OptionalArg},
+    convert::ToPyObject,
+    function::{FuncArgs, OptionalArg, PyComparisonValue},
     protocol::{PyIterReturn, PyMappingMethods, PySequence, PySequenceMethods},
+    pyclass::PyClassImpl,
     sequence::{MutObjectSequenceOp, ObjectSequenceOp, SequenceMutOp, SequenceOp},
     sliceable::{saturate_index, SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
@@ -14,13 +16,9 @@ use crate::{
     },
     utils::collection_repr,
     vm::{ReprGuard, VirtualMachine},
-    PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyObjectView, PyObjectWrap,
-    PyRef, PyResult, PyValue, TypeProtocol,
+    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
 };
-use std::borrow::Cow;
-use std::fmt;
-use std::mem::size_of;
-use std::ops::DerefMut;
+use std::{borrow::Cow, fmt, ops::DerefMut};
 
 /// Built-in mutable sequence.
 ///
@@ -59,8 +57,8 @@ impl PyValue for PyList {
     }
 }
 
-impl IntoPyObject for Vec<PyObjectRef> {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+impl ToPyObject for Vec<PyObjectRef> {
+    fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         PyList::new_ref(self, &vm.ctx).into()
     }
 }
@@ -101,7 +99,7 @@ impl PyList {
 
     #[pymethod]
     pub(crate) fn extend(&self, x: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
-        let mut new_elements = vm.extract_elements(&x)?;
+        let mut new_elements = x.try_to_value(vm)?;
         self.borrow_vec_mut().append(&mut new_elements);
         Ok(())
     }
@@ -176,7 +174,8 @@ impl PyList {
 
     #[pymethod(magic)]
     fn sizeof(&self) -> usize {
-        size_of::<Self>() + self.elements.read().capacity() * size_of::<PyObjectRef>()
+        std::mem::size_of::<Self>()
+            + self.elements.read().capacity() * std::mem::size_of::<PyObjectRef>()
     }
 
     #[pymethod]
@@ -351,7 +350,7 @@ impl PyList {
     #[pymethod(magic)]
     fn init(&self, iterable: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<()> {
         let mut elements = if let OptionalArg::Present(iterable) = iterable {
-            vm.extract_elements(&iterable)?
+            iterable.try_to_value(vm)?
         } else {
             vec![]
         };
@@ -412,12 +411,12 @@ impl PyList {
         concat: Some(|seq, other, vm| {
             Self::sequence_downcast(seq)
                 .concat(other, vm)
-                .map(|x| x.into_object())
+                .map(|x| x.into())
         }),
         repeat: Some(|seq, n, vm| {
             Self::sequence_downcast(seq)
                 .mul(n as isize, vm)
-                .map(|x| x.into_object())
+                .map(|x| x.into())
         }),
         item: Some(|seq, i, vm| {
             Self::sequence_downcast(seq)
@@ -443,7 +442,7 @@ impl PyList {
         inplace_repeat: Some(|seq, n, vm| {
             let zelf = Self::sequence_downcast(seq);
             zelf.borrow_vec_mut().imul(vm, n as isize)?;
-            Ok(zelf.to_owned().into_object())
+            Ok(zelf.to_owned().into())
         }),
     };
 }
@@ -453,7 +452,7 @@ impl Iterable for PyList {
         Ok(PyListIterator {
             internal: PyMutex::new(PositionIterInternal::new(zelf, 0)),
         }
-        .into_object(vm))
+        .into_pyobject(vm))
     }
 }
 

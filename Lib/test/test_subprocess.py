@@ -18,7 +18,7 @@ import shutil
 import threading
 import gc
 import textwrap
-from test.support import os_helper, import_helper
+from test.support import os_helper, import_helper, warnings_helper
 from test.support.os_helper import FakePath
 
 try:
@@ -726,6 +726,7 @@ class ProcessTestCase(BaseTestCase):
                                if not is_env_var_to_ignore(k)]
             self.assertEqual(child_env_names, [])
 
+    @unittest.skipIf(sys.platform == "win32", "TODO: RUSTPYTHON, null byte is not checked")
     def test_invalid_cmd(self):
         # null character in the command name
         cmd = sys.executable + '\0'
@@ -2800,7 +2801,7 @@ class POSIXProcessTestCase(BaseTestCase):
         self.addCleanup(p.stderr.close)
         ident = id(p)
         pid = p.pid
-        with support.check_warnings(('', ResourceWarning)):
+        with warnings_helper.check_warnings(('', ResourceWarning)):
             p = None
 
         if mswindows:
@@ -2825,7 +2826,7 @@ class POSIXProcessTestCase(BaseTestCase):
         self.addCleanup(p.stderr.close)
         ident = id(p)
         pid = p.pid
-        with support.check_warnings(('', ResourceWarning)):
+        with warnings_helper.check_warnings(('', ResourceWarning)):
             p = None
 
         os.kill(pid, signal.SIGKILL)
@@ -3151,7 +3152,7 @@ class Win32ProcessTestCase(BaseTestCase):
         self.assertIn(b"OSError", stderr)
 
         # Check for a warning due to using handle_list and close_fds=False
-        with support.check_warnings((".*overriding close_fds", RuntimeWarning)):
+        with warnings_helper.check_warnings((".*overriding close_fds", RuntimeWarning)):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.lpAttributeList = {"handle_list": handles[:]}
             p = subprocess.Popen([sys.executable, "-c",

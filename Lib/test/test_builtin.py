@@ -20,7 +20,8 @@ import warnings
 from functools import partial
 from contextlib import ExitStack
 from operator import neg
-from test.support import check_warnings, swap_attr
+from test.support import swap_attr
+from test.support.warnings_helper import check_warnings
 from test.support.script_helper import assert_python_ok
 from test.support.os_helper import EnvironmentVarGuard, TESTFN, unlink
 from unittest.mock import MagicMock, patch
@@ -2052,8 +2053,6 @@ class TestType(unittest.TestCase):
         with self.assertRaises(TypeError):
             type('a', (), dict={})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_type_name(self):
         for name in 'A', '\xc4', '\U0001f40d', 'B.A', '42', '':
             with self.subTest(name=name):
@@ -2063,8 +2062,10 @@ class TestType(unittest.TestCase):
                 self.assertEqual(A.__module__, __name__)
         with self.assertRaises(ValueError):
             type('A\x00B', (), {})
-        with self.assertRaises(ValueError):
-            type('A\udcdcB', (), {})
+        # TODO: RUSTPYTHON (https://github.com/RustPython/RustPython/issues/935)
+        with self.assertRaises(AssertionError):
+            with self.assertRaises(ValueError):
+                type('A\udcdcB', (), {})
         with self.assertRaises(TypeError):
             type(b'A', (), {})
 
@@ -2080,9 +2081,13 @@ class TestType(unittest.TestCase):
         with self.assertRaises(ValueError):
             A.__name__ = 'A\x00B'
         self.assertEqual(A.__name__, 'C')
-        with self.assertRaises(ValueError):
-            A.__name__ = 'A\udcdcB'
-        self.assertEqual(A.__name__, 'C')
+        # TODO: RUSTPYTHON (https://github.com/RustPython/RustPython/issues/935)
+        with self.assertRaises(AssertionError):
+            with self.assertRaises(ValueError):
+                A.__name__ = 'A\udcdcB'
+            self.assertEqual(A.__name__, 'C')
+        # TODO: RUSTPYTHON: the previous __name__ set should fail but doesn't: reset it
+        A.__name__ = 'C'
         with self.assertRaises(TypeError):
             A.__name__ = b'A'
         self.assertEqual(A.__name__, 'C')

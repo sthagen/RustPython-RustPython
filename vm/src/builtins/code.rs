@@ -6,12 +6,11 @@ use super::{PyStrRef, PyTupleRef, PyTypeRef};
 use crate::{
     bytecode::{self, BorrowedConstant, Constant, ConstantBag},
     function::FuncArgs,
-    IdProtocol, PyClassImpl, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
-    StaticType, TypeProtocol, VirtualMachine,
+    pyclass::{PyClassImpl, StaticType},
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
 use num_traits::Zero;
-use std::fmt;
-use std::ops::Deref;
+use std::{fmt, ops::Deref};
 
 #[derive(Clone)]
 pub struct PyConstant(pub PyObjectRef);

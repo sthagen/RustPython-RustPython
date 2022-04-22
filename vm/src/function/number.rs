@@ -1,4 +1,4 @@
-use crate::{PyObjectRef, PyResult, TryFromObject, TypeProtocol, VirtualMachine};
+use crate::{AsObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine};
 use num_complex::Complex64;
 
 /// A Python complex-like object.

@@ -8,14 +8,13 @@ use crate::{
     },
     bytesinner::ByteInnerNewOptions,
     common::{hash::PyHash, str::to_ascii},
+    convert::{ToPyObject, ToPyResult},
     dictdatatype::DictKey,
-    function::{IntoPyObject, IntoPyResult, OptionalArg},
+    function::{OptionalArg, PyArithmeticValue},
     protocol::{PyIter, PyMapping, PySequence},
-    pyref_type_error,
     types::{Constructor, PyComparisonOp},
     utils::Either,
-    IdProtocol, PyArithmeticValue, PyObject, PyObjectRef, PyResult, TryFromObject, TypeProtocol,
-    VirtualMachine,
+    AsObject, PyObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
 };
 
 // RustPython doesn't need these items
@@ -48,13 +47,13 @@ impl PyObjectRef {
     // int PyObject_GenericSetDict(PyObject *o, PyObject *value, void *context)
 
     pub fn rich_compare(self, other: Self, opid: PyComparisonOp, vm: &VirtualMachine) -> PyResult {
-        self._cmp(&other, opid, vm).map(|res| res.into_pyobject(vm))
+        self._cmp(&other, opid, vm).map(|res| res.to_pyobject(vm))
     }
 
     pub fn bytes(self, vm: &VirtualMachine) -> PyResult {
         let bytes_type = &vm.ctx.types.bytes_type;
         match self.downcast_exact::<PyInt>(vm) {
-            Ok(int) => Err(pyref_type_error(vm, bytes_type, int.as_object())),
+            Ok(int) => Err(vm.new_downcast_type_error(bytes_type, &int)),
             Err(obj) => PyBytes::py_new(
                 bytes_type.clone(),
                 ByteInnerNewOptions {
@@ -164,7 +163,7 @@ impl PyObject {
         let is_strict_subclass = {
             let self_class = self.class();
             let other_class = other.class();
-            !self_class.is(&other_class) && other_class.issubclass(&self_class)
+            !self_class.is(&other_class) && other_class.fast_issubclass(&self_class)
         };
         if is_strict_subclass {
             let res = vm.with_recursion("in comparison", || call_cmp(other, self, swapped))?;
@@ -280,7 +279,7 @@ impl PyObject {
             PyTypeRef::try_from_object(vm, self.to_owned()),
             PyTypeRef::try_from_object(vm, cls.to_owned()),
         ) {
-            Ok(obj.issubclass(cls))
+            Ok(obj.fast_issubclass(&cls))
         } else {
             self.check_cls(self, vm, || {
                 format!("issubclass() arg 1 must be a class, not {}", self.class())
@@ -326,7 +325,7 @@ impl PyObject {
 
     fn abstract_isinstance(&self, cls: &PyObject, vm: &VirtualMachine) -> PyResult<bool> {
         if let Ok(typ) = PyTypeRef::try_from_object(vm, cls.to_owned()) {
-            if self.class().issubclass(typ.clone()) {
+            if self.class().fast_issubclass(&typ) {
                 Ok(true)
             } else if let Ok(icls) =
                 PyTypeRef::try_from_object(vm, self.to_owned().get_attr("__class__", vm)?)
@@ -334,7 +333,7 @@ impl PyObject {
                 if icls.is(&self.class()) {
                     Ok(false)
                 } else {
-                    Ok(icls.issubclass(typ))
+                    Ok(icls.fast_issubclass(&typ))
                 }
             } else {
                 Ok(false)
@@ -413,7 +412,7 @@ impl PyObject {
             .ok_or_else(|| vm.new_type_error(format!("object of type '{}' has no len()", &self)))?
     }
 
-    pub fn get_item<K: DictKey + IntoPyObject + Clone>(
+    pub fn get_item<K: DictKey + ToPyObject + Clone>(
         &self,
         needle: K,
         vm: &VirtualMachine,
@@ -422,7 +421,7 @@ impl PyObject {
             return dict.get_item(needle, vm);
         }
 
-        let needle = needle.into_pyobject(vm);
+        let needle = needle.to_pyobject(vm);
 
         if let Ok(mapping) = PyMapping::try_protocol(self, vm) {
             mapping.subscript(&needle, vm)
@@ -430,9 +429,9 @@ impl PyObject {
             let i = needle.key_as_isize(vm)?;
             seq.get_item(i, vm)
         } else {
-            if self.class().issubclass(&vm.ctx.types.type_type) {
+            if self.class().fast_issubclass(&vm.ctx.types.type_type) {
                 if self.is(&vm.ctx.types.type_type) {
-                    return PyGenericAlias::new(self.clone_class(), needle, vm).into_pyresult(vm);
+                    return PyGenericAlias::new(self.class().clone(), needle, vm).to_pyresult(vm);
                 }
 
                 if let Some(class_getitem) =
@@ -445,7 +444,7 @@ impl PyObject {
         }
     }
 
-    pub fn set_item<K: DictKey + IntoPyObject>(
+    pub fn set_item<K: DictKey + ToPyObject>(
         &self,
         needle: K,
         value: PyObjectRef,
@@ -459,7 +458,7 @@ impl PyObject {
         let seq = PySequence::from(self);
 
         if let Some(f) = mapping.methods(vm).ass_subscript {
-            let needle = needle.into_pyobject(vm);
+            let needle = needle.to_pyobject(vm);
             f(&mapping, &needle, Some(value), vm)
         } else if let Some(f) = seq.methods(vm).ass_item {
             let i = needle.key_as_isize(vm)?;
@@ -472,7 +471,7 @@ impl PyObject {
         }
     }
 
-    pub fn del_item<K: DictKey + IntoPyObject>(
+    pub fn del_item<K: DictKey + ToPyObject>(
         &self,
         needle: K,
         vm: &VirtualMachine,
@@ -485,7 +484,7 @@ impl PyObject {
         let seq = PySequence::from(self);
 
         if let Some(f) = mapping.methods(vm).ass_subscript {
-            let needle = needle.into_pyobject(vm);
+            let needle = needle.to_pyobject(vm);
             f(&mapping, &needle, None, vm)
         } else if let Some(f) = seq.methods(vm).ass_item {
             let i = needle.key_as_isize(vm)?;

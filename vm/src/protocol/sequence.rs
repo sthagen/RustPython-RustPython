@@ -1,15 +1,15 @@
-use std::borrow::{Borrow, Cow};
-use std::fmt::Debug;
-
-use itertools::Itertools;
-
 use crate::{
     builtins::{PyList, PyListRef, PySlice, PyTuple, PyTupleRef},
     common::lock::OnceCell,
-    function::IntoPyObject,
+    convert::ToPyObject,
+    function::PyArithmeticValue,
     protocol::PyMapping,
-    IdProtocol, PyArithmeticValue, PyObject, PyObjectRef, PyResult, PyValue, TypeProtocol,
-    VirtualMachine,
+    AsObject, PyObject, PyObjectRef, PyResult, PyValue, VirtualMachine,
+};
+use itertools::Itertools;
+use std::{
+    borrow::{Borrow, Cow},
+    fmt::Debug,
 };
 
 // Sequence Protocol
@@ -143,7 +143,7 @@ impl PySequence<'_> {
 
         // try fallback to __mul__
         if self.check(vm) {
-            let ret = vm._mul(self.obj, &n.into_pyobject(vm))?;
+            let ret = vm._mul(self.obj, &n.to_pyobject(vm))?;
             if let PyArithmeticValue::Implemented(ret) = PyArithmeticValue::from_object(vm, ret) {
                 return Ok(ret);
             }
@@ -181,7 +181,7 @@ impl PySequence<'_> {
         }
 
         if self.check(vm) {
-            let ret = vm._imul(self.obj, &n.into_pyobject(vm))?;
+            let ret = vm._imul(self.obj, &n.to_pyobject(vm))?;
             if let PyArithmeticValue::Implemented(ret) = PyArithmeticValue::from_object(vm, ret) {
                 return Ok(ret);
             }
@@ -225,11 +225,11 @@ impl PySequence<'_> {
     pub fn get_slice(&self, start: isize, stop: isize, vm: &VirtualMachine) -> PyResult {
         if let Ok(mapping) = PyMapping::try_protocol(self.obj, vm) {
             let slice = PySlice {
-                start: Some(start.into_pyobject(vm)),
-                stop: stop.into_pyobject(vm),
+                start: Some(start.to_pyobject(vm)),
+                stop: stop.to_pyobject(vm),
                 step: None,
             };
-            mapping.subscript(&slice.into_object(vm), vm)
+            mapping.subscript(&slice.into_pyobject(vm), vm)
         } else {
             Err(vm.new_type_error(format!("'{}' object is unsliceable", self.obj.class())))
         }
@@ -245,11 +245,11 @@ impl PySequence<'_> {
         let mapping = PyMapping::from(self.obj);
         if let Some(f) = mapping.methods(vm).ass_subscript {
             let slice = PySlice {
-                start: Some(start.into_pyobject(vm)),
-                stop: stop.into_pyobject(vm),
+                start: Some(start.to_pyobject(vm)),
+                stop: stop.to_pyobject(vm),
                 step: None,
             };
-            f(&mapping, &slice.into_object(vm), value, vm)
+            f(&mapping, &slice.into_pyobject(vm), value, vm)
         } else {
             Err(vm.new_type_error(format!(
                 "'{}' object doesn't support slice {}",
@@ -290,7 +290,7 @@ impl PySequence<'_> {
     }
 
     pub fn list(&self, vm: &VirtualMachine) -> PyResult<PyListRef> {
-        let list = vm.ctx.new_list(vm.extract_elements(self.obj)?);
+        let list = vm.ctx.new_list(self.obj.try_to_value(vm)?);
         Ok(list)
     }
 

@@ -8,7 +8,7 @@ mod _collections {
             PositionIterInternal, PyGenericAlias, PyInt, PyTypeRef,
         },
         common::lock::{PyMutex, PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard},
-        function::{FuncArgs, KwArgs, OptionalArg},
+        function::{FuncArgs, KwArgs, OptionalArg, PyComparisonValue},
         protocol::{PyIterReturn, PySequenceMethods},
         sequence::{MutObjectSequenceOp, ObjectSequenceOp},
         sliceable,
@@ -19,8 +19,7 @@ mod _collections {
         },
         utils::collection_repr,
         vm::ReprGuard,
-        PyComparisonValue, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol,
-        VirtualMachine,
+        AsObject, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use std::cmp::max;
@@ -92,7 +91,7 @@ mod _collections {
             let elements = iterable
                 .into_option()
                 .map(|iter| {
-                    let mut elements: Vec<PyObjectRef> = vm.extract_elements(&iter)?;
+                    let mut elements: Vec<PyObjectRef> = iter.try_to_value(vm)?;
                     if let Some(maxlen) = maxlen {
                         elements.drain(..elements.len().saturating_sub(maxlen));
                     }
@@ -156,7 +155,7 @@ mod _collections {
                 maxlen: zelf.maxlen,
                 state: AtomicCell::new(zelf.state.load()),
             }
-            .into_ref_with_type(vm, zelf.clone_class())
+            .into_ref_with_type(vm, zelf.class().clone())
         }
 
         #[pymethod]
@@ -178,7 +177,7 @@ mod _collections {
         fn _extend(&self, iter: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
             self.state.fetch_add(1);
             let max_len = self.maxlen;
-            let mut elements: Vec<PyObjectRef> = vm.extract_elements(iter)?;
+            let mut elements: Vec<PyObjectRef> = iter.try_to_value(vm)?;
             if let Some(max_len) = max_len {
                 if max_len > elements.len() {
                     let mut deque = self.borrow_deque_mut();
@@ -196,7 +195,7 @@ mod _collections {
         #[pymethod]
         fn extendleft(&self, iter: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let max_len = self.maxlen;
-            let mut elements: Vec<PyObjectRef> = vm.extract_elements(&iter)?;
+            let mut elements: Vec<PyObjectRef> = iter.try_to_value(vm)?;
             elements.reverse();
 
             if let Some(max_len) = max_len {
@@ -481,7 +480,7 @@ mod _collections {
 
         #[pymethod(magic)]
         fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
-            let cls = zelf.clone_class();
+            let cls = zelf.class().clone();
             let value = match zelf.maxlen {
                 Some(v) => vm.new_pyobj((vm.ctx.empty_tuple.clone(), v)),
                 None => vm.ctx.empty_tuple.clone().into(),
@@ -572,7 +571,7 @@ mod _collections {
 
     impl Iterable for PyDeque {
         fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
-            Ok(PyDequeIterator::new(zelf).into_object(vm))
+            Ok(PyDequeIterator::new(zelf).into_pyobject(vm))
         }
     }
 
@@ -635,7 +634,7 @@ mod _collections {
                 Exhausted => PyDeque::default().into_ref(vm),
             };
             (
-                zelf.clone_class(),
+                zelf.class().clone(),
                 (deque, vm.ctx.new_int(internal.position).into()),
             )
         }
@@ -701,7 +700,7 @@ mod _collections {
                 Exhausted => PyDeque::default().into_ref(vm),
             };
             Ok((
-                zelf.clone_class(),
+                zelf.class().clone(),
                 (deque, vm.ctx.new_int(internal.position).into()),
             ))
         }

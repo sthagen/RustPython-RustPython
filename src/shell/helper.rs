@@ -1,7 +1,9 @@
-#![cfg_attr(target_os = "wasi", allow(dead_code))]
-use rustpython_vm::builtins::{PyDictRef, PyStrRef};
-use rustpython_vm::VirtualMachine;
-use rustpython_vm::{function::ArgIterable, PyResult, TryFromObject};
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+use rustpython_vm::{
+    builtins::{PyDictRef, PyStrRef},
+    function::ArgIterable,
+    PyResult, TryFromObject, VirtualMachine,
+};
 
 pub struct ShellHelper<'vm> {
     vm: &'vm VirtualMachine,
@@ -55,7 +57,6 @@ impl<'vm> ShellHelper<'vm> {
         ShellHelper { vm, globals }
     }
 
-    #[allow(clippy::type_complexity)]
     fn get_available_completions<'w>(
         &self,
         words: &'w [String],
@@ -86,9 +87,8 @@ impl<'vm> ShellHelper<'vm> {
         } else {
             // we need to get a variable based off of globals/builtins
 
-            let globals = str_iter_method(self.globals.as_object().to_owned(), "keys").ok()?;
-            let builtins =
-                str_iter_method(self.vm.builtins.as_object().to_owned(), "__dir__").ok()?;
+            let globals = str_iter_method(self.globals.clone().into(), "keys").ok()?;
+            let builtins = str_iter_method(self.vm.builtins.clone().into(), "__dir__").ok()?;
             (first, globals, Some(builtins))
         };
         Some((word_start, iter1.chain(iter2.into_iter().flatten())))
@@ -142,7 +142,7 @@ impl<'vm> ShellHelper<'vm> {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(not(target_os = "wasi"))] {
+    if #[cfg(not(target_arch = "wasm32"))] {
         use rustyline::{
             completion::Completer, highlight::Highlighter, hint::Hinter, validate::Validator, Context,
             Helper,

@@ -1,14 +1,16 @@
 use super::{PyGenericAlias, PyTypeRef};
-use crate::common::atomic::{Ordering, Radium};
-use crate::common::hash::{self, PyHash};
+use crate::common::{
+    atomic::{Ordering, Radium},
+    hash::{self, PyHash},
+};
 use crate::{
     function::OptionalArg,
+    pyclass::PyClassImpl,
     types::{Callable, Comparable, Constructor, Hashable, PyComparisonOp},
-    IdProtocol, PyClassImpl, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue,
-    TypeProtocol, VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
 };
 
-pub use crate::pyobjectrc::PyWeak;
+pub use crate::pyobject::PyWeak;
 
 #[derive(FromArgs)]
 pub struct WeakNewArgs {
@@ -41,7 +43,8 @@ impl Constructor for PyWeak {
         vm: &VirtualMachine,
     ) -> PyResult {
         let weak = referent.downgrade_with_typ(callback.into_option(), cls, vm)?;
-        Ok(weak.into_object())
+        let pyref_weak: PyRef<PyWeak> = weak.into();
+        Ok(pyref_weak.into())
     }
 }
 
@@ -99,7 +102,7 @@ impl Comparable for PyWeak {
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
-    ) -> PyResult<crate::PyComparisonValue> {
+    ) -> PyResult<crate::function::PyComparisonValue> {
         op.eq_only(|| {
             let other = class_or_notimplemented!(Self, other);
             let both = zelf.upgrade().and_then(|s| other.upgrade().map(|o| (s, o)));

@@ -1,19 +1,21 @@
 pub use crate::builtins::object::{generic_getattr, generic_setattr};
 use crate::common::{hash::PyHash, lock::PyRwLock};
-use crate::function::IntoPyObject;
-use crate::protocol::{PySequence, PySequenceMethods};
 use crate::{
     builtins::{PyInt, PyStrRef, PyType, PyTypeRef},
-    function::{FromArgs, FuncArgs, IntoPyResult, OptionalArg},
-    protocol::{PyBuffer, PyIterReturn, PyMapping, PyMappingMethods},
+    convert::{ToPyObject, ToPyResult},
+    function::{FromArgs, FuncArgs, OptionalArg, PyComparisonValue},
+    protocol::{
+        PyBuffer, PyIterReturn, PyMapping, PyMappingMethods, PySequence, PySequenceMethods,
+    },
     utils::Either,
-    IdProtocol, PyComparisonValue, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
-    TypeProtocol, VirtualMachine,
+    AsObject, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
 use num_traits::{Signed, ToPrimitive};
-use std::borrow::Cow;
-use std::cmp::Ordering;
+use std::{
+    borrow::{Borrow, Cow},
+    cmp::Ordering,
+};
 
 // The corresponding field in CPython is `tp_` prefixed.
 // e.g. name -> tp_name
@@ -187,14 +189,17 @@ fn length_wrapper(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
 
 fn as_mapping_wrapper(zelf: &PyObject, _vm: &VirtualMachine) -> PyMappingMethods {
     PyMappingMethods {
-        length: then_some_closure!(zelf.has_class_attr("__len__"), |mapping, vm| {
+        length: then_some_closure!(zelf.class().has_attr("__len__"), |mapping, vm| {
             length_wrapper(mapping.obj.to_owned(), vm)
         }),
-        subscript: then_some_closure!(zelf.has_class_attr("__getitem__"), |mapping, needle, vm| {
-            vm.call_special_method(mapping.obj.to_owned(), "__getitem__", (needle.to_owned(),))
-        }),
+        subscript: then_some_closure!(
+            zelf.class().has_attr("__getitem__"),
+            |mapping, needle, vm| {
+                vm.call_special_method(mapping.obj.to_owned(), "__getitem__", (needle.to_owned(),))
+            }
+        ),
         ass_subscript: then_some_closure!(
-            zelf.has_class_attr("__setitem__") | zelf.has_class_attr("__delitem__"),
+            zelf.class().has_attr("__setitem__") | zelf.class().has_attr("__delitem__"),
             |mapping, needle, value, vm| match value {
                 Some(value) => vm
                     .call_special_method(
@@ -216,29 +221,29 @@ fn as_mapping_wrapper(zelf: &PyObject, _vm: &VirtualMachine) -> PyMappingMethods
 }
 
 fn as_sequence_wrapper(zelf: &PyObject, _vm: &VirtualMachine) -> Cow<'static, PySequenceMethods> {
-    if !zelf.has_class_attr("__getitem__") {
+    if !zelf.class().has_attr("__getitem__") {
         return Cow::Borrowed(PySequenceMethods::not_implemented());
     }
 
     Cow::Owned(PySequenceMethods {
-        length: then_some_closure!(zelf.has_class_attr("__len__"), |seq, vm| {
+        length: then_some_closure!(zelf.class().has_attr("__len__"), |seq, vm| {
             length_wrapper(seq.obj.to_owned(), vm)
         }),
         item: Some(|seq, i, vm| {
-            vm.call_special_method(seq.obj.to_owned(), "__getitem__", (i.into_pyobject(vm),))
+            vm.call_special_method(seq.obj.to_owned(), "__getitem__", (i.to_pyobject(vm),))
         }),
         ass_item: then_some_closure!(
-            zelf.has_class_attr("__setitem__") | zelf.has_class_attr("__delitem__"),
+            zelf.class().has_attr("__setitem__") | zelf.class().has_attr("__delitem__"),
             |seq, i, value, vm| match value {
                 Some(value) => vm
                     .call_special_method(
                         seq.obj.to_owned(),
                         "__setitem__",
-                        (i.into_pyobject(vm), value),
+                        (i.to_pyobject(vm), value),
                     )
                     .map(|_| Ok(()))?,
                 None => vm
-                    .call_special_method(seq.obj.to_owned(), "__delitem__", (i.into_pyobject(vm),))
+                    .call_special_method(seq.obj.to_owned(), "__delitem__", (i.to_pyobject(vm),))
                     .map(|_| Ok(()))?,
             }
         ),
@@ -519,11 +524,8 @@ pub trait GetDescriptor: PyValue {
     }
 
     #[inline]
-    fn _cls_is<T>(cls: &Option<PyObjectRef>, other: &T) -> bool
-    where
-        T: IdProtocol,
-    {
-        cls.as_ref().map_or(false, |cls| other.is(cls))
+    fn _cls_is(cls: &Option<PyObjectRef>, other: &impl Borrow<PyObject>) -> bool {
+        cls.as_ref().map_or(false, |cls| other.borrow().is(cls))
     }
 }
 
@@ -713,8 +715,12 @@ impl PyComparisonOp {
     /// Returns an appropriate return value for the comparison when a and b are the same object, if an
     /// appropriate return value exists.
     #[inline]
-    pub fn identical_optimization(self, a: &impl IdProtocol, b: &impl IdProtocol) -> Option<bool> {
-        self.map_eq(|| a.is(b))
+    pub fn identical_optimization(
+        self,
+        a: &impl Borrow<PyObject>,
+        b: &impl Borrow<PyObject>,
+    ) -> Option<bool> {
+        self.map_eq(|| a.borrow().is(b.borrow()))
     }
 
     /// Returns `Some(true)` when self is `Eq` and `f()` returns true. Returns `Some(false)` when self
@@ -886,7 +892,7 @@ pub trait IterNext: PyValue + Iterable {
     #[inline]
     #[pymethod]
     fn __next__(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        Self::slot_iternext(&zelf, vm).into_pyresult(vm)
+        Self::slot_iternext(&zelf, vm).to_pyresult(vm)
     }
 }
 

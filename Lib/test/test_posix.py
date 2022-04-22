@@ -1,7 +1,7 @@
 "Test posix functions"
 
 from test import support
-from test.support import os_helper, import_helper
+from test.support import os_helper, import_helper, warnings_helper
 from test.support.script_helper import assert_python_ok
 
 # Skip these tests if there is no posix module.
@@ -46,7 +46,7 @@ class PosixTester(unittest.TestCase):
         fp = open(os_helper.TESTFN, 'w+')
         fp.close()
         self.teardown_files = [ os_helper.TESTFN ]
-        self._warnings_manager = support.check_warnings()
+        self._warnings_manager = warnings_helper.check_warnings()
         self._warnings_manager.__enter__()
         warnings.filterwarnings('ignore', '.* potential security risk .*',
                                 RuntimeWarning)
@@ -603,8 +603,6 @@ class PosixTester(unittest.TestCase):
                               os.O_RDONLY|os.O_EXLOCK|os.O_NONBLOCK)
             os.close(fd)
 
-    # TODO: RUSTPYTHON: AssertionError: "should be string, bytes, os.PathLike or integer, not" does not match "expected str, bytes or os.PathLike object, not 'float'"
-    @unittest.expectedFailure
     @unittest.skipUnless(hasattr(posix, 'fstat'),
                          'test needs posix.fstat()')
     def test_fstat(self):

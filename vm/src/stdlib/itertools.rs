@@ -8,12 +8,12 @@ mod decl {
     };
     use crate::{
         builtins::{int, PyGenericAlias, PyInt, PyIntRef, PyTuple, PyTupleRef, PyTypeRef},
-        function::{ArgCallable, FuncArgs, IntoPyObject, OptionalArg, OptionalOption, PosArgs},
+        convert::ToPyObject,
+        function::{ArgCallable, FuncArgs, OptionalArg, OptionalOption, PosArgs},
         protocol::{PyIter, PyIterReturn},
         stdlib::sys,
         types::{Constructor, IterNext, IterNextIterable},
-        IdProtocol, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, PyWeakRef, TypeProtocol,
-        VirtualMachine,
+        AsObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, PyWeakRef, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use num_bigint::BigInt;
@@ -48,7 +48,7 @@ mod decl {
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
             PyItertoolsChain {
-                iterables: vm.extract_elements(&iterable)?,
+                iterables: iterable.try_to_value(vm)?,
                 cur_idx: AtomicCell::new(0),
                 cached_iter: PyRwLock::new(None),
             }
@@ -196,7 +196,7 @@ mod decl {
             let mut cur = zelf.cur.write();
             let result = cur.clone();
             *cur += &zelf.step;
-            Ok(PyIterReturn::Return(result.into_pyobject(vm)))
+            Ok(PyIterReturn::Return(result.to_pyobject(vm)))
         }
     }
 
@@ -298,7 +298,7 @@ mod decl {
 
         #[pymethod(magic)]
         fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
-            let cls = zelf.clone_class().into_pyobject(vm);
+            let cls = zelf.class().clone();
             Ok(match zelf.times {
                 Some(ref times) => vm.new_tuple((cls, (zelf.object.clone(), *times.read()))),
                 None => vm.new_tuple((cls, (zelf.object.clone(),))),
@@ -366,7 +366,8 @@ mod decl {
             let function = &zelf.function;
             match obj {
                 PyIterReturn::Return(obj) => {
-                    PyIterReturn::from_pyresult(vm.invoke(function, vm.extract_elements(&obj)?), vm)
+                    let args: Vec<_> = obj.try_to_value(vm)?;
+                    PyIterReturn::from_pyresult(vm.invoke(function, args), vm)
                 }
                 PyIterReturn::StopIteration(v) => Ok(PyIterReturn::StopIteration(v)),
             }
@@ -640,7 +641,7 @@ mod decl {
 
             state.grouper = Some(grouper.downgrade(None, vm).unwrap());
             Ok(PyIterReturn::Return(
-                (state.current_key.as_ref().unwrap().clone(), grouper).into_pyobject(vm),
+                (state.current_key.as_ref().unwrap().clone(), grouper).to_pyobject(vm),
             ))
         }
     }
@@ -706,7 +707,7 @@ mod decl {
         name: &'static str,
         vm: &VirtualMachine,
     ) -> PyResult<usize> {
-        let is_int = obj.isinstance(&vm.ctx.types.int_type);
+        let is_int = obj.fast_isinstance(&vm.ctx.types.int_type);
         if is_int {
             let value = int::get_value(&obj).to_usize();
             if let Some(value) = value {
@@ -995,7 +996,6 @@ mod decl {
 
         // TODO: make tee() a function, rename this class to itertools._tee and make
         // teedata a python class
-        #[allow(clippy::new_ret_no_self)]
         fn py_new(
             _cls: PyTypeRef,
             Self::Args { iterable, n }: Self::Args,
@@ -1076,7 +1076,7 @@ mod decl {
             let repeat = args.repeat.unwrap_or(1);
             let mut pools = Vec::new();
             for arg in iterables.iter() {
-                pools.push(vm.extract_elements(arg)?);
+                pools.push(arg.try_to_value(vm)?);
             }
             let pools = std::iter::repeat(pools)
                 .take(repeat)
@@ -1177,7 +1177,7 @@ mod decl {
             Self::Args { iterable, r }: Self::Args,
             vm: &VirtualMachine,
         ) -> PyResult {
-            let pool = vm.extract_elements(&iterable)?;
+            let pool: Vec<_> = iterable.try_to_value(vm)?;
 
             let r = r.as_bigint();
             if r.is_negative() {
@@ -1268,7 +1268,7 @@ mod decl {
             Self::Args { iterable, r }: Self::Args,
             vm: &VirtualMachine,
         ) -> PyResult {
-            let pool = vm.extract_elements(&iterable)?;
+            let pool: Vec<_> = iterable.try_to_value(vm)?;
             let r = r.as_bigint();
             if r.is_negative() {
                 return Err(vm.new_value_error("r must be non-negative".to_owned()));
@@ -1364,7 +1364,7 @@ mod decl {
             Self::Args { iterable, r }: Self::Args,
             vm: &VirtualMachine,
         ) -> PyResult {
-            let pool = vm.extract_elements(&iterable)?;
+            let pool: Vec<_> = iterable.try_to_value(vm)?;
 
             let n = pool.len();
             // If r is not provided, r == n. If provided, r must be a positive integer, or None.

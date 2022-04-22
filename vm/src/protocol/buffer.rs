@@ -1,21 +1,20 @@
 //! Buffer protocol
 //! https://docs.python.org/3/c-api/buffer.html
 
-use itertools::Itertools;
-
 use crate::{
     common::{
         borrow::{BorrowedValue, BorrowedValueMut},
         lock::{MapImmutable, PyMutex, PyMutexGuard},
     },
+    pyobject::PyObjectPayload,
     sliceable::wrap_index,
     types::{Constructor, Unconstructible},
-    PyObject, PyObjectPayload, PyObjectRef, PyObjectView, PyObjectWrap, PyRef, PyResult, PyValue,
-    TryFromBorrowedObject, TypeProtocol, VirtualMachine,
+    AsObject, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, TryFromBorrowedObject,
+    VirtualMachine,
 };
+use itertools::Itertools;
 use std::{borrow::Cow, fmt::Debug, ops::Range};
 
-#[allow(clippy::type_complexity)]
 pub struct BufferMethods {
     pub obj_bytes: fn(&PyBuffer) -> BorrowedValue<[u8]>,
     pub obj_bytes_mut: fn(&PyBuffer) -> BorrowedValueMut<[u8]>,
@@ -66,7 +65,7 @@ impl PyBuffer {
     pub fn from_byte_vector(bytes: Vec<u8>, vm: &VirtualMachine) -> Self {
         let bytes_len = bytes.len();
         PyBuffer::new(
-            PyValue::into_object(VecBuffer::from(bytes), vm),
+            PyValue::into_pyobject(VecBuffer::from(bytes), vm),
             BufferDescriptor::simple(bytes_len, true),
             &VEC_BUFFER_METHODS,
         )
@@ -422,14 +421,14 @@ impl PyRef<VecBuffer> {
     pub fn into_pybuffer(self, readonly: bool) -> PyBuffer {
         let len = self.data.lock().len();
         PyBuffer::new(
-            self.into_object(),
+            self.into(),
             BufferDescriptor::simple(len, readonly),
             &VEC_BUFFER_METHODS,
         )
     }
 
     pub fn into_pybuffer_with_descriptor(self, desc: BufferDescriptor) -> PyBuffer {
-        PyBuffer::new(self.into_object(), desc, &VEC_BUFFER_METHODS)
+        PyBuffer::new(self.into(), desc, &VEC_BUFFER_METHODS)
     }
 }
 

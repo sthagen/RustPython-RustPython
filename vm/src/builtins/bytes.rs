@@ -7,26 +7,24 @@ use crate::{
         ByteInnerSplitOptions, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner,
     },
     common::{hash::PyHash, lock::PyMutex},
-    function::{
-        ArgBytesLike, ArgIterable, IntoPyObject, IntoPyResult, OptionalArg, OptionalOption,
-    },
+    convert::{ToPyObject, ToPyResult},
+    function::{ArgBytesLike, ArgIterable, OptionalArg, OptionalOption, PyComparisonValue},
     protocol::{
         BufferDescriptor, BufferMethods, PyBuffer, PyIterReturn, PyMappingMethods,
         PySequenceMethods,
     },
+    pyclass::PyClassImpl,
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
         AsBuffer, AsMapping, AsSequence, Callable, Comparable, Constructor, Hashable, IterNext,
         IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
     },
     utils::Either,
-    IdProtocol, PyClassImpl, PyComparisonValue, PyContext, PyObject, PyObjectRef, PyObjectView,
-    PyObjectWrap, PyRef, PyResult, PyValue, TryFromBorrowedObject, TryFromObject, TypeProtocol,
-    VirtualMachine,
+    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
+    TryFromBorrowedObject, TryFromObject, VirtualMachine,
 };
 use bstr::ByteSlice;
-use std::ops::Deref;
-use std::{borrow::Cow, mem::size_of};
+use std::{borrow::Cow, mem::size_of, ops::Deref};
 
 #[pyclass(module = false, name = "bytes")]
 #[derive(Clone, Debug)]
@@ -50,8 +48,8 @@ impl From<PyBytesInner> for PyBytes {
     }
 }
 
-impl IntoPyObject for Vec<u8> {
-    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+impl ToPyObject for Vec<u8> {
+    fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.new_bytes(self).into()
     }
 }
@@ -90,7 +88,7 @@ impl Constructor for PyBytes {
     type Args = ByteInnerNewOptions;
 
     fn py_new(cls: PyTypeRef, options: Self::Args, vm: &VirtualMachine) -> PyResult {
-        options.get_bytes(cls, vm).into_pyresult(vm)
+        options.get_bytes(cls, vm).to_pyresult(vm)
     }
 }
 
@@ -523,7 +521,7 @@ impl PyBytes {
             .inner
             .elements
             .iter()
-            .map(|x| x.into_pyobject(vm))
+            .map(|x| x.to_pyobject(vm))
             .collect();
         PyTuple::new_ref(param, &vm.ctx)
     }
@@ -542,9 +540,9 @@ impl PyBytes {
         zelf: PyRef<Self>,
         vm: &VirtualMachine,
     ) -> (PyTypeRef, PyTupleRef, Option<PyDictRef>) {
-        let bytes = PyBytes::from(zelf.inner.elements.clone()).into_pyobject(vm);
+        let bytes = PyBytes::from(zelf.inner.elements.clone()).to_pyobject(vm);
         (
-            zelf.as_object().clone_class(),
+            zelf.class().clone(),
             PyTuple::new_ref(vec![bytes], &vm.ctx),
             zelf.as_object().dict(),
         )
@@ -569,7 +567,7 @@ static BUFFER_METHODS: BufferMethods = BufferMethods {
 impl AsBuffer for PyBytes {
     fn as_buffer(zelf: &PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<PyBuffer> {
         let buf = PyBuffer::new(
-            zelf.to_owned().into_object(),
+            zelf.to_owned().into(),
             BufferDescriptor::simple(zelf.len(), true),
             &BUFFER_METHODS,
         );
@@ -638,7 +636,7 @@ impl Comparable for PyBytes {
     ) -> PyResult<PyComparisonValue> {
         Ok(if let Some(res) = op.identical_optimization(zelf, other) {
             res.into()
-        } else if other.isinstance(&vm.ctx.types.memoryview_type)
+        } else if other.fast_isinstance(&vm.ctx.types.memoryview_type)
             && op != PyComparisonOp::Eq
             && op != PyComparisonOp::Ne
         {
@@ -659,7 +657,7 @@ impl Iterable for PyBytes {
         Ok(PyBytesIterator {
             internal: PyMutex::new(PositionIterInternal::new(zelf, 0)),
         }
-        .into_object(vm))
+        .into_pyobject(vm))
     }
 }
 
