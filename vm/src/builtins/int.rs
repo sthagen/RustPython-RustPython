@@ -1,13 +1,13 @@
 use super::{float, PyByteArray, PyBytes, PyStr, PyStrRef, PyTypeRef};
 use crate::{
     bytesinner::PyBytesInner,
+    class::PyClassImpl,
     common::hash,
     convert::{ToPyObject, ToPyResult},
     format::FormatSpec,
     function::{ArgIntoBool, OptionalArg, OptionalOption, PyArithmeticValue, PyComparisonValue},
-    pyclass::PyClassImpl,
     types::{Comparable, Constructor, Hashable, PyComparisonOp},
-    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromBorrowedObject,
+    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromBorrowedObject,
     VirtualMachine,
 };
 use bstr::ByteSlice;
@@ -53,7 +53,7 @@ where
     }
 }
 
-impl PyValue for PyInt {
+impl PyPayload for PyInt {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.int_type
     }
@@ -721,7 +721,7 @@ impl PyInt {
 
 impl Comparable for PyInt {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
@@ -735,7 +735,7 @@ impl Comparable for PyInt {
 
 impl Hashable for PyInt {
     #[inline]
-    fn hash(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
+    fn hash(zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
         Ok(hash::hash_bigint(zelf.as_bigint()))
     }
 }
@@ -974,7 +974,7 @@ pub(crate) fn try_int(obj: &PyObject, vm: &VirtualMachine) -> PyResult<BigInt> {
     )))
 }
 
-pub(crate) fn init(context: &PyContext) {
+pub(crate) fn init(context: &Context) {
     PyInt::extend_class(context, &context.types.int_type);
 }
 

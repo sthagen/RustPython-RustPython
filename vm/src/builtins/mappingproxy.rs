@@ -2,12 +2,12 @@ use std::borrow::Cow;
 
 use super::{PyDict, PyGenericAlias, PyList, PyStr, PyStrRef, PyTuple, PyTypeRef};
 use crate::{
+    class::PyClassImpl,
     convert::ToPyObject,
     function::OptionalArg,
     protocol::{PyMapping, PyMappingMethods, PySequence, PySequenceMethods},
-    pyclass::PyClassImpl,
     types::{AsMapping, AsSequence, Constructor, Iterable},
-    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     VirtualMachine,
 };
 
@@ -23,7 +23,7 @@ enum MappingProxyInner {
     Dict(PyObjectRef),
 }
 
-impl PyValue for PyMappingProxy {
+impl PyPayload for PyMappingProxy {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.mappingproxy_type
     }
@@ -53,7 +53,8 @@ impl Constructor for PyMappingProxy {
             Self {
                 mapping: MappingProxyInner::Dict(mapping),
             }
-            .into_pyresult_with_type(vm, cls)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
         }
     }
 }
@@ -174,14 +175,14 @@ impl PyMappingProxy {
 }
 
 impl AsMapping for PyMappingProxy {
-    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+    fn as_mapping(_zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
         Self::MAPPING_METHODS
     }
 }
 
 impl AsSequence for PyMappingProxy {
     fn as_sequence(
-        _zelf: &crate::PyObjectView<Self>,
+        _zelf: &crate::Py<Self>,
         _vm: &VirtualMachine,
     ) -> Cow<'static, PySequenceMethods> {
         Cow::Borrowed(&Self::SEQUENCE_METHODS)
@@ -209,6 +210,6 @@ impl Iterable for PyMappingProxy {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyMappingProxy::extend_class(context, &context.types.mappingproxy_type)
 }

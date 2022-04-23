@@ -38,15 +38,12 @@ pub use rustpython_derive::*;
 #[macro_use]
 pub(crate) mod macros;
 
-#[path = "pyobject.rs"]
-mod _pyobject;
-#[path = "pyobjectrc.rs"]
-mod _pyobjectrc;
 mod anystr;
 pub mod buffer;
 pub mod builtins;
 mod bytesinner;
 pub mod cformat;
+pub mod class;
 mod codecs;
 pub mod convert;
 mod coroutine;
@@ -61,11 +58,14 @@ pub mod frame;
 mod frozen;
 pub mod function;
 pub mod import;
+mod intern;
+pub mod object;
+pub mod prelude;
 pub mod protocol;
 pub mod py_io;
 pub mod py_serde;
-pub mod pyclass;
 pub mod readline;
+pub mod recursion;
 pub mod scope;
 pub mod sequence;
 pub mod signal;
@@ -75,24 +75,14 @@ pub mod suggestion;
 pub mod types;
 pub mod utils;
 pub mod version;
-mod vm;
-mod vm_new;
-mod vm_object;
-mod vm_ops;
+pub mod vm;
 
-mod pyobject {
-    pub use super::_pyobject::*;
-    pub use super::_pyobjectrc::*;
-}
-
-// pub use self::Executor;
 pub use self::convert::{TryFromBorrowedObject, TryFromObject};
-// pyobject items
-pub use self::pyobject::{AsObject, PyContext, PyMethod, PyRefExact, PyResult, PyValue};
-// pyobjectrc items
-pub use self::pyobject::{PyObject, PyObjectRef, PyObjectView, PyObjectWeak, PyRef, PyWeakRef};
+pub use self::object::{
+    AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult, PyWeakRef,
+};
 pub use self::types::PyStructSequence;
-pub use self::vm::{InitParameter, Interpreter, PySettings, VirtualMachine};
+pub use self::vm::{Context, InitParameter, Interpreter, Settings, VirtualMachine};
 
 pub use rustpython_bytecode as bytecode;
 pub use rustpython_common as common;

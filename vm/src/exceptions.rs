@@ -4,13 +4,13 @@ use crate::{
     builtins::{
         traceback::PyTracebackRef, PyNone, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef,
     },
+    class::{PyClassImpl, StaticType},
     convert::{ToPyException, ToPyObject},
     function::{ArgIterable, FuncArgs},
     py_io::{self, Write},
-    pyclass::{PyClassImpl, StaticType},
     stdlib::sys,
     suggestion::offer_suggestions,
-    AsObject, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, VirtualMachine,
+    AsObject, Context, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
 use itertools::Itertools;
@@ -27,7 +27,7 @@ impl std::fmt::Debug for PyBaseException {
     }
 }
 
-impl PyValue for PyBaseException {
+impl PyPayload for PyBaseException {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.exceptions.base_exception_type
     }
@@ -427,7 +427,9 @@ impl PyBaseException {
 
     #[pyslot]
     pub(crate) fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        PyBaseException::new(args.args, vm).into_pyresult_with_type(vm, cls)
+        PyBaseException::new(args.args, vm)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 
     #[pymethod(magic)]
@@ -683,7 +685,7 @@ impl ExceptionZoo {
 
     // TODO: remove it after fixing `errno` / `winerror` problem
     #[allow(clippy::redundant_clone)]
-    pub fn extend(ctx: &PyContext) {
+    pub fn extend(ctx: &Context) {
         use self::types::*;
 
         let excs = &ctx.exceptions;

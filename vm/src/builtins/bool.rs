@@ -1,7 +1,7 @@
 use super::{PyInt, PyStrRef, PyTypeRef};
 use crate::{
-    convert::ToPyObject, function::OptionalArg, pyclass::PyClassImpl, types::Constructor, AsObject,
-    PyContext, PyObject, PyObjectRef, PyResult, PyValue, TryFromBorrowedObject, VirtualMachine,
+    class::PyClassImpl, convert::ToPyObject, function::OptionalArg, types::Constructor, AsObject,
+    Context, PyObject, PyObjectRef, PyPayload, PyResult, TryFromBorrowedObject, VirtualMachine,
 };
 use num_bigint::Sign;
 use num_traits::Zero;
@@ -78,7 +78,7 @@ impl PyObjectRef {
 #[pyclass(name = "bool", module = false, base = "PyInt")]
 pub struct PyBool;
 
-impl PyValue for PyBool {
+impl PyPayload for PyBool {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.bool_type
     }
@@ -110,8 +110,12 @@ impl Constructor for PyBool {
 #[pyimpl(with(Constructor))]
 impl PyBool {
     #[pymethod(magic)]
-    fn repr(zelf: bool) -> String {
-        if zelf { "True" } else { "False" }.to_owned()
+    fn repr(zelf: bool, vm: &VirtualMachine) -> PyStrRef {
+        if zelf {
+            vm.ctx.true_str.clone()
+        } else {
+            vm.ctx.false_str.clone()
+        }
     }
 
     #[pymethod(magic)]
@@ -166,7 +170,7 @@ impl PyBool {
     }
 }
 
-pub(crate) fn init(context: &PyContext) {
+pub(crate) fn init(context: &Context) {
     PyBool::extend_class(context, &context.types.bool_type);
 }
 

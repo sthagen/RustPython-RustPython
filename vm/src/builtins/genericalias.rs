@@ -1,13 +1,13 @@
 use crate::{
     builtins::{PyList, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef},
+    class::PyClassImpl,
     common::hash,
     convert::ToPyObject,
     function::{FuncArgs, PyComparisonValue},
     protocol::PyMappingMethods,
-    pyclass::PyClassImpl,
     types::{AsMapping, Callable, Comparable, Constructor, GetAttr, Hashable, PyComparisonOp},
-    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
-    TryFromObject, VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
+    VirtualMachine,
 };
 use std::fmt;
 
@@ -35,7 +35,7 @@ impl fmt::Debug for PyGenericAlias {
     }
 }
 
-impl PyValue for PyGenericAlias {
+impl PyPayload for PyGenericAlias {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.generic_alias_type
     }
@@ -49,7 +49,9 @@ impl Constructor for PyGenericAlias {
             return Err(vm.new_type_error("GenericAlias() takes no keyword arguments".to_owned()));
         }
         let (origin, arguments): (_, PyObjectRef) = args.bind(vm)?;
-        PyGenericAlias::new(origin, arguments, vm).into_pyresult_with_type(vm, cls)
+        PyGenericAlias::new(origin, arguments, vm)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 }
 
@@ -314,14 +316,14 @@ impl PyGenericAlias {
 }
 
 impl AsMapping for PyGenericAlias {
-    fn as_mapping(_zelf: &PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+    fn as_mapping(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
         Self::MAPPING_METHODS
     }
 }
 
 impl Callable for PyGenericAlias {
     type Args = FuncArgs;
-    fn call(zelf: &crate::PyObjectView<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn call(zelf: &crate::Py<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         PyType::call(&zelf.origin, args, vm).map(|obj| {
             if let Err(exc) = obj.set_attr("__orig_class__", zelf.to_owned(), vm) {
                 if !exc.fast_isinstance(&vm.ctx.exceptions.attribute_error)
@@ -337,7 +339,7 @@ impl Callable for PyGenericAlias {
 
 impl Comparable for PyGenericAlias {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
@@ -361,7 +363,7 @@ impl Comparable for PyGenericAlias {
 
 impl Hashable for PyGenericAlias {
     #[inline]
-    fn hash(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<hash::PyHash> {
+    fn hash(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<hash::PyHash> {
         Ok(zelf.origin.as_object().hash(vm)? ^ zelf.args.as_object().hash(vm)?)
     }
 }
@@ -377,7 +379,7 @@ impl GetAttr for PyGenericAlias {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     let generic_alias_type = &context.types.generic_alias_type;
     PyGenericAlias::extend_class(context, generic_alias_type);
 }

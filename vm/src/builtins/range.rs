@@ -2,15 +2,15 @@ use super::{PyInt, PyIntRef, PySlice, PyTupleRef, PyTypeRef};
 use crate::common::hash::PyHash;
 use crate::{
     builtins::builtins_iter,
+    class::PyClassImpl,
     function::{FuncArgs, OptionalArg, PyComparisonValue},
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
-    pyclass::PyClassImpl,
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, IterNextIterable,
         Iterable, PyComparisonOp, Unconstructible,
     },
-    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
-    TryFromObject, VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
+    VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
 use num_bigint::{BigInt, Sign};
@@ -74,7 +74,7 @@ pub struct PyRange {
     pub step: PyIntRef,
 }
 
-impl PyValue for PyRange {
+impl PyPayload for PyRange {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.range_type
     }
@@ -173,7 +173,7 @@ impl PyRange {
 //     obj.payload::<PyRange>().unwrap().clone()
 // }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyRange::extend_class(context, &context.types.range_type);
     PyLongRangeIterator::extend_class(context, &context.types.longrange_iterator_type);
     PyRangeIterator::extend_class(context, &context.types.range_iterator_type);
@@ -414,14 +414,14 @@ impl PyRange {
 }
 
 impl AsMapping for PyRange {
-    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+    fn as_mapping(_zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
         Self::MAPPING_METHODS
     }
 }
 
 impl AsSequence for PyRange {
     fn as_sequence(
-        _zelf: &crate::PyObjectView<Self>,
+        _zelf: &crate::Py<Self>,
         _vm: &VirtualMachine,
     ) -> Cow<'static, PySequenceMethods> {
         Cow::Borrowed(&Self::SEQUENCE_METHDOS)
@@ -429,7 +429,7 @@ impl AsSequence for PyRange {
 }
 
 impl Hashable for PyRange {
-    fn hash(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
+    fn hash(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
         let length = zelf.compute_length();
         let elements = if length.is_zero() {
             [vm.ctx.new_int(length).into(), vm.ctx.none(), vm.ctx.none()]
@@ -452,7 +452,7 @@ impl Hashable for PyRange {
 
 impl Comparable for PyRange {
     fn cmp(
-        zelf: &PyObjectView<Self>,
+        zelf: &Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         _vm: &VirtualMachine,
@@ -528,7 +528,7 @@ pub struct PyLongRangeIterator {
     length: BigInt,
 }
 
-impl PyValue for PyLongRangeIterator {
+impl PyPayload for PyLongRangeIterator {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.longrange_iterator_type
     }
@@ -567,7 +567,7 @@ impl Unconstructible for PyLongRangeIterator {}
 
 impl IterNextIterable for PyLongRangeIterator {}
 impl IterNext for PyLongRangeIterator {
-    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn next(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         // TODO: In pathological case (index == usize::MAX) this can wrap around
         // (since fetch_add wraps). This would result in the iterator spinning again
         // from the beginning.
@@ -593,7 +593,7 @@ pub struct PyRangeIterator {
     length: usize,
 }
 
-impl PyValue for PyRangeIterator {
+impl PyPayload for PyRangeIterator {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.range_iterator_type
     }
@@ -633,7 +633,7 @@ impl Unconstructible for PyRangeIterator {}
 
 impl IterNextIterable for PyRangeIterator {}
 impl IterNext for PyRangeIterator {
-    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn next(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         // TODO: In pathological case (index == usize::MAX) this can wrap around
         // (since fetch_add wraps). This would result in the iterator spinning again
         // from the beginning.

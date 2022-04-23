@@ -14,13 +14,13 @@ mod _operator {
         builtins::{PyInt, PyIntRef, PyStrRef, PyTupleRef, PyTypeRef},
         function::{ArgBytesLike, FuncArgs, KwArgs, OptionalArg},
         protocol::PyIter,
+        recursion::ReprGuard,
         types::{
             Callable, Constructor,
             PyComparisonOp::{Eq, Ge, Gt, Le, Lt, Ne},
         },
         utils::Either,
-        vm::ReprGuard,
-        AsObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue, VirtualMachine,
+        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
 
     /// Same as a < b.
@@ -423,7 +423,7 @@ mod _operator {
     /// (r.name.first, r.name.last).
     #[pyattr]
     #[pyclass(name = "attrgetter")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct PyAttrGetter {
         attrs: Vec<PyStrRef>,
     }
@@ -490,13 +490,15 @@ mod _operator {
                     return Err(vm.new_type_error("attribute name must be a string".to_owned()));
                 }
             }
-            PyAttrGetter { attrs }.into_pyresult_with_type(vm, cls)
+            PyAttrGetter { attrs }
+                .into_ref_with_type(vm, cls)
+                .map(Into::into)
         }
     }
 
     impl Callable for PyAttrGetter {
         type Args = PyObjectRef;
-        fn call(zelf: &PyObjectView<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
+        fn call(zelf: &Py<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
             // Handle case where we only have one attribute.
             if zelf.attrs.len() == 1 {
                 return Self::get_single_attr(obj, zelf.attrs[0].as_str(), vm);
@@ -517,7 +519,7 @@ mod _operator {
     /// After g = itemgetter(2, 5, 3), the call g(r) returns (r[2], r[5], r[3])
     #[pyattr]
     #[pyclass(name = "itemgetter")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct PyItemGetter {
         items: Vec<PyObjectRef>,
     }
@@ -555,13 +557,15 @@ mod _operator {
             if args.args.is_empty() {
                 return Err(vm.new_type_error("itemgetter expected 1 argument, got 0.".to_owned()));
             }
-            PyItemGetter { items: args.args }.into_pyresult_with_type(vm, cls)
+            PyItemGetter { items: args.args }
+                .into_ref_with_type(vm, cls)
+                .map(Into::into)
         }
     }
 
     impl Callable for PyItemGetter {
         type Args = PyObjectRef;
-        fn call(zelf: &PyObjectView<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
+        fn call(zelf: &Py<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
             // Handle case where we only have one attribute.
             if zelf.items.len() == 1 {
                 return obj.get_item(zelf.items[0].clone(), vm);
@@ -583,7 +587,7 @@ mod _operator {
     /// r.name('date', foo=1).
     #[pyattr]
     #[pyclass(name = "methodcaller")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct PyMethodCaller {
         name: PyStrRef,
         args: FuncArgs,
@@ -648,7 +652,9 @@ mod _operator {
 
         fn py_new(cls: PyTypeRef, (name, args): Self::Args, vm: &VirtualMachine) -> PyResult {
             if let Ok(name) = name.try_into_value(vm) {
-                PyMethodCaller { name, args }.into_pyresult_with_type(vm, cls)
+                PyMethodCaller { name, args }
+                    .into_ref_with_type(vm, cls)
+                    .map(Into::into)
             } else {
                 Err(vm.new_type_error("method name must be a string".to_owned()))
             }
@@ -659,7 +665,7 @@ mod _operator {
         type Args = PyObjectRef;
 
         #[inline]
-        fn call(zelf: &PyObjectView<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
+        fn call(zelf: &Py<Self>, obj: Self::Args, vm: &VirtualMachine) -> PyResult {
             vm.call_method(&obj, zelf.name.as_str(), zelf.args.clone())
         }
     }

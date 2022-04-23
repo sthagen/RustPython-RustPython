@@ -8,16 +8,15 @@ pub(crate) mod _thread {
         builtins::{PyDictRef, PyStrRef, PyTupleRef, PyTypeRef},
         convert::ToPyException,
         function::{ArgCallable, FuncArgs, KwArgs, OptionalArg},
-        py_io,
         types::{Constructor, GetAttr, SetAttr},
         utils::Either,
-        AsObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
     use parking_lot::{
         lock_api::{RawMutex as RawMutexT, RawMutexTimed, RawReentrantMutex},
         RawMutex, RawThreadId,
     };
-    use std::{cell::RefCell, fmt, io::Write, thread, time::Duration};
+    use std::{cell::RefCell, fmt, thread, time::Duration};
     use thread_local::ThreadLocal;
 
     // TIMEOUT_MAX_IN_MICROSECONDS is a value in microseconds
@@ -95,7 +94,7 @@ pub(crate) mod _thread {
 
     #[pyattr(name = "LockType")]
     #[pyclass(module = "thread", name = "lock")]
-    #[derive(PyValue)]
+    #[derive(PyPayload)]
     struct Lock {
         mu: RawMutex,
     }
@@ -150,7 +149,7 @@ pub(crate) mod _thread {
     pub type RawRMutex = RawReentrantMutex<RawMutex, RawThreadId>;
     #[pyattr]
     #[pyclass(module = "thread", name = "RLock")]
-    #[derive(PyValue)]
+    #[derive(PyPayload)]
     struct RLock {
         mu: RawRMutex,
     }
@@ -168,7 +167,8 @@ pub(crate) mod _thread {
             RLock {
                 mu: RawRMutex::INIT,
             }
-            .into_pyresult_with_type(vm, cls)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
         }
 
         #[pymethod]
@@ -255,16 +255,11 @@ pub(crate) mod _thread {
             Ok(_obj) => {}
             Err(e) if e.fast_isinstance(&vm.ctx.exceptions.system_exit) => {}
             Err(exc) => {
-                // TODO: sys.unraisablehook
-                let stderr = std::io::stderr();
-                let mut stderr = py_io::IoWriter(stderr.lock());
-                let repr = func.as_ref().repr(vm).ok();
-                let repr = repr
-                    .as_ref()
-                    .map_or("<object repr() failed>", |s| s.as_str());
-                writeln!(*stderr, "Exception ignored in thread started by: {}", repr)
-                    .and_then(|()| vm.write_exception(&mut stderr, &exc))
-                    .ok();
+                vm.run_unraisable(
+                    exc,
+                    Some("Exception ignored in thread started by".to_owned()),
+                    func.into(),
+                );
             }
         }
         SENTINELS.with(|sents| {
@@ -305,7 +300,7 @@ pub(crate) mod _thread {
 
     #[pyattr]
     #[pyclass(module = "thread", name = "_local")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct Local {
         data: ThreadLocal<PyDictRef>,
     }
@@ -321,7 +316,8 @@ pub(crate) mod _thread {
             Local {
                 data: ThreadLocal::new(),
             }
-            .into_pyresult_with_type(vm, cls)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
         }
     }
 
@@ -345,7 +341,7 @@ pub(crate) mod _thread {
 
     impl SetAttr for Local {
         fn setattro(
-            zelf: &crate::PyObjectView<Self>,
+            zelf: &crate::Py<Self>,
             attr: PyStrRef,
             value: Option<PyObjectRef>,
             vm: &VirtualMachine,

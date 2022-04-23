@@ -4,10 +4,11 @@ use crate::common::lock::{
 };
 use crate::TryFromBorrowedObject;
 use crate::{
+    class::PyClassImpl,
     convert::ToPyObject,
     function::{FuncArgs, OptionalArg, PyComparisonValue},
     protocol::{PyIterReturn, PyMappingMethods, PySequence, PySequenceMethods},
-    pyclass::PyClassImpl,
+    recursion::ReprGuard,
     sequence::{MutObjectSequenceOp, ObjectSequenceOp, SequenceMutOp, SequenceOp},
     sliceable::{saturate_index, SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
@@ -15,8 +16,8 @@ use crate::{
         Iterable, PyComparisonOp, Unconstructible, Unhashable,
     },
     utils::collection_repr,
-    vm::{ReprGuard, VirtualMachine},
-    AsObject, PyContext, PyObject, PyObjectRef, PyObjectView, PyRef, PyResult, PyValue,
+    vm::VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
 };
 use std::{borrow::Cow, fmt, ops::DerefMut};
 
@@ -51,7 +52,7 @@ impl FromIterator<PyObjectRef> for PyList {
     }
 }
 
-impl PyValue for PyList {
+impl PyPayload for PyList {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.list_type
     }
@@ -64,7 +65,7 @@ impl ToPyObject for Vec<PyObjectRef> {
 }
 
 impl PyList {
-    pub fn new_ref(elements: Vec<PyObjectRef>, ctx: &PyContext) -> PyRef<Self> {
+    pub fn new_ref(elements: Vec<PyObjectRef>, ctx: &Context) -> PyRef<Self> {
         PyRef::new_ref(Self::from(elements), ctx.types.list_type.clone(), None)
     }
 
@@ -129,11 +130,7 @@ impl PyList {
         self.concat(&other, vm)
     }
 
-    fn inplace_concat(
-        zelf: &PyObjectView<Self>,
-        other: &PyObject,
-        vm: &VirtualMachine,
-    ) -> PyObjectRef {
+    fn inplace_concat(zelf: &Py<Self>, other: &PyObject, vm: &VirtualMachine) -> PyObjectRef {
         if let Ok(mut seq) = PySequence::from(other).extract_cloned(Ok, vm) {
             zelf.borrow_vec_mut().append(&mut seq);
             zelf.to_owned().into()
@@ -344,7 +341,9 @@ impl PyList {
 
     #[pyslot]
     fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        PyList::default().into_pyresult_with_type(vm, cls)
+        PyList::default()
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 
     #[pymethod(magic)]
@@ -392,14 +391,14 @@ impl PyList {
 }
 
 impl AsMapping for PyList {
-    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+    fn as_mapping(_zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
         Self::MAPPING_METHODS
     }
 }
 
 impl AsSequence for PyList {
     fn as_sequence(
-        _zelf: &crate::PyObjectView<Self>,
+        _zelf: &crate::Py<Self>,
         _vm: &VirtualMachine,
     ) -> Cow<'static, PySequenceMethods> {
         Cow::Borrowed(&Self::SEQUENCE_METHDOS)
@@ -458,7 +457,7 @@ impl Iterable for PyList {
 
 impl Comparable for PyList {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
@@ -508,7 +507,7 @@ pub struct PyListIterator {
     internal: PyMutex<PositionIterInternal<PyListRef>>,
 }
 
-impl PyValue for PyListIterator {
+impl PyPayload for PyListIterator {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.list_iterator_type
     }
@@ -539,7 +538,7 @@ impl Unconstructible for PyListIterator {}
 
 impl IterNextIterable for PyListIterator {}
 impl IterNext for PyListIterator {
-    fn next(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn next(zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.internal.lock().next(|list, pos| {
             let vec = list.borrow_vec();
             Ok(PyIterReturn::from_result(vec.get(pos).cloned().ok_or(None)))
@@ -553,7 +552,7 @@ pub struct PyListReverseIterator {
     internal: PyMutex<PositionIterInternal<PyListRef>>,
 }
 
-impl PyValue for PyListReverseIterator {
+impl PyPayload for PyListReverseIterator {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.list_reverseiterator_type
     }
@@ -584,7 +583,7 @@ impl Unconstructible for PyListReverseIterator {}
 
 impl IterNextIterable for PyListReverseIterator {}
 impl IterNext for PyListReverseIterator {
-    fn next(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn next(zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.internal.lock().rev_next(|list, pos| {
             let vec = list.borrow_vec();
             Ok(PyIterReturn::from_result(vec.get(pos).cloned().ok_or(None)))
@@ -592,7 +591,7 @@ impl IterNext for PyListReverseIterator {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     let list_type = &context.types.list_type;
     PyList::extend_class(context, list_type);
 

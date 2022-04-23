@@ -4,7 +4,7 @@ use crate::{
     crt_fd::Fd,
     function::{ArgumentError, FromArgs, FuncArgs},
     protocol::PyBuffer,
-    AsObject, PyObject, PyObjectRef, PyResult, PyValue, TryFromBorrowedObject, TryFromObject,
+    AsObject, PyObject, PyObjectRef, PyPayload, PyResult, TryFromBorrowedObject, TryFromObject,
     VirtualMachine,
 };
 use std::{
@@ -412,11 +412,12 @@ pub(super) mod _os {
         crt_fd::{Fd, Offset},
         function::{ArgBytesLike, FuncArgs, OptionalArg},
         protocol::PyIterReturn,
+        recursion::ReprGuard,
         suppress_iph,
         types::{IterNext, IterNextIterable, PyStructSequence},
         utils::Either,
-        vm::{ReprGuard, VirtualMachine},
-        AsObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+        vm::VirtualMachine,
+        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
@@ -703,7 +704,7 @@ pub(super) mod _os {
 
     #[pyattr]
     #[pyclass(name)]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct DirEntry {
         entry: fs::DirEntry,
         mode: OutputMode,
@@ -875,7 +876,7 @@ pub(super) mod _os {
 
     #[pyattr]
     #[pyclass(name = "ScandirIter")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct ScandirIterator {
         entries: PyRwLock<fs::ReadDir>,
         exhausted: AtomicCell<bool>,
@@ -901,7 +902,7 @@ pub(super) mod _os {
     }
     impl IterNextIterable for ScandirIterator {}
     impl IterNext for ScandirIterator {
-        fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+        fn next(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
             if zelf.exhausted.load() {
                 return Ok(PyIterReturn::StopIteration(None));
             }

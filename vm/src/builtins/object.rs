@@ -1,11 +1,11 @@
 use super::{PyDict, PyDictRef, PyList, PyStr, PyStrRef, PyType, PyTypeRef};
 use crate::common::hash::PyHash;
 use crate::{
+    class::PyClassImpl,
     function::{FuncArgs, PyArithmeticValue, PyComparisonValue},
-    pyclass::PyClassImpl,
     types::PyComparisonOp,
     utils::Either,
-    AsObject, PyContext, PyObject, PyObjectRef, PyResult, PyValue, VirtualMachine,
+    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 
 /// object()
@@ -19,7 +19,7 @@ use crate::{
 #[derive(Debug)]
 pub struct PyBaseObject;
 
-impl PyValue for PyBaseObject {
+impl PyPayload for PyBaseObject {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.object_type
     }
@@ -376,7 +376,7 @@ pub fn generic_setattr(
     }
 }
 
-pub fn init(ctx: &PyContext) {
+pub fn init(ctx: &Context) {
     PyBaseObject::extend_class(ctx, &ctx.types.object_type);
 }
 

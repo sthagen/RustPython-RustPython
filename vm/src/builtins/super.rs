@@ -5,10 +5,10 @@ See also [CPython source code.](https://github.com/python/cpython/blob/50b48572d
 
 use super::{PyStrRef, PyType, PyTypeRef};
 use crate::{
+    class::PyClassImpl,
     function::OptionalArg,
-    pyclass::PyClassImpl,
     types::{Constructor, GetAttr, GetDescriptor},
-    AsObject, PyContext, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+    AsObject, Context, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 #[pyclass(module = false, name = "super")]
@@ -18,7 +18,7 @@ pub struct PySuper {
     obj: Option<(PyObjectRef, PyTypeRef)>,
 }
 
-impl PyValue for PySuper {
+impl PyPayload for PySuper {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.super_type
     }
@@ -91,7 +91,9 @@ impl Constructor for PySuper {
             (typ, obj)
         };
 
-        PySuper::new(typ, obj, vm)?.into_pyresult_with_type(vm, cls)
+        PySuper::new(typ, obj, vm)?
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 }
 
@@ -198,7 +200,7 @@ fn supercheck(ty: PyTypeRef, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<
         .new_type_error("super(type, obj): obj must be an instance or subtype of type".to_owned()))
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     let super_type = &context.types.super_type;
     PySuper::extend_class(context, super_type);
 

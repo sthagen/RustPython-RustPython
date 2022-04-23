@@ -1,11 +1,11 @@
 // sliceobject.{h,c} in CPython
 use super::{PyInt, PyIntRef, PyTupleRef, PyTypeRef};
 use crate::{
+    class::PyClassImpl,
     convert::ToPyObject,
     function::{FuncArgs, OptionalArg, PyComparisonValue},
-    pyclass::PyClassImpl,
     types::{Comparable, Constructor, Hashable, PyComparisonOp, Unhashable},
-    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{One, Signed, ToPrimitive, Zero};
@@ -20,7 +20,7 @@ pub struct PySlice {
     pub step: Option<PyObjectRef>,
 }
 
-impl PyValue for PySlice {
+impl PyPayload for PySlice {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.slice_type
     }
@@ -101,7 +101,7 @@ impl PySlice {
                 }
             }
         };
-        slice.into_pyresult_with_type(vm, cls)
+        slice.into_ref_with_type(vm, cls).map(Into::into)
     }
 
     pub(crate) fn inner_indices(
@@ -213,7 +213,7 @@ impl PySlice {
 
 impl Comparable for PySlice {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
@@ -423,7 +423,7 @@ pub fn saturate_index(p: isize, len: usize) -> usize {
 #[derive(Debug)]
 pub struct PyEllipsis;
 
-impl PyValue for PyEllipsis {
+impl PyPayload for PyEllipsis {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.ellipsis_type
     }
@@ -450,7 +450,7 @@ impl PyEllipsis {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PySlice::extend_class(context, &context.types.slice_type);
     PyEllipsis::extend_class(context, &context.ellipsis.class().clone());
 }

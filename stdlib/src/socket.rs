@@ -16,7 +16,7 @@ mod _socket {
         convert::{ToPyException, ToPyObject, TryFromBorrowedObject, TryFromObject},
         function::{ArgBytesLike, ArgMemoryBuffer, FuncArgs, OptionalArg, OptionalOption},
         utils::{Either, ToCString},
-        AsObject, PyObjectRef, PyResult, PyValue, VirtualMachine,
+        AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use num_traits::ToPrimitive;
@@ -231,7 +231,7 @@ mod _socket {
     #[pyattr(name = "socket")]
     #[pyattr(name = "SocketType")]
     #[pyclass(name = "socket")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     pub struct PySocket {
         kind: AtomicCell<i32>,
         family: AtomicCell<i32>,
@@ -547,7 +547,7 @@ mod _socket {
     impl PySocket {
         #[pyslot]
         fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            Self::default().into_pyresult_with_type(vm, cls)
+            Self::default().into_ref_with_type(vm, cls).map(Into::into)
         }
 
         #[pymethod(magic)]

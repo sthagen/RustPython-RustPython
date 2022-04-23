@@ -4,8 +4,8 @@
 use super::PyTypeRef;
 use crate::common::lock::PyRwLock;
 use crate::{
-    function::FuncArgs, pyclass::PyClassImpl, types::GetDescriptor, AsObject, PyContext,
-    PyObjectRef, PyRef, PyResult, PyValue, TryFromObject, VirtualMachine,
+    class::PyClassImpl, function::FuncArgs, types::GetDescriptor, AsObject, Context, PyObjectRef,
+    PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 
 /// Property attribute.
@@ -49,7 +49,7 @@ pub struct PyProperty {
     doc: PyRwLock<Option<PyObjectRef>>,
 }
 
-impl PyValue for PyProperty {
+impl PyPayload for PyProperty {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.property_type
     }
@@ -95,7 +95,8 @@ impl PyProperty {
             deleter: PyRwLock::new(None),
             doc: PyRwLock::new(None),
         }
-        .into_pyresult_with_type(vm, cls)
+        .into_ref_with_type(vm, cls)
+        .map(Into::into)
     }
 
     #[pymethod(magic)]
@@ -245,7 +246,7 @@ impl PyProperty {
     }
 }
 
-pub(crate) fn init(context: &PyContext) {
+pub(crate) fn init(context: &Context) {
     PyProperty::extend_class(context, &context.types.property_type);
 
     // This is a bit unfortunate, but this instance attribute overlaps with the

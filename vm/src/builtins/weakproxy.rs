@@ -1,18 +1,18 @@
-use super::{PyStrRef, PyTypeRef};
+use super::{PyStrRef, PyTypeRef, PyWeak};
 use crate::{
+    class::PyClassImpl,
     function::OptionalArg,
-    pyclass::PyClassImpl,
     types::{Constructor, SetAttr},
-    PyContext, PyObjectRef, PyObjectWeak, PyResult, PyValue, VirtualMachine,
+    Context, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 #[pyclass(module = false, name = "weakproxy")]
 #[derive(Debug)]
 pub struct PyWeakProxy {
-    weak: PyObjectWeak,
+    weak: PyRef<PyWeak>,
 }
 
-impl PyValue for PyWeakProxy {
+impl PyPayload for PyWeakProxy {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.weakproxy_type
     }
@@ -48,7 +48,8 @@ impl Constructor for PyWeakProxy {
         PyWeakProxy {
             weak: referent.downgrade_with_typ(callback.into_option(), weak_cls.clone(), vm)?,
         }
-        .into_pyresult_with_type(vm, cls)
+        .into_ref_with_type(vm, cls)
+        .map(Into::into)
     }
 }
 
@@ -73,7 +74,7 @@ impl PyWeakProxy {
 
 impl SetAttr for PyWeakProxy {
     fn setattro(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         attr_name: PyStrRef,
         value: Option<PyObjectRef>,
         vm: &VirtualMachine,
@@ -88,6 +89,6 @@ impl SetAttr for PyWeakProxy {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyWeakProxy::extend_class(context, &context.types.weakproxy_type);
 }

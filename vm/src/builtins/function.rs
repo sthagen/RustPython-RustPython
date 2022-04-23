@@ -9,12 +9,12 @@ use crate::common::lock::PyMutex;
 use crate::function::ArgMapping;
 use crate::{
     bytecode,
+    class::PyClassImpl,
     frame::Frame,
     function::{FuncArgs, OptionalArg, PyComparisonValue},
-    pyclass::PyClassImpl,
     scope::Scope,
     types::{Callable, Comparable, Constructor, GetAttr, GetDescriptor, PyComparisonOp},
-    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 #[cfg(feature = "jit")]
 use crate::{common::lock::OnceCell, convert::ToPyObject};
@@ -324,7 +324,7 @@ impl PyFunction {
     }
 }
 
-impl PyValue for PyFunction {
+impl PyPayload for PyFunction {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.function_type
     }
@@ -422,7 +422,7 @@ impl GetDescriptor for PyFunction {
 impl Callable for PyFunction {
     type Args = FuncArgs;
     #[inline]
-    fn call(zelf: &crate::PyObjectView<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn call(zelf: &crate::Py<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         zelf.invoke(args, vm)
     }
 }
@@ -437,7 +437,7 @@ pub struct PyBoundMethod {
 impl Callable for PyBoundMethod {
     type Args = FuncArgs;
     #[inline]
-    fn call(zelf: &crate::PyObjectView<Self>, mut args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn call(zelf: &crate::Py<Self>, mut args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         args.prepend_arg(zelf.object.clone());
         vm.invoke(&zelf.function, args)
     }
@@ -445,7 +445,7 @@ impl Callable for PyBoundMethod {
 
 impl Comparable for PyBoundMethod {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         _vm: &VirtualMachine,
@@ -485,7 +485,9 @@ impl Constructor for PyBoundMethod {
         Self::Args { function, object }: Self::Args,
         vm: &VirtualMachine,
     ) -> PyResult {
-        PyBoundMethod::new(object, function).into_pyresult_with_type(vm, cls)
+        PyBoundMethod::new(object, function)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 }
 
@@ -494,7 +496,7 @@ impl PyBoundMethod {
         PyBoundMethod { object, function }
     }
 
-    pub fn new_ref(object: PyObjectRef, function: PyObjectRef, ctx: &PyContext) -> PyRef<Self> {
+    pub fn new_ref(object: PyObjectRef, function: PyObjectRef, ctx: &Context) -> PyRef<Self> {
         PyRef::new_ref(
             Self::new(object, function),
             ctx.types.bound_method_type.clone(),
@@ -565,7 +567,7 @@ impl PyBoundMethod {
     }
 }
 
-impl PyValue for PyBoundMethod {
+impl PyPayload for PyBoundMethod {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.bound_method_type
     }
@@ -578,7 +580,7 @@ pub(crate) struct PyCell {
 }
 pub(crate) type PyCellRef = PyRef<PyCell>;
 
-impl PyValue for PyCell {
+impl PyPayload for PyCell {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.cell_type
     }
@@ -588,7 +590,9 @@ impl Constructor for PyCell {
     type Args = OptionalArg;
 
     fn py_new(cls: PyTypeRef, value: Self::Args, vm: &VirtualMachine) -> PyResult {
-        Self::new(value.into_option()).into_pyresult_with_type(vm, cls)
+        Self::new(value.into_option())
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 }
 
@@ -622,7 +626,7 @@ impl PyCell {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyFunction::extend_class(context, &context.types.function_type);
     PyBoundMethod::extend_class(context, &context.types.bound_method_type);
     PyCell::extend_class(context, &context.types.cell_type);

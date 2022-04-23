@@ -1,6 +1,6 @@
 use super::{
-    mappingproxy::PyMappingProxy, object, pyunion, PyClassMethod, PyDictRef, PyList,
-    PyStaticMethod, PyStr, PyStrRef, PyTuple, PyTupleRef,
+    mappingproxy::PyMappingProxy, object, union_, PyClassMethod, PyDictRef, PyList, PyStaticMethod,
+    PyStr, PyStrRef, PyTuple, PyTupleRef, PyWeak,
 };
 use crate::common::{
     ascii,
@@ -8,10 +8,10 @@ use crate::common::{
     lock::{PyRwLock, PyRwLockReadGuard},
 };
 use crate::{
+    class::{PyClassImpl, StaticType},
     function::{FuncArgs, KwArgs, OptionalArg},
-    pyclass::{PyClassImpl, StaticType},
     types::{Callable, GetAttr, PyTypeFlags, PyTypeSlots, SetAttr},
-    AsObject, PyContext, PyObjectRef, PyObjectWeak, PyRef, PyResult, PyValue, VirtualMachine,
+    AsObject, Context, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 use itertools::Itertools;
 use std::{
@@ -29,7 +29,7 @@ pub struct PyType {
     pub base: Option<PyTypeRef>,
     pub bases: Vec<PyTypeRef>,
     pub mro: Vec<PyTypeRef>,
-    pub subclasses: PyRwLock<Vec<PyObjectWeak>>,
+    pub subclasses: PyRwLock<Vec<PyRef<PyWeak>>>,
     pub attributes: PyRwLock<PyAttributes>,
     pub slots: PyTypeSlots,
 }
@@ -53,7 +53,7 @@ impl fmt::Debug for PyType {
     }
 }
 
-impl PyValue for PyType {
+impl PyPayload for PyType {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.type_type
     }
@@ -402,12 +402,12 @@ impl PyType {
     #[pymethod(name = "__ror__")]
     #[pymethod(magic)]
     pub fn or(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
-        if !pyunion::is_unionable(zelf.clone(), vm) || !pyunion::is_unionable(other.clone(), vm) {
+        if !union_::is_unionable(zelf.clone(), vm) || !union_::is_unionable(other.clone(), vm) {
             return vm.ctx.not_implemented();
         }
 
         let tuple = PyTuple::new_ref(vec![zelf, other], &vm.ctx);
-        pyunion::make_union(tuple, vm)
+        union_::make_union(tuple, vm)
     }
 
     #[pyslot]
@@ -680,7 +680,7 @@ impl GetAttr for PyType {
 
 impl SetAttr for PyType {
     fn setattro(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         attr_name: PyStrRef,
         value: Option<PyObjectRef>,
         vm: &VirtualMachine,
@@ -715,7 +715,7 @@ impl SetAttr for PyType {
 
 impl Callable for PyType {
     type Args = FuncArgs;
-    fn call(zelf: &crate::PyObjectView<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn call(zelf: &crate::Py<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         vm_trace!("type_call: {:?}", zelf);
         let obj = call_slot_new(zelf.to_owned(), zelf.to_owned(), args.clone(), vm)?;
 
@@ -789,7 +789,7 @@ fn subtype_set_dict(obj: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -
  * The magical type type
  */
 
-pub(crate) fn init(ctx: &PyContext) {
+pub(crate) fn init(ctx: &Context) {
     PyType::extend_class(ctx, &ctx.types.type_type);
 }
 
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_linearise() {
-        let context = PyContext::default();
+        let context = Context::default();
         let object = &context.types.object_type;
         let type_type = &context.types.type_type;
 

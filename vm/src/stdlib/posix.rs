@@ -38,7 +38,7 @@ pub mod module {
         },
         types::Constructor,
         utils::{Either, ToCString},
-        AsObject, PyObjectRef, PyResult, PyValue, VirtualMachine,
+        AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
     };
     use bitflags::bitflags;
     use nix::{
@@ -522,7 +522,7 @@ pub mod module {
 
     #[pyattr]
     #[pyclass(name = "sched_param")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct SchedParam {
         sched_priority: PyObjectRef,
     }
@@ -583,7 +583,8 @@ pub mod module {
             SchedParam {
                 sched_priority: arg.sched_priority,
             }
-            .into_pyresult_with_type(vm, cls)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
         }
     }
 

@@ -1,11 +1,11 @@
 use super::PyTypeRef;
 use crate::{
     builtins::PyDict,
+    class::PyClassImpl,
     function::{FuncArgs, PyComparisonValue},
-    pyclass::PyClassImpl,
+    recursion::ReprGuard,
     types::{Comparable, Constructor, PyComparisonOp},
-    vm::ReprGuard,
-    AsObject, PyContext, PyObject, PyRef, PyResult, PyValue, VirtualMachine,
+    AsObject, Context, PyObject, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 /// A simple attribute-based namespace.
@@ -15,7 +15,7 @@ use crate::{
 #[derive(Debug)]
 pub struct PyNamespace {}
 
-impl PyValue for PyNamespace {
+impl PyPayload for PyNamespace {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.namespace_type
     }
@@ -25,12 +25,12 @@ impl Constructor for PyNamespace {
     type Args = FuncArgs;
 
     fn py_new(cls: PyTypeRef, _args: Self::Args, vm: &VirtualMachine) -> PyResult {
-        PyNamespace {}.into_pyresult_with_type(vm, cls)
+        PyNamespace {}.into_ref_with_type(vm, cls).map(Into::into)
     }
 }
 
 impl PyNamespace {
-    pub fn new_ref(ctx: &PyContext) -> PyRef<Self> {
+    pub fn new_ref(ctx: &Context) -> PyRef<Self> {
         PyRef::new_ref(
             Self {},
             ctx.types.namespace_type.clone(),
@@ -80,7 +80,7 @@ impl PyNamespace {
 
 impl Comparable for PyNamespace {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
@@ -94,6 +94,6 @@ impl Comparable for PyNamespace {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyNamespace::extend_class(context, &context.types.namespace_type);
 }

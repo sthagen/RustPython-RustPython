@@ -9,7 +9,7 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
 
     #[cfg(unix)]
     {
-        use crate::vm::pyclass::PyClassImpl;
+        use crate::vm::class::PyClassImpl;
         decl::poll::PyPoll::make_class(&vm.ctx);
     }
 
@@ -261,14 +261,14 @@ mod decl {
         use super::*;
         use crate::vm::{
             builtins::PyFloat, common::lock::PyMutex, convert::ToPyObject, function::OptionalArg,
-            stdlib::io::Fildes, AsObject, PyValue,
+            stdlib::io::Fildes, AsObject, PyPayload,
         };
         use libc::pollfd;
         use num_traits::ToPrimitive;
         use std::time;
 
         #[pyclass(module = "select", name = "poll")]
-        #[derive(Default, Debug, PyValue)]
+        #[derive(Default, Debug, PyPayload)]
         pub struct PyPoll {
             // keep sorted
             fds: PyMutex<Vec<pollfd>>,

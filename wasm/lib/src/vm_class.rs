@@ -5,10 +5,10 @@ use crate::{
 };
 use js_sys::{Object, TypeError};
 use rustpython_vm::{
+    builtins::PyWeak,
     compile::{self, Mode},
     scope::Scope,
-    InitParameter, Interpreter, PyObjectRef, PyObjectWeak, PyResult, PySettings, PyValue,
-    VirtualMachine,
+    InitParameter, Interpreter, PyObjectRef, PyPayload, PyRef, PyResult, Settings, VirtualMachine,
 };
 use std::{
     cell::RefCell,
@@ -41,7 +41,7 @@ fn init_window_module(vm: &VirtualMachine) -> PyObjectRef {
 impl StoredVirtualMachine {
     fn new(id: String, inject_browser_module: bool) -> StoredVirtualMachine {
         let mut scope = None;
-        let interp = Interpreter::new_with_init(PySettings::default(), |vm| {
+        let interp = Interpreter::new_with_init(Settings::default(), |vm| {
             vm.wasm_id = Some(id);
 
             js_module::setup_js_module(vm);
@@ -197,7 +197,10 @@ impl WASMVirtualMachine {
         STORED_VMS.with(|cell| cell.borrow().contains_key(&self.id))
     }
 
-    pub(crate) fn push_held_rc(&self, obj: PyObjectRef) -> Result<PyResult<PyObjectWeak>, JsValue> {
+    pub(crate) fn push_held_rc(
+        &self,
+        obj: PyObjectRef,
+    ) -> Result<PyResult<PyRef<PyWeak>>, JsValue> {
         self.with_vm(|vm, stored_vm| {
             let weak = obj.downgrade(None, vm)?;
             stored_vm.held_objects.borrow_mut().push(obj);

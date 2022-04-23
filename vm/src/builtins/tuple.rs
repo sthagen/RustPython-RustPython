@@ -1,10 +1,11 @@
 use super::{PositionIterInternal, PyGenericAlias, PyTypeRef};
 use crate::common::{hash::PyHash, lock::PyMutex};
 use crate::{
+    class::PyClassImpl,
     convert::{ToPyObject, TransmuteFromObject, TryFromBorrowedObject},
     function::{OptionalArg, PyArithmeticValue, PyComparisonValue},
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
-    pyclass::PyClassImpl,
+    recursion::ReprGuard,
     sequence::{ObjectSequenceOp, SequenceOp},
     sliceable::{SequenceIndex, SliceableSequenceOp},
     stdlib::sys,
@@ -13,8 +14,8 @@ use crate::{
         Iterable, PyComparisonOp, Unconstructible,
     },
     utils::collection_repr,
-    vm::{ReprGuard, VirtualMachine},
-    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, TryFromObject,
+    vm::VirtualMachine,
+    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
 };
 use std::{borrow::Cow, fmt, marker::PhantomData};
 
@@ -34,7 +35,7 @@ impl fmt::Debug for PyTuple {
     }
 }
 
-impl PyValue for PyTuple {
+impl PyPayload for PyTuple {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.tuple_type
     }
@@ -112,13 +113,14 @@ impl Constructor for PyTuple {
             Self {
                 elements: elements.into_boxed_slice(),
             }
-            .into_pyresult_with_type(vm, cls)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
         }
     }
 }
 
 impl PyTuple {
-    pub fn new_ref(elements: Vec<PyObjectRef>, ctx: &PyContext) -> PyRef<Self> {
+    pub fn new_ref(elements: Vec<PyObjectRef>, ctx: &Context) -> PyRef<Self> {
         if elements.is_empty() {
             ctx.empty_tuple.clone()
         } else {
@@ -322,14 +324,14 @@ impl PyTuple {
 }
 
 impl AsMapping for PyTuple {
-    fn as_mapping(_zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
+    fn as_mapping(_zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyMappingMethods {
         Self::MAPPING_METHODS
     }
 }
 
 impl AsSequence for PyTuple {
     fn as_sequence(
-        _zelf: &crate::PyObjectView<Self>,
+        _zelf: &crate::Py<Self>,
         _vm: &VirtualMachine,
     ) -> Cow<'static, PySequenceMethods> {
         Cow::Borrowed(&Self::SEQUENCE_METHDOS)
@@ -367,14 +369,14 @@ impl PyTuple {
 
 impl Hashable for PyTuple {
     #[inline]
-    fn hash(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
+    fn hash(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
         crate::utils::hash_iter(zelf.elements.iter(), vm)
     }
 }
 
 impl Comparable for PyTuple {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
@@ -404,7 +406,7 @@ pub(crate) struct PyTupleIterator {
     internal: PyMutex<PositionIterInternal<PyTupleRef>>,
 }
 
-impl PyValue for PyTupleIterator {
+impl PyPayload for PyTupleIterator {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.tuple_iterator_type
     }
@@ -435,7 +437,7 @@ impl Unconstructible for PyTupleIterator {}
 
 impl IterNextIterable for PyTupleIterator {}
 impl IterNext for PyTupleIterator {
-    fn next(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn next(zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.internal.lock().next(|tuple, pos| {
             Ok(PyIterReturn::from_result(
                 tuple.as_slice().get(pos).cloned().ok_or(None),
@@ -444,7 +446,7 @@ impl IterNext for PyTupleIterator {
     }
 }
 
-pub(crate) fn init(context: &PyContext) {
+pub(crate) fn init(context: &Context) {
     PyTuple::extend_class(context, &context.types.tuple_type);
     PyTupleIterator::extend_class(context, &context.types.tuple_iterator_type);
 }

@@ -2,17 +2,19 @@ pub(crate) use _contextvars::make_module;
 
 #[pymodule]
 mod _contextvars {
-    use rustpython_vm::builtins::{PyFunction, PyStrRef, PyTypeRef};
-    use rustpython_vm::function::{ArgCallable, FuncArgs, OptionalArg};
-    use rustpython_vm::{PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine};
+    use crate::vm::{
+        builtins::{PyFunction, PyStrRef, PyTypeRef},
+        function::{ArgCallable, FuncArgs, OptionalArg},
+        PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    };
 
     #[pyattr]
-    #[pyclass(name)]
-    #[derive(Debug, PyValue)]
-    struct Context {}
+    #[pyclass(name = "Context")]
+    #[derive(Debug, PyPayload)]
+    struct PyContext {} // not to confuse with vm::Context
 
     #[pyimpl]
-    impl Context {
+    impl PyContext {
         #[pymethod(magic)]
         fn init(&self, _vm: &VirtualMachine) -> PyResult<()> {
             unimplemented!("Context.__init__ is currently under construction")
@@ -29,7 +31,7 @@ mod _contextvars {
         }
 
         #[pymethod]
-        fn copy(&self, _vm: &VirtualMachine) -> PyResult<Context> {
+        fn copy(&self, _vm: &VirtualMachine) -> PyResult<Self> {
             unimplemented!("Context.copy is currently under construction")
         }
 
@@ -75,7 +77,7 @@ mod _contextvars {
 
     #[pyattr]
     #[pyclass(name)]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct ContextVar {
         #[allow(dead_code)] // TODO: RUSTPYTHON
         name: String,
@@ -147,7 +149,7 @@ mod _contextvars {
 
     #[pyattr]
     #[pyclass(name = "Token")]
-    #[derive(Debug, PyValue)]
+    #[derive(Debug, PyPayload)]
     struct ContextToken {}
 
     #[derive(FromArgs)]

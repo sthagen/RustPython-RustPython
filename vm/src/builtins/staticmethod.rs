@@ -1,10 +1,10 @@
 use super::{PyStr, PyTypeRef};
 use crate::{
     builtins::builtinfunc::PyBuiltinMethod,
+    class::PyClassImpl,
     function::{FuncArgs, IntoPyNativeFunc},
-    pyclass::PyClassImpl,
     types::{Callable, Constructor, GetDescriptor},
-    PyContext, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+    Context, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 #[pyclass(module = false, name = "staticmethod")]
@@ -13,7 +13,7 @@ pub struct PyStaticMethod {
     pub callable: PyObjectRef,
 }
 
-impl PyValue for PyStaticMethod {
+impl PyPayload for PyStaticMethod {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.staticmethod_type
     }
@@ -41,7 +41,9 @@ impl Constructor for PyStaticMethod {
     type Args = PyObjectRef;
 
     fn py_new(cls: PyTypeRef, callable: Self::Args, vm: &VirtualMachine) -> PyResult {
-        PyStaticMethod { callable }.into_pyresult_with_type(vm, cls)
+        PyStaticMethod { callable }
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 }
 
@@ -50,7 +52,7 @@ impl PyStaticMethod {
         name: impl Into<PyStr>,
         class: PyTypeRef,
         f: F,
-        ctx: &PyContext,
+        ctx: &Context,
     ) -> PyRef<Self>
     where
         F: IntoPyNativeFunc<FKind>,
@@ -80,11 +82,11 @@ impl PyStaticMethod {
 impl Callable for PyStaticMethod {
     type Args = FuncArgs;
     #[inline]
-    fn call(zelf: &crate::PyObjectView<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn call(zelf: &crate::Py<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         vm.invoke(&zelf.callable, args)
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyStaticMethod::extend_class(context, &context.types.staticmethod_type);
 }

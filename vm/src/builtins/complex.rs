@@ -1,14 +1,14 @@
 use super::{float, PyStr, PyTypeRef};
 use crate::{
+    class::PyClassImpl,
     convert::ToPyObject,
     function::{
         OptionalArg, OptionalOption,
         PyArithmeticValue::{self, *},
         PyComparisonValue,
     },
-    pyclass::PyClassImpl,
     types::{Comparable, Constructor, Hashable, PyComparisonOp},
-    AsObject, PyContext, PyObject, PyObjectRef, PyRef, PyResult, PyValue, VirtualMachine,
+    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 use num_complex::Complex64;
 use num_traits::Zero;
@@ -23,7 +23,7 @@ pub struct PyComplex {
     value: Complex64,
 }
 
-impl PyValue for PyComplex {
+impl PyPayload for PyComplex {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.complex_type
     }
@@ -71,7 +71,7 @@ impl PyObjectRef {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyComplex::extend_class(context, &context.types.complex_type);
 }
 
@@ -142,7 +142,9 @@ impl Constructor for PyComplex {
                     let value = parse_str(s.as_str().trim()).ok_or_else(|| {
                         vm.new_value_error("complex() arg is a malformed string".to_owned())
                     })?;
-                    return Self::from(value).into_pyresult_with_type(vm, cls);
+                    return Self::from(value)
+                        .into_ref_with_type(vm, cls)
+                        .map(Into::into);
                 } else {
                     return Err(vm.new_type_error(format!(
                         "complex() first argument must be a string or a number, not '{}'",
@@ -184,12 +186,14 @@ impl Constructor for PyComplex {
             imag.re
         };
         let value = Complex64::new(final_real, final_imag);
-        Self::from(value).into_pyresult_with_type(vm, cls)
+        Self::from(value)
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
     }
 }
 
 impl PyComplex {
-    pub fn new_ref(value: Complex64, ctx: &PyContext) -> PyRef<Self> {
+    pub fn new_ref(value: Complex64, ctx: &Context) -> PyRef<Self> {
         PyRef::new_ref(Self::from(value), ctx.types.complex_type.clone(), None)
     }
 
@@ -387,7 +391,7 @@ impl PyComplex {
 
 impl Comparable for PyComplex {
     fn cmp(
-        zelf: &crate::PyObjectView<Self>,
+        zelf: &crate::Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         vm: &VirtualMachine,
@@ -409,7 +413,7 @@ impl Comparable for PyComplex {
 
 impl Hashable for PyComplex {
     #[inline]
-    fn hash(zelf: &crate::PyObjectView<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
+    fn hash(zelf: &crate::Py<Self>, _vm: &VirtualMachine) -> PyResult<hash::PyHash> {
         Ok(hash::hash_complex(&zelf.value))
     }
 }

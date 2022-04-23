@@ -49,7 +49,7 @@ macro_rules! py_namespace {
         {
             let namespace = $crate::builtins::PyNamespace::new_ref(&$vm.ctx);
             $(
-                $vm.__module_set_attr($crate::pyobject::AsObject::as_object(&namespace), $name, $value).unwrap();
+                $vm.__module_set_attr($crate::object::AsObject::as_object(&namespace), $name, $value).unwrap();
             )*
             namespace
         }
@@ -69,7 +69,7 @@ macro_rules! py_namespace {
 ///
 /// use rustpython_vm::match_class;
 /// use rustpython_vm::builtins::{PyFloat, PyInt};
-/// use rustpython_vm::{PyValue};
+/// use rustpython_vm::{PyPayload};
 ///
 /// # rustpython_vm::Interpreter::default().enter(|vm| {
 /// let obj = PyInt::from(0).into_pyobject(vm);
@@ -93,7 +93,7 @@ macro_rules! py_namespace {
 ///
 /// use rustpython_vm::match_class;
 /// use rustpython_vm::builtins::{PyFloat, PyInt};
-/// use rustpython_vm::{ PyValue};
+/// use rustpython_vm::{ PyPayload};
 ///
 /// # rustpython_vm::Interpreter::default().enter(|vm| {
 /// let obj = PyInt::from(0).into_pyobject(vm);
@@ -209,7 +209,7 @@ macro_rules! class_or_notimplemented {
 macro_rules! named_function {
     ($ctx:expr, $module:ident, $func:ident) => {{
         #[allow(unused_variables)] // weird lint, something to do with paste probably
-        let ctx: &$crate::PyContext = &$ctx;
+        let ctx: &$crate::Context = &$ctx;
         $crate::__exports::paste::expr! {
             ctx.make_funcdef(
                 stringify!($func),

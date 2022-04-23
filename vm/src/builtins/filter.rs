@@ -1,9 +1,9 @@
 use super::PyTypeRef;
 use crate::{
+    class::PyClassImpl,
     protocol::{PyIter, PyIterReturn},
-    pyclass::PyClassImpl,
     types::{Constructor, IterNext, IterNextIterable},
-    PyContext, PyObjectRef, PyResult, PyValue, VirtualMachine,
+    Context, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 
 /// filter(function or None, iterable) --> filter object
@@ -17,7 +17,7 @@ pub struct PyFilter {
     iterator: PyIter,
 }
 
-impl PyValue for PyFilter {
+impl PyPayload for PyFilter {
     fn class(vm: &VirtualMachine) -> &PyTypeRef {
         &vm.ctx.types.filter_type
     }
@@ -31,7 +31,8 @@ impl Constructor for PyFilter {
             predicate: function,
             iterator,
         }
-        .into_pyresult_with_type(vm, cls)
+        .into_ref_with_type(vm, cls)
+        .map(Into::into)
     }
 }
 
@@ -40,7 +41,7 @@ impl PyFilter {}
 
 impl IterNextIterable for PyFilter {}
 impl IterNext for PyFilter {
-    fn next(zelf: &crate::PyObjectView<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn next(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         let predicate = &zelf.predicate;
         loop {
             let next_obj = match zelf.iterator.next(vm)? {
@@ -64,6 +65,6 @@ impl IterNext for PyFilter {
     }
 }
 
-pub fn init(context: &PyContext) {
+pub fn init(context: &Context) {
     PyFilter::extend_class(context, &context.types.filter_type);
 }
