@@ -386,6 +386,7 @@ fn create_settings(matches: &ArgMatches) -> Settings {
     }
 
     let mut dev_mode = false;
+    let mut warn_default_encoding = false;
     if let Some(xopts) = matches.values_of("implementation-option") {
         settings.xopts.extend(xopts.map(|s| {
             let mut parts = s.splitn(2, '=');
@@ -393,11 +394,19 @@ fn create_settings(matches: &ArgMatches) -> Settings {
             if name == "dev" {
                 dev_mode = true
             }
+            if name == "warn_default_encoding" {
+                warn_default_encoding = true
+            }
             let value = parts.next().map(ToOwned::to_owned);
             (name, value)
         }));
     }
     settings.dev_mode = dev_mode;
+    if warn_default_encoding
+        || (!ignore_environment && env::var_os("PYTHONWARNDEFAULTENCODING").is_some())
+    {
+        settings.warn_default_encoding = true;
+    }
 
     if dev_mode {
         settings.warnopts.push("default".to_owned())
@@ -637,13 +646,13 @@ fn run_module(vm: &VirtualMachine, module: &str) -> PyResult<()> {
 }
 
 fn get_importer(path: &str, vm: &VirtualMachine) -> PyResult<Option<PyObjectRef>> {
-    let path_importer_cache = vm.sys_module.clone().get_attr("path_importer_cache", vm)?;
+    let path_importer_cache = vm.sys_module.get_attr("path_importer_cache", vm)?;
     let path_importer_cache = PyDictRef::try_from_object(vm, path_importer_cache)?;
     if let Some(importer) = path_importer_cache.get_item_opt(path, vm)? {
         return Ok(Some(importer));
     }
     let path = vm.ctx.new_str(path);
-    let path_hooks = vm.sys_module.clone().get_attr("path_hooks", vm)?;
+    let path_hooks = vm.sys_module.get_attr("path_hooks", vm)?;
     let mut importer = None;
     let path_hooks: Vec<PyObjectRef> = path_hooks.try_into_value(vm)?;
     for path_hook in path_hooks {
@@ -665,7 +674,7 @@ fn get_importer(path: &str, vm: &VirtualMachine) -> PyResult<Option<PyObjectRef>
 }
 
 fn insert_sys_path(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<()> {
-    let sys_path = vm.sys_module.clone().get_attr("path", vm).unwrap();
+    let sys_path = vm.sys_module.get_attr("path", vm).unwrap();
     vm.call_method(&sys_path, "insert", (0, obj))?;
     Ok(())
 }

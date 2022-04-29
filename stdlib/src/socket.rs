@@ -14,9 +14,10 @@ mod _socket {
     use crate::vm::{
         builtins::{PyBaseExceptionRef, PyListRef, PyStrRef, PyTupleRef, PyTypeRef},
         convert::{ToPyException, ToPyObject, TryFromBorrowedObject, TryFromObject},
-        function::{ArgBytesLike, ArgMemoryBuffer, Either, FuncArgs, OptionalArg, OptionalOption},
+        function::{ArgBytesLike, ArgMemoryBuffer, Either, OptionalArg, OptionalOption},
+        types::{DefaultConstructor, Initializer},
         utils::ToCString,
-        AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
+        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
     use crossbeam_utils::atomic::AtomicCell;
     use num_traits::ToPrimitive;
@@ -541,20 +542,19 @@ mod _socket {
         }
     }
 
-    #[pyimpl(flags(BASETYPE))]
-    impl PySocket {
-        #[pyslot]
-        fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            Self::default().into_ref_with_type(vm, cls).map(Into::into)
-        }
+    impl DefaultConstructor for PySocket {}
 
-        #[pymethod(magic)]
+    impl Initializer for PySocket {
+        type Args = (
+            OptionalArg<i32>,
+            OptionalArg<i32>,
+            OptionalArg<i32>,
+            OptionalOption<PyObjectRef>,
+        );
+
         fn init(
-            &self,
-            family: OptionalArg<i32>,
-            socket_kind: OptionalArg<i32>,
-            proto: OptionalArg<i32>,
-            fileno: OptionalOption<PyObjectRef>,
+            zelf: PyRef<Self>,
+            (family, socket_kind, proto, fileno): Self::Args,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
             let mut family = family.unwrap_or(-1);
@@ -628,9 +628,12 @@ mod _socket {
                 )
                 .map_err(|err| err.to_pyexception(vm))?;
             };
-            self.init_inner(family, socket_kind, proto, sock, vm)
+            zelf.init_inner(family, socket_kind, proto, sock, vm)
         }
+    }
 
+    #[pyimpl(with(DefaultConstructor, Initializer), flags(BASETYPE))]
+    impl PySocket {
         #[pymethod]
         fn connect(&self, address: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             self.connect_inner(address, "connect", vm)
@@ -680,7 +683,7 @@ mod _socket {
             let mut buffer = Vec::with_capacity(bufsize);
             let sock = self.sock(vm)?;
             let n = self.sock_op(vm, SelectKind::Read, || {
-                sock.recv_with_flags(spare_capacity_mut(&mut buffer), flags)
+                sock.recv_with_flags(buffer.spare_capacity_mut(), flags)
             })?;
             unsafe { buffer.set_len(n) };
             Ok(buffer)
@@ -716,7 +719,7 @@ mod _socket {
             let mut buffer = Vec::with_capacity(bufsize);
             let (n, addr) = self.sock_op(vm, SelectKind::Read, || {
                 self.sock_io()?
-                    .recv_from_with_flags(spare_capacity_mut(&mut buffer), flags)
+                    .recv_from_with_flags(buffer.spare_capacity_mut(), flags)
             })?;
             unsafe { buffer.set_len(n) };
             Ok((buffer, get_addr_tuple(&addr, vm)))
@@ -1203,16 +1206,6 @@ mod _socket {
         Ok(s.to_string_lossy().into_owned())
     }
 
-    // TODO: use `Vec::spare_capacity_mut` once stable.
-    fn spare_capacity_mut<T>(v: &mut Vec<T>) -> &mut [MaybeUninit<T>] {
-        let (len, cap) = (v.len(), v.capacity());
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                v.as_mut_ptr().add(len) as *mut MaybeUninit<T>,
-                cap - len,
-            )
-        }
-    }
     fn slice_as_uninit<T>(v: &mut [T]) -> &mut [MaybeUninit<T>] {
         unsafe { &mut *(v as *mut [T] as *mut [MaybeUninit<T>]) }
     }
@@ -1664,7 +1657,9 @@ mod _socket {
                     netioapi::ConvertInterfaceLuidToNameW(luid, buf.as_mut_ptr(), buf.len())
                 };
                 if ret == 0 {
-                    Ok(widestring::WideCString::from_vec_with_nul(&buf[..]).unwrap())
+                    Ok(widestring::WideCString::from_ustr_truncate(
+                        widestring::WideStr::from_slice(&buf[..]),
+                    ))
                 } else {
                     Err(io::Error::from_raw_os_error(ret as i32))
                 }

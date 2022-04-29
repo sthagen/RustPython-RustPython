@@ -61,7 +61,7 @@ pub struct PyTypeSlots {
     pub descr_get: AtomicCell<Option<DescrGetFunc>>,
     pub descr_set: AtomicCell<Option<DescrSetFunc>>,
     // tp_dictoffset
-    // tp_init
+    pub init: AtomicCell<Option<InitFunc>>,
     // tp_alloc
     pub new: AtomicCell<Option<NewFunc>>,
     // tp_free
@@ -138,7 +138,7 @@ pub(crate) type GenericMethod = fn(&PyObject, FuncArgs, &VirtualMachine) -> PyRe
 pub(crate) type AsMappingFunc = fn(&PyObject, &VirtualMachine) -> PyMappingMethods;
 pub(crate) type HashFunc = fn(&PyObject, &VirtualMachine) -> PyResult<PyHash>;
 // CallFunc = GenericMethod
-pub(crate) type GetattroFunc = fn(PyObjectRef, PyStrRef, &VirtualMachine) -> PyResult;
+pub(crate) type GetattroFunc = fn(&PyObject, PyStrRef, &VirtualMachine) -> PyResult;
 pub(crate) type SetattroFunc =
     fn(&PyObject, PyStrRef, Option<PyObjectRef>, &VirtualMachine) -> PyResult<()>;
 pub(crate) type AsBufferFunc = fn(&PyObject, &VirtualMachine) -> PyResult<PyBuffer>;
@@ -155,6 +155,7 @@ pub(crate) type DescrGetFunc =
 pub(crate) type DescrSetFunc =
     fn(PyObjectRef, PyObjectRef, Option<PyObjectRef>, &VirtualMachine) -> PyResult<()>;
 pub(crate) type NewFunc = fn(PyTypeRef, FuncArgs, &VirtualMachine) -> PyResult;
+pub(crate) type InitFunc = fn(PyObjectRef, FuncArgs, &VirtualMachine) -> PyResult<()>;
 pub(crate) type DelFunc = fn(&PyObject, &VirtualMachine) -> PyResult<()>;
 pub(crate) type AsSequenceFunc = fn(&PyObject, &VirtualMachine) -> Cow<'static, PySequenceMethods>;
 
@@ -262,8 +263,8 @@ fn call_wrapper(zelf: &PyObject, args: FuncArgs, vm: &VirtualMachine) -> PyResul
     vm.call_special_method(zelf.to_owned(), "__call__", args)
 }
 
-fn getattro_wrapper(zelf: PyObjectRef, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-    vm.call_special_method(zelf, "__getattribute__", (name,))
+fn getattro_wrapper(zelf: &PyObject, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
+    vm.call_special_method(zelf.to_owned(), "__getattribute__", (name,))
 }
 
 fn setattro_wrapper(
@@ -324,6 +325,14 @@ fn descr_set_wrapper(
     .map(drop)
 }
 
+fn init_wrapper(obj: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+    let res = vm.call_special_method(obj, "__init__", args)?;
+    if !vm.is_none(&res) {
+        return Err(vm.new_type_error("__init__ must return None".to_owned()));
+    }
+    Ok(())
+}
+
 fn new_wrapper(cls: PyTypeRef, mut args: FuncArgs, vm: &VirtualMachine) -> PyResult {
     let new = vm
         .get_attribute_opt(cls.as_object().to_owned(), "__new__")?
@@ -379,6 +388,9 @@ impl PyType {
             "__set__" | "__delete__" => {
                 update_slot!(descr_set, descr_set_wrapper);
             }
+            "__init__" => {
+                update_slot!(init, init_wrapper);
+            }
             "__new__" => {
                 update_slot!(new, new_wrapper);
             }
@@ -404,6 +416,15 @@ pub trait Constructor: PyPayload {
     fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult;
 }
 
+#[pyimpl]
+pub trait DefaultConstructor: PyPayload + Default {
+    #[inline]
+    #[pyslot]
+    fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        Self::default().into_ref_with_type(vm, cls).map(Into::into)
+    }
+}
+
 /// For types that cannot be instantiated through Python code.
 pub trait Unconstructible: PyPayload {}
 
@@ -416,6 +437,27 @@ where
     fn py_new(cls: PyTypeRef, _args: Self::Args, vm: &VirtualMachine) -> PyResult {
         Err(vm.new_type_error(format!("cannot create {} instances", cls.slot_name())))
     }
+}
+
+#[pyimpl]
+pub trait Initializer: PyPayload {
+    type Args: FromArgs;
+
+    #[pyslot]
+    #[inline]
+    fn slot_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+        let zelf = zelf.try_into_value(vm)?;
+        let args: Self::Args = args.bind(vm)?;
+        Self::init(zelf, args, vm)
+    }
+
+    #[pymethod]
+    #[inline]
+    fn __init__(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
+        Self::init(zelf, args, vm)
+    }
+
+    fn init(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()>;
 }
 
 #[pyimpl]
@@ -749,21 +791,20 @@ impl PyComparisonOp {
 #[pyimpl]
 pub trait GetAttr: PyPayload {
     #[pyslot]
-    fn slot_getattro(obj: PyObjectRef, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        if let Ok(zelf) = obj.downcast::<Self>() {
+    fn slot_getattro(obj: &PyObject, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
+        if let Some(zelf) = obj.downcast_ref::<Self>() {
             Self::getattro(zelf, name, vm)
         } else {
             Err(vm.new_type_error("unexpected payload for __getattribute__".to_owned()))
         }
     }
 
-    // TODO: make zelf: &Py<Self>
-    fn getattro(zelf: PyRef<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult;
+    fn getattro(zelf: &Py<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult;
 
     #[inline]
     #[pymethod(magic)]
     fn getattribute(zelf: PyRef<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        Self::getattro(zelf, name, vm)
+        Self::getattro(&zelf, name, vm)
     }
 }
 

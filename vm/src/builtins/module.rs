@@ -1,8 +1,11 @@
 use super::pystr::IntoPyStrRef;
 use super::{PyDictRef, PyStr, PyStrRef, PyTypeRef};
 use crate::{
-    class::PyClassImpl, convert::ToPyObject, function::FuncArgs, types::GetAttr, AsObject, Context,
-    Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    class::PyClassImpl,
+    convert::ToPyObject,
+    function::FuncArgs,
+    types::{GetAttr, Initializer},
+    AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 #[pyclass(module = false, name = "module")]
@@ -16,13 +19,13 @@ impl PyPayload for PyModule {
 }
 
 #[derive(FromArgs)]
-struct ModuleInitArgs {
+pub struct ModuleInitArgs {
     name: PyStrRef,
     #[pyarg(any, default)]
     doc: Option<PyStrRef>,
 }
 
-#[pyimpl(with(GetAttr), flags(BASETYPE, HAS_DICT))]
+#[pyimpl(with(GetAttr, Initializer), flags(BASETYPE, HAS_DICT))]
 impl PyModule {
     // pub(crate) fn new(d: PyDictRef) -> Self {
     //     PyModule { dict: d.into() }
@@ -36,16 +39,6 @@ impl PyModule {
     #[pyslot]
     fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         PyModule {}.into_ref_with_type(vm, cls).map(Into::into)
-    }
-
-    #[pymethod(magic)]
-    fn init(zelf: PyRef<Self>, args: ModuleInitArgs, vm: &VirtualMachine) {
-        debug_assert!(zelf
-            .class()
-            .slots
-            .flags
-            .has_feature(crate::types::PyTypeFlags::HAS_DICT));
-        zelf.init_module_dict(args.name.into(), args.doc.to_pyobject(vm), vm);
     }
 
     fn getattr_inner(zelf: &Py<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
@@ -129,9 +122,23 @@ impl Py<PyModule> {
     }
 }
 
+impl Initializer for PyModule {
+    type Args = ModuleInitArgs;
+
+    fn init(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
+        debug_assert!(zelf
+            .class()
+            .slots
+            .flags
+            .has_feature(crate::types::PyTypeFlags::HAS_DICT));
+        zelf.init_module_dict(args.name.into(), args.doc.to_pyobject(vm), vm);
+        Ok(())
+    }
+}
+
 impl GetAttr for PyModule {
-    fn getattro(zelf: PyRef<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        Self::getattr_inner(&zelf, name, vm)
+    fn getattro(zelf: &Py<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
+        Self::getattr_inner(zelf, name, vm)
     }
 }
 

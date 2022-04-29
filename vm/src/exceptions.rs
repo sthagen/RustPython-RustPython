@@ -51,7 +51,7 @@ impl VirtualMachine {
                 let _ = self.write_exception(&mut py_io::IoWriter(io::stderr()), exc);
             }
         };
-        if let Ok(excepthook) = vm.sys_module.clone().get_attr("excepthook", vm) {
+        if let Ok(excepthook) = vm.sys_module.get_attr("excepthook", vm) {
             let (exc_type, exc_val, exc_tb) = vm.split_exception(exc.clone());
             if let Err(eh_exc) = vm.invoke(&excepthook, (exc_type, exc_val, exc_tb)) {
                 write_fallback(&eh_exc, "Error in sys.excepthook:");
@@ -431,8 +431,10 @@ impl PyBaseException {
             .map(Into::into)
     }
 
+    #[pyslot]
     #[pymethod(magic)]
-    pub(crate) fn init(zelf: PyRef<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+    pub(crate) fn init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+        let zelf: PyRef<Self> = zelf.try_into_value(vm)?;
         *zelf.args.write() = PyTuple::new_ref(args.args, &vm.ctx);
         Ok(())
     }
@@ -875,7 +877,7 @@ fn os_error_str(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyResult<PyStrR
         let errno = exc.get_arg(0).unwrap().str(vm)?;
         let msg = exc.get_arg(1).unwrap().str(vm)?;
 
-        let s = match obj.clone().get_attr("filename", vm) {
+        let s = match obj.get_attr("filename", vm) {
             Ok(filename) => match obj.get_attr("filename2", vm) {
                 Ok(filename2) => format!(
                     "[Errno {}] {}: '{}' -> '{}'",
@@ -1160,12 +1162,7 @@ pub(super) mod types {
         PyBaseException::slot_new(cls, args, vm)
     }
 
-    fn import_error_init(
-        zelf: PyRef<PyBaseException>,
-        args: FuncArgs,
-        vm: &VirtualMachine,
-    ) -> PyResult<()> {
-        let zelf: PyObjectRef = zelf.into();
+    fn import_error_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
         zelf.set_attr(
             "name",
             vm.unwrap_or_none(args.kwargs.get("name").cloned()),
@@ -1270,11 +1267,7 @@ pub(super) mod types {
         PyBaseException::slot_new(cls, args, vm)
     }
 
-    fn base_exception_init(
-        zelf: PyRef<PyBaseException>,
-        args: FuncArgs,
-        vm: &VirtualMachine,
-    ) -> PyResult<()> {
+    fn base_exception_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
         PyBaseException::init(zelf, args, vm)
     }
 

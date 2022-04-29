@@ -15,7 +15,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         .copied()
     {
         crate::vm::extend_module!(vm, &module, {
-            attr => ucd.clone().get_attr(attr, vm).unwrap(),
+            attr => ucd.get_attr(attr, vm).unwrap(),
         });
     }
 
@@ -101,12 +101,7 @@ mod unicodedata {
                     }
                 }
             }
-            match default {
-                OptionalArg::Present(obj) => Ok(obj),
-                OptionalArg::Missing => {
-                    Err(vm.new_value_error("character name not found!".to_owned()))
-                }
-            }
+            default.ok_or_else(|| vm.new_value_error("character name not found!".to_owned()))
         }
 
         #[pymethod]
