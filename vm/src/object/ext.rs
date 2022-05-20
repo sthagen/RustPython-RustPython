@@ -5,7 +5,7 @@ use super::{
 use crate::common::lock::PyRwLockReadGuard;
 use crate::{
     builtins::{PyBaseExceptionRef, PyType},
-    convert::{ToPyObject, ToPyResult, TryFromObject},
+    convert::{ToPyException, ToPyObject, ToPyResult, TryFromObject},
     VirtualMachine,
 };
 use std::{borrow::Borrow, fmt, ops::Deref};
@@ -58,7 +58,66 @@ where
     }
 }
 
+#[repr(transparent)]
+pub struct PyExact<T: PyObjectPayload> {
+    inner: Py<T>,
+}
+
+impl<T: PyPayload> PyExact<T> {
+    /// # Safety
+    /// Given reference must be exact type of payload T
+    #[inline(always)]
+    pub unsafe fn ref_unchecked(r: &Py<T>) -> &Self {
+        &*(r as *const _ as *const Self)
+    }
+}
+
+impl<T: PyPayload> Deref for PyExact<T> {
+    type Target = Py<T>;
+    #[inline(always)]
+    fn deref(&self) -> &Py<T> {
+        &self.inner
+    }
+}
+
+impl<T: PyObjectPayload> Borrow<PyObject> for PyExact<T> {
+    #[inline(always)]
+    fn borrow(&self) -> &PyObject {
+        self.inner.borrow()
+    }
+}
+
+impl<T: PyObjectPayload> AsRef<PyObject> for PyExact<T> {
+    #[inline(always)]
+    fn as_ref(&self) -> &PyObject {
+        self.inner.as_ref()
+    }
+}
+
+impl<T: PyObjectPayload> Borrow<Py<T>> for PyExact<T> {
+    #[inline(always)]
+    fn borrow(&self) -> &Py<T> {
+        &self.inner
+    }
+}
+
+impl<T: PyObjectPayload> AsRef<Py<T>> for PyExact<T> {
+    #[inline(always)]
+    fn as_ref(&self) -> &Py<T> {
+        &self.inner
+    }
+}
+
+impl<T: PyPayload> std::borrow::ToOwned for PyExact<T> {
+    type Owned = PyRefExact<T>;
+    fn to_owned(&self) -> Self::Owned {
+        let owned = self.inner.to_owned();
+        unsafe { PyRefExact::new_unchecked(owned) }
+    }
+}
+
 #[derive(Debug)]
+#[repr(transparent)]
 pub struct PyRefExact<T: PyObjectPayload> {
     inner: PyRef<T>,
 }
@@ -109,10 +168,31 @@ impl<T: PyPayload> TryFromObject for PyRefExact<T> {
 }
 
 impl<T: PyPayload> Deref for PyRefExact<T> {
-    type Target = PyRef<T>;
+    type Target = PyExact<T>;
     #[inline(always)]
-    fn deref(&self) -> &PyRef<T> {
-        &self.inner
+    fn deref(&self) -> &PyExact<T> {
+        unsafe { PyExact::ref_unchecked(self.inner.deref()) }
+    }
+}
+
+impl<T: PyObjectPayload> Borrow<PyObject> for PyRefExact<T> {
+    #[inline(always)]
+    fn borrow(&self) -> &PyObject {
+        self.inner.borrow()
+    }
+}
+
+impl<T: PyObjectPayload> AsRef<PyObject> for PyRefExact<T> {
+    #[inline(always)]
+    fn as_ref(&self) -> &PyObject {
+        self.inner.as_ref()
+    }
+}
+
+impl<T: PyObjectPayload> Borrow<Py<T>> for PyRefExact<T> {
+    #[inline(always)]
+    fn borrow(&self) -> &Py<T> {
+        self.inner.borrow()
     }
 }
 
@@ -120,6 +200,20 @@ impl<T: PyObjectPayload> AsRef<Py<T>> for PyRefExact<T> {
     #[inline(always)]
     fn as_ref(&self) -> &Py<T> {
         self.inner.as_ref()
+    }
+}
+
+impl<T: PyPayload> Borrow<PyExact<T>> for PyRefExact<T> {
+    #[inline(always)]
+    fn borrow(&self) -> &PyExact<T> {
+        self
+    }
+}
+
+impl<T: PyPayload> AsRef<PyExact<T>> for PyRefExact<T> {
+    #[inline(always)]
+    fn as_ref(&self) -> &PyExact<T> {
+        self
     }
 }
 
@@ -272,12 +366,21 @@ where
     }
 }
 
-impl<T> ToPyResult for PyResult<T>
+impl<T, E> ToPyResult for Result<T, E>
 where
     T: ToPyObject,
+    E: ToPyException,
 {
     #[inline(always)]
     fn to_pyresult(self, vm: &VirtualMachine) -> PyResult {
         self.map(|res| T::to_pyobject(res, vm))
+            .map_err(|e| E::to_pyexception(e, vm))
+    }
+}
+
+impl ToPyException for PyBaseExceptionRef {
+    #[inline(always)]
+    fn to_pyexception(self, _vm: &VirtualMachine) -> PyBaseExceptionRef {
+        self
     }
 }
