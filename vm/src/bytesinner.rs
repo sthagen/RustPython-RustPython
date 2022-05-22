@@ -202,9 +202,9 @@ impl ByteInnerPaddingOptions {
 #[derive(FromArgs)]
 pub struct ByteInnerTranslateOptions {
     #[pyarg(positional)]
-    table: Option<PyBytesInner>,
+    table: Option<PyObjectRef>,
     #[pyarg(any, optional)]
-    delete: OptionalArg<PyBytesInner>,
+    delete: OptionalArg<PyObjectRef>,
 }
 
 impl ByteInnerTranslateOptions {
@@ -212,17 +212,24 @@ impl ByteInnerTranslateOptions {
         let table = self.table.map_or_else(
             || Ok((0..=255).collect::<Vec<u8>>()),
             |v| {
-                if v.elements.len() != 256 {
-                    return Err(vm.new_value_error(
-                        "translation table must be 256 characters long".to_owned(),
-                    ));
-                }
-                Ok(v.elements.to_vec())
+                let bytes = v
+                    .try_into_value::<PyBytesInner>(vm)
+                    .ok()
+                    .filter(|v| v.elements.len() == 256)
+                    .ok_or_else(|| {
+                        vm.new_value_error(
+                            "translation table must be 256 characters long".to_owned(),
+                        )
+                    })?;
+                Ok(bytes.elements.to_vec())
             },
         )?;
 
         let delete = match self.delete {
-            OptionalArg::Present(byte) => byte.elements,
+            OptionalArg::Present(byte) => {
+                let byte: PyBytesInner = byte.try_into_value(vm)?;
+                byte.elements
+            }
             _ => vec![],
         };
 
@@ -1205,8 +1212,10 @@ pub fn bytes_from_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Vec<u8
         return Ok(elements);
     }
 
-    if let Ok(elements) = vm.map_iterable_object(obj, |x| value_from_object(vm, &x)) {
-        return elements;
+    if !obj.fast_isinstance(&vm.ctx.types.str_type) {
+        if let Ok(elements) = vm.map_iterable_object(obj, |x| value_from_object(vm, &x)) {
+            return elements;
+        }
     }
 
     Err(vm.new_type_error(
