@@ -3,6 +3,7 @@ use crate::{
     common::crt_fd::Fd,
     convert::{ToPyException, ToPyObject},
     function::{ArgumentError, FromArgs, FuncArgs},
+    identifier,
     protocol::PyBuffer,
     AsObject, PyObject, PyObjectRef, PyPayload, PyResult, TryFromBorrowedObject, TryFromObject,
     VirtualMachine,
@@ -137,12 +138,13 @@ impl FsPath {
             Ok(pathlike) => return Ok(pathlike),
             Err(obj) => obj,
         };
-        let method = vm.get_method_or_type_error(obj.clone(), "__fspath__", || {
-            format!(
-                "should be string, bytes, os.PathLike or integer, not {}",
-                obj.class().name()
-            )
-        })?;
+        let method =
+            vm.get_method_or_type_error(obj.clone(), identifier!(vm, __fspath__), || {
+                format!(
+                    "should be string, bytes, os.PathLike or integer, not {}",
+                    obj.class().name()
+                )
+            })?;
         let result = vm.invoke(&method, ())?;
         match1(result)?.map_err(|result| {
             vm.new_type_error(format!(
@@ -830,8 +832,8 @@ pub(super) mod _os {
             let name = match zelf.get_attr("name", vm) {
                 Ok(name) => Some(name),
                 Err(e)
-                    if e.fast_isinstance(&vm.ctx.exceptions.attribute_error)
-                        || e.fast_isinstance(&vm.ctx.exceptions.value_error) =>
+                    if e.fast_isinstance(vm.ctx.exceptions.attribute_error)
+                        || e.fast_isinstance(vm.ctx.exceptions.value_error) =>
                 {
                     None
                 }
@@ -1803,7 +1805,7 @@ pub fn extend_module(vm: &VirtualMachine, module: &PyObject) {
         "supports_fd" => supports_fd,
         "supports_dir_fd" => supports_dir_fd,
         "supports_follow_symlinks" => supports_follow_symlinks,
-        "error" => vm.ctx.exceptions.os_error.clone(),
+        "error" => vm.ctx.exceptions.os_error.to_owned(),
     });
 }
 pub(crate) use _os::os_open as open;

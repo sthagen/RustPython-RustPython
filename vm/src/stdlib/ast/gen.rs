@@ -14,15 +14,16 @@ struct NodeModule;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeModule {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("type_ignores")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Interactive", base = "NodeKindMod")]
@@ -30,12 +31,13 @@ struct NodeInteractive;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeInteractive {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("body")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("body")).into()])
+                .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Expression", base = "NodeKindMod")]
@@ -43,12 +45,13 @@ struct NodeExpression;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeExpression {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("body")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("body")).into()])
+                .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "FunctionType", base = "NodeKindMod")]
@@ -56,15 +59,16 @@ struct NodeFunctionType;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeFunctionType {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("argtypes")).into(),
                 ctx.new_str(ascii!("returns")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "stmt", base = "AstNode")]
@@ -76,9 +80,9 @@ struct NodeFunctionDef;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeFunctionDef {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("name")).into(),
                 ctx.new_str(ascii!("args")).into(),
@@ -86,16 +90,18 @@ impl NodeFunctionDef {
                 ctx.new_str(ascii!("decorator_list")).into(),
                 ctx.new_str(ascii!("returns")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -104,9 +110,9 @@ struct NodeAsyncFunctionDef;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAsyncFunctionDef {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("name")).into(),
                 ctx.new_str(ascii!("args")).into(),
@@ -114,16 +120,18 @@ impl NodeAsyncFunctionDef {
                 ctx.new_str(ascii!("decorator_list")).into(),
                 ctx.new_str(ascii!("returns")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -132,25 +140,27 @@ struct NodeClassDef;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeClassDef {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("name")).into(),
                 ctx.new_str(ascii!("bases")).into(),
                 ctx.new_str(ascii!("keywords")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("decorator_list")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -159,19 +169,21 @@ struct NodeReturn;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeReturn {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -180,19 +192,21 @@ struct NodeDelete;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeDelete {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("targets")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("targets")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -201,23 +215,25 @@ struct NodeAssign;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAssign {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("targets")).into(),
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -226,23 +242,25 @@ struct NodeAugAssign;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAugAssign {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("target")).into(),
                 ctx.new_str(ascii!("op")).into(),
                 ctx.new_str(ascii!("value")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -251,24 +269,26 @@ struct NodeAnnAssign;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAnnAssign {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("target")).into(),
                 ctx.new_str(ascii!("annotation")).into(),
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("simple")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -277,25 +297,27 @@ struct NodeFor;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeFor {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("target")).into(),
                 ctx.new_str(ascii!("iter")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("orelse")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -304,25 +326,27 @@ struct NodeAsyncFor;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAsyncFor {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("target")).into(),
                 ctx.new_str(ascii!("iter")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("orelse")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -331,23 +355,25 @@ struct NodeWhile;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeWhile {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("test")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("orelse")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -356,23 +382,25 @@ struct NodeIf;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeIf {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("test")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("orelse")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -381,23 +409,25 @@ struct NodeWith;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeWith {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("items")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -406,23 +436,25 @@ struct NodeAsyncWith;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAsyncWith {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("items")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -431,22 +463,24 @@ struct NodeRaise;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeRaise {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("exc")).into(),
                 ctx.new_str(ascii!("cause")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -455,24 +489,26 @@ struct NodeTry;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeTry {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("handlers")).into(),
                 ctx.new_str(ascii!("orelse")).into(),
                 ctx.new_str(ascii!("finalbody")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -481,22 +517,24 @@ struct NodeAssert;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAssert {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("test")).into(),
                 ctx.new_str(ascii!("msg")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -505,19 +543,21 @@ struct NodeImport;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeImport {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("names")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("names")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -526,23 +566,25 @@ struct NodeImportFrom;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeImportFrom {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("module")).into(),
                 ctx.new_str(ascii!("names")).into(),
                 ctx.new_str(ascii!("level")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -551,19 +593,21 @@ struct NodeGlobal;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeGlobal {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("names")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("names")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -572,19 +616,21 @@ struct NodeNonlocal;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeNonlocal {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("names")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("names")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -593,19 +639,21 @@ struct NodeExpr;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeExpr {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -614,16 +662,17 @@ struct NodePass;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodePass {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr(
-            "_attributes",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -632,16 +681,17 @@ struct NodeBreak;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeBreak {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr(
-            "_attributes",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -650,16 +700,17 @@ struct NodeContinue;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeContinue {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr(
-            "_attributes",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -672,22 +723,24 @@ struct NodeBoolOp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeBoolOp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("op")).into(),
                 ctx.new_str(ascii!("values")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -696,22 +749,24 @@ struct NodeNamedExpr;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeNamedExpr {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("target")).into(),
                 ctx.new_str(ascii!("value")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -720,23 +775,25 @@ struct NodeBinOp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeBinOp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("left")).into(),
                 ctx.new_str(ascii!("op")).into(),
                 ctx.new_str(ascii!("right")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -745,22 +802,24 @@ struct NodeUnaryOp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeUnaryOp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("op")).into(),
                 ctx.new_str(ascii!("operand")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -769,22 +828,24 @@ struct NodeLambda;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeLambda {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("args")).into(),
                 ctx.new_str(ascii!("body")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -793,23 +854,25 @@ struct NodeIfExp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeIfExp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("test")).into(),
                 ctx.new_str(ascii!("body")).into(),
                 ctx.new_str(ascii!("orelse")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -818,22 +881,24 @@ struct NodeDict;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeDict {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("keys")).into(),
                 ctx.new_str(ascii!("values")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -842,19 +907,21 @@ struct NodeSet;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeSet {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("elts")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("elts")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -863,22 +930,24 @@ struct NodeListComp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeListComp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("elt")).into(),
                 ctx.new_str(ascii!("generators")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -887,22 +956,24 @@ struct NodeSetComp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeSetComp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("elt")).into(),
                 ctx.new_str(ascii!("generators")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -911,23 +982,25 @@ struct NodeDictComp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeDictComp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("key")).into(),
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("generators")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -936,22 +1009,24 @@ struct NodeGeneratorExp;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeGeneratorExp {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("elt")).into(),
                 ctx.new_str(ascii!("generators")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -960,19 +1035,21 @@ struct NodeAwait;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAwait {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -981,19 +1058,21 @@ struct NodeYield;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeYield {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1002,19 +1081,21 @@ struct NodeYieldFrom;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeYieldFrom {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("value")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1023,23 +1104,25 @@ struct NodeCompare;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeCompare {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("left")).into(),
                 ctx.new_str(ascii!("ops")).into(),
                 ctx.new_str(ascii!("comparators")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1048,23 +1131,25 @@ struct NodeCall;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeCall {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("func")).into(),
                 ctx.new_str(ascii!("args")).into(),
                 ctx.new_str(ascii!("keywords")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1073,23 +1158,25 @@ struct NodeFormattedValue;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeFormattedValue {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("conversion")).into(),
                 ctx.new_str(ascii!("format_spec")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1098,19 +1185,21 @@ struct NodeJoinedStr;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeJoinedStr {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
-            ctx.new_list(vec![ctx.new_str(ascii!("values")).into()]),
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
+            ctx.new_list(vec![ctx.new_str(ascii!("values")).into()])
+                .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1119,22 +1208,24 @@ struct NodeConstant;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeConstant {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("kind")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1143,23 +1234,25 @@ struct NodeAttribute;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAttribute {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("attr")).into(),
                 ctx.new_str(ascii!("ctx")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1168,23 +1261,25 @@ struct NodeSubscript;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeSubscript {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("slice")).into(),
                 ctx.new_str(ascii!("ctx")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1193,22 +1288,24 @@ struct NodeStarred;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeStarred {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("value")).into(),
                 ctx.new_str(ascii!("ctx")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1217,22 +1314,24 @@ struct NodeName;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeName {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("id")).into(),
                 ctx.new_str(ascii!("ctx")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1241,22 +1340,24 @@ struct NodeList;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeList {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("elts")).into(),
                 ctx.new_str(ascii!("ctx")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1265,22 +1366,24 @@ struct NodeTuple;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeTuple {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("elts")).into(),
                 ctx.new_str(ascii!("ctx")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1289,23 +1392,25 @@ struct NodeSlice;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeSlice {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lower")).into(),
                 ctx.new_str(ascii!("upper")).into(),
                 ctx.new_str(ascii!("step")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1318,9 +1423,9 @@ struct NodeLoad;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeLoad {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Store", base = "NodeKindExprContext")]
@@ -1328,9 +1433,9 @@ struct NodeStore;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeStore {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Del", base = "NodeKindExprContext")]
@@ -1338,9 +1443,9 @@ struct NodeDel;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeDel {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "boolop", base = "AstNode")]
@@ -1352,9 +1457,9 @@ struct NodeAnd;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAnd {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Or", base = "NodeKindBoolop")]
@@ -1362,9 +1467,9 @@ struct NodeOr;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeOr {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "operator", base = "AstNode")]
@@ -1376,9 +1481,9 @@ struct NodeAdd;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeAdd {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Sub", base = "NodeKindOperator")]
@@ -1386,9 +1491,9 @@ struct NodeSub;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeSub {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Mult", base = "NodeKindOperator")]
@@ -1396,9 +1501,9 @@ struct NodeMult;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeMult {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "MatMult", base = "NodeKindOperator")]
@@ -1406,9 +1511,9 @@ struct NodeMatMult;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeMatMult {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Div", base = "NodeKindOperator")]
@@ -1416,9 +1521,9 @@ struct NodeDiv;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeDiv {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Mod", base = "NodeKindOperator")]
@@ -1426,9 +1531,9 @@ struct NodeMod;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeMod {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Pow", base = "NodeKindOperator")]
@@ -1436,9 +1541,9 @@ struct NodePow;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodePow {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "LShift", base = "NodeKindOperator")]
@@ -1446,9 +1551,9 @@ struct NodeLShift;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeLShift {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "RShift", base = "NodeKindOperator")]
@@ -1456,9 +1561,9 @@ struct NodeRShift;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeRShift {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "BitOr", base = "NodeKindOperator")]
@@ -1466,9 +1571,9 @@ struct NodeBitOr;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeBitOr {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "BitXor", base = "NodeKindOperator")]
@@ -1476,9 +1581,9 @@ struct NodeBitXor;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeBitXor {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "BitAnd", base = "NodeKindOperator")]
@@ -1486,9 +1591,9 @@ struct NodeBitAnd;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeBitAnd {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "FloorDiv", base = "NodeKindOperator")]
@@ -1496,9 +1601,9 @@ struct NodeFloorDiv;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeFloorDiv {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "unaryop", base = "AstNode")]
@@ -1510,9 +1615,9 @@ struct NodeInvert;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeInvert {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Not", base = "NodeKindUnaryop")]
@@ -1520,9 +1625,9 @@ struct NodeNot;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeNot {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "UAdd", base = "NodeKindUnaryop")]
@@ -1530,9 +1635,9 @@ struct NodeUAdd;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeUAdd {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "USub", base = "NodeKindUnaryop")]
@@ -1540,9 +1645,9 @@ struct NodeUSub;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeUSub {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "cmpop", base = "AstNode")]
@@ -1554,9 +1659,9 @@ struct NodeEq;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeEq {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "NotEq", base = "NodeKindCmpop")]
@@ -1564,9 +1669,9 @@ struct NodeNotEq;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeNotEq {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Lt", base = "NodeKindCmpop")]
@@ -1574,9 +1679,9 @@ struct NodeLt;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeLt {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "LtE", base = "NodeKindCmpop")]
@@ -1584,9 +1689,9 @@ struct NodeLtE;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeLtE {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Gt", base = "NodeKindCmpop")]
@@ -1594,9 +1699,9 @@ struct NodeGt;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeGt {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "GtE", base = "NodeKindCmpop")]
@@ -1604,9 +1709,9 @@ struct NodeGtE;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeGtE {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "Is", base = "NodeKindCmpop")]
@@ -1614,9 +1719,9 @@ struct NodeIs;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeIs {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "IsNot", base = "NodeKindCmpop")]
@@ -1624,9 +1729,9 @@ struct NodeIsNot;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeIsNot {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "In", base = "NodeKindCmpop")]
@@ -1634,9 +1739,9 @@ struct NodeIn;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeIn {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "NotIn", base = "NodeKindCmpop")]
@@ -1644,9 +1749,9 @@ struct NodeNotIn;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeNotIn {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr("_fields", ctx.new_list(vec![]));
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(identifier!(ctx, _fields), ctx.new_list(vec![]).into());
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "comprehension", base = "AstNode")]
@@ -1654,17 +1759,18 @@ struct Nodecomprehension;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl Nodecomprehension {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("target")).into(),
                 ctx.new_str(ascii!("iter")).into(),
                 ctx.new_str(ascii!("ifs")).into(),
                 ctx.new_str(ascii!("is_async")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "excepthandler", base = "AstNode")]
@@ -1680,23 +1786,25 @@ struct NodeExceptHandler;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeExceptHandler {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("type")).into(),
                 ctx.new_str(ascii!("name")).into(),
                 ctx.new_str(ascii!("body")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1705,9 +1813,9 @@ struct Nodearguments;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl Nodearguments {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("posonlyargs")).into(),
                 ctx.new_str(ascii!("args")).into(),
@@ -1716,9 +1824,10 @@ impl Nodearguments {
                 ctx.new_str(ascii!("kw_defaults")).into(),
                 ctx.new_str(ascii!("kwarg")).into(),
                 ctx.new_str(ascii!("defaults")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "arg", base = "AstNode")]
@@ -1726,23 +1835,25 @@ struct Nodearg;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl Nodearg {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("arg")).into(),
                 ctx.new_str(ascii!("annotation")).into(),
                 ctx.new_str(ascii!("type_comment")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1751,22 +1862,24 @@ struct Nodekeyword;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl Nodekeyword {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("arg")).into(),
                 ctx.new_str(ascii!("value")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr(
-            "_attributes",
+        class.set_attr(
+            identifier!(ctx, _attributes),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("col_offset")).into(),
                 ctx.new_str(ascii!("end_lineno")).into(),
                 ctx.new_str(ascii!("end_col_offset")).into(),
-            ]),
+            ])
+            .into(),
         );
     }
 }
@@ -1775,15 +1888,16 @@ struct Nodealias;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl Nodealias {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("name")).into(),
                 ctx.new_str(ascii!("asname")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "withitem", base = "AstNode")]
@@ -1791,15 +1905,16 @@ struct Nodewithitem;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl Nodewithitem {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("context_expr")).into(),
                 ctx.new_str(ascii!("optional_vars")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 #[pyclass(module = "_ast", name = "type_ignore", base = "AstNode")]
@@ -1811,15 +1926,16 @@ struct NodeTypeIgnore;
 #[pyimpl(flags(HAS_DICT, BASETYPE))]
 impl NodeTypeIgnore {
     #[extend_class]
-    fn extend_class_with_fields(ctx: &Context, class: &PyTypeRef) {
-        class.set_str_attr(
-            "_fields",
+    fn extend_class_with_fields(ctx: &Context, class: &'static Py<PyType>) {
+        class.set_attr(
+            identifier!(ctx, _fields),
             ctx.new_list(vec![
                 ctx.new_str(ascii!("lineno")).into(),
                 ctx.new_str(ascii!("tag")).into(),
-            ]),
+            ])
+            .into(),
         );
-        class.set_str_attr("_attributes", ctx.new_list(vec![]));
+        class.set_attr(identifier!(ctx, _attributes), ctx.new_list(vec![]).into());
     }
 }
 
@@ -1831,7 +1947,7 @@ impl Node for ast::Mod {
         match self {
             ast::Mod::Module { body, type_ignores } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeModule::static_type().clone())
+                    .into_ref_with_type(_vm, NodeModule::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -1844,7 +1960,7 @@ impl Node for ast::Mod {
             }
             ast::Mod::Interactive { body } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeInteractive::static_type().clone())
+                    .into_ref_with_type(_vm, NodeInteractive::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -1854,7 +1970,7 @@ impl Node for ast::Mod {
             }
             ast::Mod::Expression { body } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeExpression::static_type().clone())
+                    .into_ref_with_type(_vm, NodeExpression::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -1864,7 +1980,7 @@ impl Node for ast::Mod {
             }
             ast::Mod::FunctionType { argtypes, returns } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeFunctionType::static_type().clone())
+                    .into_ref_with_type(_vm, NodeFunctionType::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -1929,7 +2045,7 @@ impl Node for ast::StmtKind {
                 type_comment,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeFunctionDef::static_type().clone())
+                    .into_ref_with_type(_vm, NodeFunctionDef::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -1961,7 +2077,7 @@ impl Node for ast::StmtKind {
                 type_comment,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAsyncFunctionDef::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAsyncFunctionDef::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -1992,7 +2108,7 @@ impl Node for ast::StmtKind {
                 decorator_list,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeClassDef::static_type().clone())
+                    .into_ref_with_type(_vm, NodeClassDef::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2014,7 +2130,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Return { value } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeReturn::static_type().clone())
+                    .into_ref_with_type(_vm, NodeReturn::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2024,7 +2140,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Delete { targets } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeDelete::static_type().clone())
+                    .into_ref_with_type(_vm, NodeDelete::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2038,7 +2154,7 @@ impl Node for ast::StmtKind {
                 type_comment,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAssign::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAssign::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2054,7 +2170,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::AugAssign { target, op, value } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAugAssign::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAugAssign::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2073,7 +2189,7 @@ impl Node for ast::StmtKind {
                 simple,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAnnAssign::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAnnAssign::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2098,7 +2214,7 @@ impl Node for ast::StmtKind {
                 type_comment,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeFor::static_type().clone())
+                    .into_ref_with_type(_vm, NodeFor::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2126,7 +2242,7 @@ impl Node for ast::StmtKind {
                 type_comment,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAsyncFor::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAsyncFor::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2148,7 +2264,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::While { test, body, orelse } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeWhile::static_type().clone())
+                    .into_ref_with_type(_vm, NodeWhile::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2164,7 +2280,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::If { test, body, orelse } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeIf::static_type().clone())
+                    .into_ref_with_type(_vm, NodeIf::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2184,7 +2300,7 @@ impl Node for ast::StmtKind {
                 type_comment,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeWith::static_type().clone())
+                    .into_ref_with_type(_vm, NodeWith::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2204,7 +2320,7 @@ impl Node for ast::StmtKind {
                 type_comment,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAsyncWith::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAsyncWith::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2220,7 +2336,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Raise { exc, cause } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeRaise::static_type().clone())
+                    .into_ref_with_type(_vm, NodeRaise::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("exc", exc.ast_to_object(_vm), _vm).unwrap();
@@ -2236,7 +2352,7 @@ impl Node for ast::StmtKind {
                 finalbody,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeTry::static_type().clone())
+                    .into_ref_with_type(_vm, NodeTry::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2255,7 +2371,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Assert { test, msg } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAssert::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAssert::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2266,7 +2382,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Import { names } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeImport::static_type().clone())
+                    .into_ref_with_type(_vm, NodeImport::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2280,7 +2396,7 @@ impl Node for ast::StmtKind {
                 level,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeImportFrom::static_type().clone())
+                    .into_ref_with_type(_vm, NodeImportFrom::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2296,7 +2412,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Global { names } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeGlobal::static_type().clone())
+                    .into_ref_with_type(_vm, NodeGlobal::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2306,7 +2422,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Nonlocal { names } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeNonlocal::static_type().clone())
+                    .into_ref_with_type(_vm, NodeNonlocal::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2316,7 +2432,7 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Expr { value } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeExpr::static_type().clone())
+                    .into_ref_with_type(_vm, NodeExpr::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2326,19 +2442,19 @@ impl Node for ast::StmtKind {
             }
             ast::StmtKind::Pass {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodePass::static_type().clone())
+                    .into_ref_with_type(_vm, NodePass::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::StmtKind::Break {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeBreak::static_type().clone())
+                    .into_ref_with_type(_vm, NodeBreak::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::StmtKind::Continue {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeContinue::static_type().clone())
+                    .into_ref_with_type(_vm, NodeContinue::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
@@ -2591,7 +2707,7 @@ impl Node for ast::ExprKind {
         match self {
             ast::ExprKind::BoolOp { op, values } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeBoolOp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeBoolOp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("op", op.ast_to_object(_vm), _vm).unwrap();
@@ -2602,7 +2718,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::NamedExpr { target, value } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeNamedExpr::static_type().clone())
+                    .into_ref_with_type(_vm, NodeNamedExpr::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2615,7 +2731,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::BinOp { left, op, right } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeBinOp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeBinOp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2629,7 +2745,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::UnaryOp { op, operand } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeUnaryOp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeUnaryOp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("op", op.ast_to_object(_vm), _vm).unwrap();
@@ -2640,7 +2756,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Lambda { args, body } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeLambda::static_type().clone())
+                    .into_ref_with_type(_vm, NodeLambda::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2653,7 +2769,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::IfExp { test, body, orelse } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeIfExp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeIfExp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2669,7 +2785,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Dict { keys, values } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeDict::static_type().clone())
+                    .into_ref_with_type(_vm, NodeDict::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2682,7 +2798,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Set { elts } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeSet::static_type().clone())
+                    .into_ref_with_type(_vm, NodeSet::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2692,7 +2808,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::ListComp { elt, generators } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeListComp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeListComp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("elt", elt.ast_to_object(_vm), _vm).unwrap();
@@ -2703,7 +2819,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::SetComp { elt, generators } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeSetComp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeSetComp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("elt", elt.ast_to_object(_vm), _vm).unwrap();
@@ -2718,7 +2834,7 @@ impl Node for ast::ExprKind {
                 generators,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeDictComp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeDictComp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("key", key.ast_to_object(_vm), _vm).unwrap();
@@ -2732,7 +2848,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::GeneratorExp { elt, generators } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeGeneratorExp::static_type().clone())
+                    .into_ref_with_type(_vm, NodeGeneratorExp::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("elt", elt.ast_to_object(_vm), _vm).unwrap();
@@ -2743,7 +2859,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Await { value } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAwait::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAwait::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2753,7 +2869,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Yield { value } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeYield::static_type().clone())
+                    .into_ref_with_type(_vm, NodeYield::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2763,7 +2879,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::YieldFrom { value } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeYieldFrom::static_type().clone())
+                    .into_ref_with_type(_vm, NodeYieldFrom::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2777,7 +2893,7 @@ impl Node for ast::ExprKind {
                 comparators,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeCompare::static_type().clone())
+                    .into_ref_with_type(_vm, NodeCompare::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2795,7 +2911,7 @@ impl Node for ast::ExprKind {
                 keywords,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeCall::static_type().clone())
+                    .into_ref_with_type(_vm, NodeCall::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2815,7 +2931,7 @@ impl Node for ast::ExprKind {
                 format_spec,
             } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeFormattedValue::static_type().clone())
+                    .into_ref_with_type(_vm, NodeFormattedValue::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2831,7 +2947,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::JoinedStr { values } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeJoinedStr::static_type().clone())
+                    .into_ref_with_type(_vm, NodeJoinedStr::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2841,7 +2957,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Constant { value, kind } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeConstant::static_type().clone())
+                    .into_ref_with_type(_vm, NodeConstant::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2854,7 +2970,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Attribute { value, attr, ctx } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAttribute::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAttribute::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2868,7 +2984,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Subscript { value, slice, ctx } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeSubscript::static_type().clone())
+                    .into_ref_with_type(_vm, NodeSubscript::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2882,7 +2998,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Starred { value, ctx } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeStarred::static_type().clone())
+                    .into_ref_with_type(_vm, NodeStarred::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2893,7 +3009,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Name { id, ctx } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeName::static_type().clone())
+                    .into_ref_with_type(_vm, NodeName::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict.set_item("id", id.ast_to_object(_vm), _vm).unwrap();
@@ -2902,7 +3018,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::List { elts, ctx } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeList::static_type().clone())
+                    .into_ref_with_type(_vm, NodeList::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2913,7 +3029,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Tuple { elts, ctx } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeTuple::static_type().clone())
+                    .into_ref_with_type(_vm, NodeTuple::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -2924,7 +3040,7 @@ impl Node for ast::ExprKind {
             }
             ast::ExprKind::Slice { lower, upper, step } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeSlice::static_type().clone())
+                    .into_ref_with_type(_vm, NodeSlice::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -3151,19 +3267,19 @@ impl Node for ast::ExprContext {
         match self {
             ast::ExprContext::Load {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeLoad::static_type().clone())
+                    .into_ref_with_type(_vm, NodeLoad::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::ExprContext::Store {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeStore::static_type().clone())
+                    .into_ref_with_type(_vm, NodeStore::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::ExprContext::Del {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeDel::static_type().clone())
+                    .into_ref_with_type(_vm, NodeDel::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
@@ -3193,13 +3309,13 @@ impl Node for ast::Boolop {
         match self {
             ast::Boolop::And {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAnd::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAnd::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Boolop::Or {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeOr::static_type().clone())
+                    .into_ref_with_type(_vm, NodeOr::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
@@ -3227,79 +3343,79 @@ impl Node for ast::Operator {
         match self {
             ast::Operator::Add {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeAdd::static_type().clone())
+                    .into_ref_with_type(_vm, NodeAdd::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::Sub {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeSub::static_type().clone())
+                    .into_ref_with_type(_vm, NodeSub::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::Mult {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeMult::static_type().clone())
+                    .into_ref_with_type(_vm, NodeMult::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::MatMult {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeMatMult::static_type().clone())
+                    .into_ref_with_type(_vm, NodeMatMult::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::Div {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeDiv::static_type().clone())
+                    .into_ref_with_type(_vm, NodeDiv::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::Mod {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeMod::static_type().clone())
+                    .into_ref_with_type(_vm, NodeMod::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::Pow {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodePow::static_type().clone())
+                    .into_ref_with_type(_vm, NodePow::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::LShift {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeLShift::static_type().clone())
+                    .into_ref_with_type(_vm, NodeLShift::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::RShift {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeRShift::static_type().clone())
+                    .into_ref_with_type(_vm, NodeRShift::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::BitOr {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeBitOr::static_type().clone())
+                    .into_ref_with_type(_vm, NodeBitOr::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::BitXor {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeBitXor::static_type().clone())
+                    .into_ref_with_type(_vm, NodeBitXor::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::BitAnd {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeBitAnd::static_type().clone())
+                    .into_ref_with_type(_vm, NodeBitAnd::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Operator::FloorDiv {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeFloorDiv::static_type().clone())
+                    .into_ref_with_type(_vm, NodeFloorDiv::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
@@ -3349,25 +3465,25 @@ impl Node for ast::Unaryop {
         match self {
             ast::Unaryop::Invert {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeInvert::static_type().clone())
+                    .into_ref_with_type(_vm, NodeInvert::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Unaryop::Not {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeNot::static_type().clone())
+                    .into_ref_with_type(_vm, NodeNot::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Unaryop::UAdd {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeUAdd::static_type().clone())
+                    .into_ref_with_type(_vm, NodeUAdd::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Unaryop::USub {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeUSub::static_type().clone())
+                    .into_ref_with_type(_vm, NodeUSub::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
@@ -3399,61 +3515,61 @@ impl Node for ast::Cmpop {
         match self {
             ast::Cmpop::Eq {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeEq::static_type().clone())
+                    .into_ref_with_type(_vm, NodeEq::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::NotEq {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeNotEq::static_type().clone())
+                    .into_ref_with_type(_vm, NodeNotEq::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::Lt {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeLt::static_type().clone())
+                    .into_ref_with_type(_vm, NodeLt::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::LtE {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeLtE::static_type().clone())
+                    .into_ref_with_type(_vm, NodeLtE::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::Gt {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeGt::static_type().clone())
+                    .into_ref_with_type(_vm, NodeGt::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::GtE {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeGtE::static_type().clone())
+                    .into_ref_with_type(_vm, NodeGtE::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::Is {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeIs::static_type().clone())
+                    .into_ref_with_type(_vm, NodeIs::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::IsNot {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeIsNot::static_type().clone())
+                    .into_ref_with_type(_vm, NodeIsNot::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::In {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeIn::static_type().clone())
+                    .into_ref_with_type(_vm, NodeIn::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
             ast::Cmpop::NotIn {} => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeNotIn::static_type().clone())
+                    .into_ref_with_type(_vm, NodeNotIn::static_type().to_owned())
                     .unwrap();
                 _node.into()
             }
@@ -3501,7 +3617,7 @@ impl Node for ast::Comprehension {
             is_async,
         } = self;
         let _node = AstNode
-            .into_ref_with_type(_vm, Nodecomprehension::static_type().clone())
+            .into_ref_with_type(_vm, Nodecomprehension::static_type().to_owned())
             .unwrap();
         let _dict = _node.as_object().dict().unwrap();
         _dict
@@ -3545,7 +3661,7 @@ impl Node for ast::ExcepthandlerKind {
         match self {
             ast::ExcepthandlerKind::ExceptHandler { type_, name, body } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeExceptHandler::static_type().clone())
+                    .into_ref_with_type(_vm, NodeExceptHandler::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict
@@ -3609,7 +3725,7 @@ impl Node for ast::Arguments {
             defaults,
         } = self;
         let _node = AstNode
-            .into_ref_with_type(_vm, Nodearguments::static_type().clone())
+            .into_ref_with_type(_vm, Nodearguments::static_type().to_owned())
             .unwrap();
         let _dict = _node.as_object().dict().unwrap();
         _dict
@@ -3674,7 +3790,7 @@ impl Node for ast::ArgData {
             type_comment,
         } = self;
         let _node = AstNode
-            .into_ref_with_type(_vm, Nodearg::static_type().clone())
+            .into_ref_with_type(_vm, Nodearg::static_type().to_owned())
             .unwrap();
         let _dict = _node.as_object().dict().unwrap();
         _dict.set_item("arg", arg.ast_to_object(_vm), _vm).unwrap();
@@ -3709,7 +3825,7 @@ impl Node for ast::KeywordData {
     fn ast_to_object(self, _vm: &VirtualMachine) -> PyObjectRef {
         let ast::KeywordData { arg, value } = self;
         let _node = AstNode
-            .into_ref_with_type(_vm, Nodekeyword::static_type().clone())
+            .into_ref_with_type(_vm, Nodekeyword::static_type().to_owned())
             .unwrap();
         let _dict = _node.as_object().dict().unwrap();
         _dict.set_item("arg", arg.ast_to_object(_vm), _vm).unwrap();
@@ -3738,7 +3854,7 @@ impl Node for ast::Alias {
     fn ast_to_object(self, _vm: &VirtualMachine) -> PyObjectRef {
         let ast::Alias { name, asname } = self;
         let _node = AstNode
-            .into_ref_with_type(_vm, Nodealias::static_type().clone())
+            .into_ref_with_type(_vm, Nodealias::static_type().to_owned())
             .unwrap();
         let _dict = _node.as_object().dict().unwrap();
         _dict
@@ -3768,7 +3884,7 @@ impl Node for ast::Withitem {
             optional_vars,
         } = self;
         let _node = AstNode
-            .into_ref_with_type(_vm, Nodewithitem::static_type().clone())
+            .into_ref_with_type(_vm, Nodewithitem::static_type().to_owned())
             .unwrap();
         let _dict = _node.as_object().dict().unwrap();
         _dict
@@ -3799,7 +3915,7 @@ impl Node for ast::TypeIgnore {
         match self {
             ast::TypeIgnore::TypeIgnore { lineno, tag } => {
                 let _node = AstNode
-                    .into_ref_with_type(_vm, NodeTypeIgnore::static_type().clone())
+                    .into_ref_with_type(_vm, NodeTypeIgnore::static_type().to_owned())
                     .unwrap();
                 let _dict = _node.as_object().dict().unwrap();
                 _dict

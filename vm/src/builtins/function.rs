@@ -3,7 +3,7 @@ mod jitfunc;
 
 use super::{
     tuple::PyTupleTyped, PyAsyncGen, PyCode, PyCoroutine, PyDictRef, PyGenerator, PyStr, PyStrRef,
-    PyTupleRef, PyTypeRef,
+    PyTupleRef, PyType, PyTypeRef,
 };
 use crate::common::lock::PyMutex;
 use crate::function::ArgMapping;
@@ -42,7 +42,7 @@ impl PyFunction {
         defaults: Option<PyTupleRef>,
         kw_only_defaults: Option<PyDictRef>,
     ) -> Self {
-        let name = PyMutex::new(code.obj_name.clone());
+        let name = PyMutex::new(code.obj_name.to_owned());
         PyFunction {
             code,
             globals,
@@ -322,8 +322,8 @@ impl PyFunction {
 }
 
 impl PyPayload for PyFunction {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.function_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.function_type
     }
 }
 
@@ -458,7 +458,10 @@ impl Comparable for PyBoundMethod {
 
 impl GetAttr for PyBoundMethod {
     fn getattro(zelf: &Py<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        let class_attr = zelf.get_class_attr(name.as_str());
+        let class_attr = vm
+            .ctx
+            .interned_str(&*name)
+            .and_then(|attr_name| zelf.get_class_attr(attr_name));
         if let Some(obj) = class_attr {
             return vm.call_if_get_descriptor(obj, zelf.to_owned().into());
         }
@@ -496,7 +499,7 @@ impl PyBoundMethod {
     pub fn new_ref(object: PyObjectRef, function: PyObjectRef, ctx: &Context) -> PyRef<Self> {
         PyRef::new_ref(
             Self::new(object, function),
-            ctx.types.bound_method_type.clone(),
+            ctx.types.bound_method_type.to_owned(),
             None,
         )
     }
@@ -545,7 +548,7 @@ impl PyBoundMethod {
     fn qualname(&self, vm: &VirtualMachine) -> PyResult {
         if self
             .function
-            .fast_isinstance(&vm.ctx.types.builtin_function_or_method_type)
+            .fast_isinstance(vm.ctx.types.builtin_function_or_method_type)
         {
             // Special case: we work with `__new__`, which is not really a method.
             // It is a function, so its `__qualname__` is just `__new__`.
@@ -565,8 +568,8 @@ impl PyBoundMethod {
 }
 
 impl PyPayload for PyBoundMethod {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.bound_method_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.bound_method_type
     }
 }
 
@@ -578,8 +581,8 @@ pub(crate) struct PyCell {
 pub(crate) type PyCellRef = PyRef<PyCell>;
 
 impl PyPayload for PyCell {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.cell_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.cell_type
     }
 }
 
@@ -624,7 +627,7 @@ impl PyCell {
 }
 
 pub fn init(context: &Context) {
-    PyFunction::extend_class(context, &context.types.function_type);
-    PyBoundMethod::extend_class(context, &context.types.bound_method_type);
-    PyCell::extend_class(context, &context.types.cell_type);
+    PyFunction::extend_class(context, context.types.function_type);
+    PyBoundMethod::extend_class(context, context.types.bound_method_type);
+    PyCell::extend_class(context, context.types.cell_type);
 }

@@ -1,4 +1,4 @@
-use super::{float, PyStr, PyTypeRef};
+use super::{float, PyStr, PyType, PyTypeRef};
 use crate::{
     class::PyClassImpl,
     convert::ToPyObject,
@@ -7,8 +7,9 @@ use crate::{
         PyArithmeticValue::{self, *},
         PyComparisonValue,
     },
+    identifier,
     types::{Comparable, Constructor, Hashable, PyComparisonOp},
-    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 use num_complex::Complex64;
 use num_traits::Zero;
@@ -24,8 +25,8 @@ pub struct PyComplex {
 }
 
 impl PyPayload for PyComplex {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.complex_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.complex_type
     }
 }
 
@@ -48,7 +49,7 @@ impl PyObjectRef {
         if let Some(complex) = self.payload_if_exact::<PyComplex>(vm) {
             return Ok(Some((complex.value, true)));
         }
-        if let Some(method) = vm.get_method(self.clone(), "__complex__") {
+        if let Some(method) = vm.get_method(self.clone(), identifier!(vm, __complex__)) {
             let result = vm.invoke(&method?, ())?;
             // TODO: returning strict subclasses of complex in __complex__ is deprecated
             return match result.payload::<PyComplex>() {
@@ -72,7 +73,7 @@ impl PyObjectRef {
 }
 
 pub fn init(context: &Context) {
-    PyComplex::extend_class(context, &context.types.complex_type);
+    PyComplex::extend_class(context, context.types.complex_type);
 }
 
 fn to_op_complex(value: &PyObject, vm: &VirtualMachine) -> PyResult<Option<Complex64>> {
@@ -120,7 +121,7 @@ impl Constructor for PyComplex {
         let (real, real_was_complex) = match args.real {
             OptionalArg::Missing => (Complex64::new(0.0, 0.0), false),
             OptionalArg::Present(val) => {
-                let val = if cls.is(&vm.ctx.types.complex_type) && imag_missing {
+                let val = if cls.is(vm.ctx.types.complex_type) && imag_missing {
                     match val.downcast_exact::<PyComplex>(vm) {
                         Ok(c) => {
                             return Ok(c.into());
@@ -161,7 +162,7 @@ impl Constructor for PyComplex {
             OptionalArg::Present(obj) => {
                 if let Some(c) = obj.try_complex(vm)? {
                     c
-                } else if obj.class().fast_issubclass(&vm.ctx.types.str_type) {
+                } else if obj.class().fast_issubclass(vm.ctx.types.str_type) {
                     return Err(
                         vm.new_type_error("complex() second arg can't be a string".to_owned())
                     );
@@ -194,7 +195,7 @@ impl Constructor for PyComplex {
 
 impl PyComplex {
     pub fn new_ref(value: Complex64, ctx: &Context) -> PyRef<Self> {
-        PyRef::new_ref(Self::from(value), ctx.types.complex_type.clone(), None)
+        PyRef::new_ref(Self::from(value), ctx.types.complex_type.to_owned(), None)
     }
 
     pub fn to_complex(&self) -> Complex64 {
@@ -206,7 +207,7 @@ impl PyComplex {
 impl PyComplex {
     #[pymethod(magic)]
     fn complex(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyRef<PyComplex> {
-        if zelf.is(&vm.ctx.types.complex_type) {
+        if zelf.is(vm.ctx.types.complex_type) {
             zelf
         } else {
             PyComplex::from(zelf.value).into_ref(vm)

@@ -31,7 +31,7 @@ pub(crate) mod _thread {
 
     #[pyattr]
     fn error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx.exceptions.runtime_error.clone()
+        vm.ctx.exceptions.runtime_error.to_owned()
     }
 
     #[derive(FromArgs)]
@@ -245,8 +245,9 @@ pub(crate) mod _thread {
         let args = FuncArgs::new(
             args.to_vec(),
             kwargs
-                .map_or_else(Default::default, |k| k.to_attributes())
+                .map_or_else(Default::default, |k| k.to_attributes(vm))
                 .into_iter()
+                .map(|(k, v)| (k.as_str().to_owned(), v))
                 .collect::<KwArgs>(),
         );
         let mut thread_builder = thread::Builder::new();
@@ -269,7 +270,7 @@ pub(crate) mod _thread {
     fn run_thread(func: ArgCallable, args: FuncArgs, vm: &VirtualMachine) {
         match func.invoke(args, vm) {
             Ok(_obj) => {}
-            Err(e) if e.fast_isinstance(&vm.ctx.exceptions.system_exit) => {}
+            Err(e) if e.fast_isinstance(vm.ctx.exceptions.system_exit) => {}
             Err(exc) => {
                 vm.run_unraisable(
                     exc,
@@ -290,7 +291,7 @@ pub(crate) mod _thread {
 
     #[pyfunction]
     fn exit(vm: &VirtualMachine) -> PyResult {
-        Err(vm.new_exception_empty(vm.ctx.exceptions.system_exit.clone()))
+        Err(vm.new_exception_empty(vm.ctx.exceptions.system_exit.to_owned()))
     }
 
     thread_local!(static SENTINELS: RefCell<Vec<PyRef<Lock>>> = RefCell::default());

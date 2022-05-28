@@ -683,7 +683,7 @@ mod array {
         fn typecode(&self, vm: &VirtualMachine) -> PyStrRef {
             vm.ctx
                 .intern_str(self.read().typecode().to_string())
-                .to_str()
+                .to_owned()
         }
 
         #[pyproperty]
@@ -843,7 +843,7 @@ mod array {
 
             if not_enough_bytes {
                 Err(vm.new_exception_msg(
-                    vm.ctx.exceptions.eof_error.clone(),
+                    vm.ctx.exceptions.eof_error.to_owned(),
                     "read() didn't return enough bytes".to_owned(),
                 ))
             } else {

@@ -53,14 +53,14 @@ impl fmt::Debug for PyDict {
 }
 
 impl PyPayload for PyDict {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.dict_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.dict_type
     }
 }
 
 impl PyDict {
     pub fn new_ref(ctx: &Context) -> PyRef<Self> {
-        PyRef::new_ref(Self::default(), ctx.types.dict_type.clone(), None)
+        PyRef::new_ref(Self::default(), ctx.types.dict_type.to_owned(), None)
     }
 
     /// escape hatch to access the underlying data structure directly. prefer adding a method on
@@ -83,7 +83,7 @@ impl PyDict {
             Ok(dict_other) => return Self::merge_dict(dict, dict_other, vm),
             Err(other) => other,
         };
-        if let Some(keys) = vm.get_method(other.clone(), "keys") {
+        if let Some(keys) = vm.get_method(other.clone(), vm.ctx.intern_str("keys")) {
             let keys = vm.invoke(&keys?, ())?.get_iter(vm)?;
             while let PyIterReturn::Return(key) = keys.next(vm)? {
                 let val = other.get_item(&*key, vm)?;
@@ -196,13 +196,13 @@ impl PyDict {
     }
 
     pub fn from_attributes(attrs: PyAttributes, vm: &VirtualMachine) -> PyResult<Self> {
-        let dict = DictContentType::default();
+        let entries = DictContentType::default();
 
         for (key, value) in attrs {
-            dict.insert(vm, key.as_str(), value)?;
+            entries.insert(vm, key, value)?;
         }
 
-        Ok(PyDict { entries: dict })
+        Ok(Self { entries })
     }
 
     pub fn contains_key<K: DictKey + ?Sized>(&self, key: &K, vm: &VirtualMachine) -> bool {
@@ -519,7 +519,7 @@ impl Iterable for PyDict {
 impl Py<PyDict> {
     #[inline]
     fn exact_dict(&self, vm: &VirtualMachine) -> bool {
-        self.class().is(&vm.ctx.types.dict_type)
+        self.class().is(vm.ctx.types.dict_type)
     }
 
     fn missing_opt<K: DictKey + ?Sized>(
@@ -527,7 +527,7 @@ impl Py<PyDict> {
         key: &K,
         vm: &VirtualMachine,
     ) -> PyResult<Option<PyObjectRef>> {
-        vm.get_method(self.to_owned().into(), "__missing__")
+        vm.get_method(self.to_owned().into(), identifier!(vm, __missing__))
             .map(|methods| vm.invoke(&methods?, (key.to_pyobject(vm),)))
             .transpose()
     }
@@ -548,11 +548,12 @@ impl Py<PyDict> {
     }
 
     /// Take a python dictionary and convert it to attributes.
-    pub fn to_attributes(&self) -> PyAttributes {
+    pub fn to_attributes(&self, vm: &VirtualMachine) -> PyAttributes {
         let mut attrs = PyAttributes::default();
         for (key, value) in self {
+            // TODO: use PyRefExact for interning
             let key: PyStrRef = key.downcast().expect("dict has non-string keys");
-            attrs.insert(key.as_str().to_owned(), value);
+            attrs.insert(vm.ctx.intern_str(key.as_str()), value);
         }
         attrs
     }
@@ -568,7 +569,7 @@ impl Py<PyDict> {
         } else {
             match self.as_object().get_item(key, vm) {
                 Ok(value) => Ok(Some(value)),
-                Err(e) if e.fast_isinstance(&vm.ctx.exceptions.key_error) => {
+                Err(e) if e.fast_isinstance(vm.ctx.exceptions.key_error) => {
                     self.missing_opt(key, vm)
                 }
                 Err(e) => Err(e),
@@ -748,8 +749,8 @@ macro_rules! dict_view {
         }
 
         impl PyPayload for $name {
-            fn class(vm: &VirtualMachine) -> &PyTypeRef {
-                &vm.ctx.types.$class
+            fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+                vm.ctx.types.$class
             }
         }
 
@@ -761,8 +762,8 @@ macro_rules! dict_view {
         }
 
         impl PyPayload for $iter_name {
-            fn class(vm: &VirtualMachine) -> &PyTypeRef {
-                &vm.ctx.types.$iter_class
+            fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+                vm.ctx.types.$iter_class
             }
         }
 
@@ -834,8 +835,8 @@ macro_rules! dict_view {
         }
 
         impl PyPayload for $reverse_iter_name {
-            fn class(vm: &VirtualMachine) -> &PyTypeRef {
-                &vm.ctx.types.$reverse_iter_class
+            fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+                vm.ctx.types.$reverse_iter_class
             }
         }
 
@@ -1011,7 +1012,7 @@ trait ViewSetOps: DictView {
                     zelf.dict(),
                     dictview.dict(),
                     op,
-                    !zelf.class().is(&vm.ctx.types.dict_keys_type),
+                    !zelf.class().is(vm.ctx.types.dict_keys_type),
                     vm,
                 )
             }
@@ -1145,17 +1146,14 @@ impl PyDictValues {
 }
 
 pub(crate) fn init(context: &Context) {
-    PyDict::extend_class(context, &context.types.dict_type);
-    PyDictKeys::extend_class(context, &context.types.dict_keys_type);
-    PyDictKeyIterator::extend_class(context, &context.types.dict_keyiterator_type);
-    PyDictReverseKeyIterator::extend_class(context, &context.types.dict_reversekeyiterator_type);
-    PyDictValues::extend_class(context, &context.types.dict_values_type);
-    PyDictValueIterator::extend_class(context, &context.types.dict_valueiterator_type);
-    PyDictReverseValueIterator::extend_class(
-        context,
-        &context.types.dict_reversevalueiterator_type,
-    );
-    PyDictItems::extend_class(context, &context.types.dict_items_type);
-    PyDictItemIterator::extend_class(context, &context.types.dict_itemiterator_type);
-    PyDictReverseItemIterator::extend_class(context, &context.types.dict_reverseitemiterator_type);
+    PyDict::extend_class(context, context.types.dict_type);
+    PyDictKeys::extend_class(context, context.types.dict_keys_type);
+    PyDictKeyIterator::extend_class(context, context.types.dict_keyiterator_type);
+    PyDictReverseKeyIterator::extend_class(context, context.types.dict_reversekeyiterator_type);
+    PyDictValues::extend_class(context, context.types.dict_values_type);
+    PyDictValueIterator::extend_class(context, context.types.dict_valueiterator_type);
+    PyDictReverseValueIterator::extend_class(context, context.types.dict_reversevalueiterator_type);
+    PyDictItems::extend_class(context, context.types.dict_items_type);
+    PyDictItemIterator::extend_class(context, context.types.dict_itemiterator_type);
+    PyDictReverseItemIterator::extend_class(context, context.types.dict_reverseitemiterator_type);
 }

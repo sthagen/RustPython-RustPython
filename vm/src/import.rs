@@ -40,7 +40,7 @@ pub(crate) fn init_importlib_base(vm: &mut VirtualMachine) -> PyResult<PyObjectR
         vm.invoke(&install, (vm.sys_module.clone(), impmod))?;
         Ok(importlib)
     })?;
-    vm.import_func = importlib.get_attr("__import__", vm)?;
+    vm.import_func = importlib.get_attr(identifier!(vm, __import__).to_owned(), vm)?;
     Ok(importlib)
 }
 
@@ -134,9 +134,17 @@ pub fn import_codeobj(
     set_file_attr: bool,
 ) -> PyResult {
     let attrs = vm.ctx.new_dict();
-    attrs.set_item("__name__", vm.ctx.new_str(module_name).into(), vm)?;
+    attrs.set_item(
+        identifier!(vm, __name__),
+        vm.ctx.new_str(module_name).into(),
+        vm,
+    )?;
     if set_file_attr {
-        attrs.set_item("__file__", code_obj.source_path.clone().into(), vm)?;
+        attrs.set_item(
+            identifier!(vm, __file__),
+            code_obj.source_path.to_object(),
+            vm,
+        )?;
     }
     let module = vm.new_module(module_name, attrs.clone(), None);
 
@@ -195,7 +203,7 @@ pub fn remove_importlib_frames(
     vm: &VirtualMachine,
     exc: &PyBaseExceptionRef,
 ) -> PyBaseExceptionRef {
-    let always_trim = exc.fast_isinstance(&vm.ctx.exceptions.import_error);
+    let always_trim = exc.fast_isinstance(vm.ctx.exceptions.import_error);
 
     if let Some(tb) = exc.traceback() {
         let trimmed_tb = remove_importlib_frames_inner(vm, Some(tb), always_trim).0;

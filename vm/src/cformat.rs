@@ -395,7 +395,7 @@ impl CFormatSpec {
                         Ok(buffer.contiguous_or_collect(|bytes| self.format_bytes(bytes)))
                     } else {
                         let bytes = vm
-                            .get_special_method(obj, "__bytes__")?
+                            .get_special_method(obj, identifier!(vm, __bytes__))?
                             .map_err(|obj| {
                                 vm.new_type_error(format!(
                                     "%b requires a bytes-like object, or an object that \
@@ -420,7 +420,7 @@ impl CFormatSpec {
                             .into_bytes())
                     }
                     obj => {
-                        if let Some(method) = vm.get_method(obj.clone(), "__int__") {
+                        if let Some(method) = vm.get_method(obj.clone(), identifier!(vm, __int__)) {
                             let result = vm.invoke(&method?, ())?;
                             if let Some(i) = result.payload::<PyInt>() {
                                 return Ok(self.format_number(i.as_bigint()).into_bytes());
@@ -448,7 +448,7 @@ impl CFormatSpec {
             CFormatType::Float(_) => {
                 let type_name = obj.class().name().to_string();
                 let value = ArgIntoFloat::try_from_object(vm, obj).map_err(|e| {
-                    if e.fast_isinstance(&vm.ctx.exceptions.type_error) {
+                    if e.fast_isinstance(vm.ctx.exceptions.type_error) {
                         // formatfloat in bytesobject.c generates its own specific exception
                         // text in this case, mirror it here.
                         vm.new_type_error(format!("float argument required, not {}", type_name))
@@ -514,7 +514,7 @@ impl CFormatSpec {
                         Ok(self.format_number(&try_f64_to_bigint(f.to_f64(), vm)?))
                     }
                     obj => {
-                        if let Some(method) = vm.get_method(obj.clone(), "__int__") {
+                        if let Some(method) = vm.get_method(obj.clone(), identifier!(vm, __int__)) {
                             let result = vm.invoke(&method?, ())?;
                             if let Some(i) = result.payload::<PyInt>() {
                                 return Ok(self.format_number(i.as_bigint()));
@@ -689,10 +689,10 @@ impl CFormatBytes {
         let (num_specifiers, mapping_required) = check_specifiers(&self.parts, vm)?;
         let mut result = vec![];
 
-        let is_mapping = values_obj.class().has_attr("__getitem__")
-            && !values_obj.fast_isinstance(&vm.ctx.types.tuple_type)
-            && !values_obj.fast_isinstance(&vm.ctx.types.bytes_type)
-            && !values_obj.fast_isinstance(&vm.ctx.types.bytearray_type);
+        let is_mapping = values_obj.class().has_attr(identifier!(vm, __getitem__))
+            && !values_obj.fast_isinstance(vm.ctx.types.tuple_type)
+            && !values_obj.fast_isinstance(vm.ctx.types.bytes_type)
+            && !values_obj.fast_isinstance(vm.ctx.types.bytearray_type);
 
         if num_specifiers == 0 {
             // literal only
@@ -841,9 +841,9 @@ impl CFormatString {
         let (num_specifiers, mapping_required) = check_specifiers(&self.parts, vm)?;
         let mut result = String::new();
 
-        let is_mapping = values_obj.class().has_attr("__getitem__")
-            && !values_obj.fast_isinstance(&vm.ctx.types.tuple_type)
-            && !values_obj.fast_isinstance(&vm.ctx.types.str_type);
+        let is_mapping = values_obj.class().has_attr(identifier!(vm, __getitem__))
+            && !values_obj.fast_isinstance(vm.ctx.types.tuple_type)
+            && !values_obj.fast_isinstance(vm.ctx.types.str_type);
 
         if num_specifiers == 0 {
             // literal only

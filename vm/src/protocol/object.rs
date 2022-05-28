@@ -33,11 +33,11 @@ impl PyObjectRef {
     }
 
     pub fn bytes(self, vm: &VirtualMachine) -> PyResult {
-        let bytes_type = &vm.ctx.types.bytes_type;
+        let bytes_type = vm.ctx.types.bytes_type;
         match self.downcast_exact::<PyInt>(vm) {
             Ok(int) => Err(vm.new_downcast_type_error(bytes_type, &int)),
             Err(obj) => PyBytes::py_new(
-                bytes_type.clone(),
+                bytes_type.to_owned(),
                 ByteInnerNewOptions {
                     source: OptionalArg::Present(obj),
                     encoding: OptionalArg::Missing,
@@ -143,8 +143,11 @@ impl PyObject {
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         vm_trace!("object.__setattr__({:?}, {}, {:?})", obj, attr_name, value);
-
-        if let Some(attr) = self.get_class_attr(attr_name.as_str()) {
+        if let Some(attr) = vm
+            .ctx
+            .interned_str(&*attr_name)
+            .and_then(|attr_name| self.get_class_attr(attr_name))
+        {
             let descr_set = attr.class().mro_find_map(|cls| cls.slots.descr_set.load());
             if let Some(descriptor) = descr_set {
                 return descriptor(attr, self.to_owned(), value, vm);
@@ -156,11 +159,11 @@ impl PyObject {
                 dict.set_item(&*attr_name, value, vm)?;
             } else {
                 dict.del_item(&*attr_name, vm).map_err(|e| {
-                    if e.fast_isinstance(&vm.ctx.exceptions.key_error) {
+                    if e.fast_isinstance(vm.ctx.exceptions.key_error) {
                         vm.new_attribute_error(format!(
                             "'{}' object has no attribute '{}'",
                             self.class().name(),
-                            attr_name,
+                            attr_name.as_str(),
                         ))
                     } else {
                         e
@@ -172,7 +175,7 @@ impl PyObject {
             Err(vm.new_attribute_error(format!(
                 "'{}' object has no attribute '{}'",
                 self.class().name(),
-                attr_name,
+                attr_name.as_str(),
             )))
         }
     }
@@ -191,7 +194,8 @@ impl PyObject {
     ) -> PyResult<Option<PyObjectRef>> {
         let name = name_str.as_str();
         let obj_cls = self.class();
-        let cls_attr = match obj_cls.get_attr(name) {
+        let cls_attr_name = vm.ctx.interned_str(&*name_str);
+        let cls_attr = match cls_attr_name.and_then(|name| obj_cls.get_attr(name)) {
             Some(descr) => {
                 let descr_cls = descr.class();
                 let descr_get = descr_cls.mro_find_map(|cls| cls.slots.descr_get.load());
@@ -229,7 +233,7 @@ impl PyObject {
                 }
                 None => Ok(Some(attr)),
             }
-        } else if let Some(getter) = obj_cls.get_attr("__getattr__") {
+        } else if let Some(getter) = obj_cls.get_attr(identifier!(vm, __getattr__)) {
             drop(obj_cls);
             vm.invoke(&getter, (self.to_owned(), name_str)).map(Some)
         } else {
@@ -310,7 +314,7 @@ impl PyObject {
 
     pub fn repr(&self, vm: &VirtualMachine) -> PyResult<PyStrRef> {
         vm.with_recursion("while getting the repr of an object", || {
-            let repr = vm.call_special_method(self.to_owned(), "__repr__", ())?;
+            let repr = vm.call_special_method(self.to_owned(), identifier!(vm, __repr__), ())?;
             repr.try_into_value(vm)
         })
     }
@@ -323,10 +327,10 @@ impl PyObject {
 
     // Container of the virtual machine state:
     pub fn str(&self, vm: &VirtualMachine) -> PyResult<PyStrRef> {
-        if self.class().is(&vm.ctx.types.str_type) {
+        if self.class().is(vm.ctx.types.str_type) {
             Ok(self.to_owned().downcast().unwrap())
         } else {
-            let s = vm.call_special_method(self.to_owned(), "__str__", ())?;
+            let s = vm.call_special_method(self.to_owned(), identifier!(vm, __str__), ())?;
             s.try_into_value(vm)
         }
     }
@@ -337,14 +341,16 @@ impl PyObject {
     where
         F: Fn() -> String,
     {
-        cls.to_owned().get_attr("__bases__", vm).map_err(|e| {
-            // Only mask AttributeErrors.
-            if e.class().is(&vm.ctx.exceptions.attribute_error) {
-                vm.new_type_error(msg())
-            } else {
-                e
-            }
-        })
+        cls.to_owned()
+            .get_attr(identifier!(vm, __bases__), vm)
+            .map_err(|e| {
+                // Only mask AttributeErrors.
+                if e.class().is(vm.ctx.exceptions.attribute_error) {
+                    vm.new_type_error(msg())
+                } else {
+                    e
+                }
+            })
     }
 
     fn abstract_issubclass(&self, cls: &PyObject, vm: &VirtualMachine) -> PyResult<bool> {
@@ -355,7 +361,9 @@ impl PyObject {
                 return Ok(true);
             }
 
-            let bases = derived.to_owned().get_attr("__bases__", vm)?;
+            let bases = derived
+                .to_owned()
+                .get_attr(identifier!(vm, __bases__), vm)?;
             let tuple = PyTupleRef::try_from_object(vm, bases)?;
 
             let n = tuple.len();
@@ -404,7 +412,7 @@ impl PyObject {
     /// Determines if `self` is a subclass of `cls`, either directly, indirectly or virtually
     /// via the __subclasscheck__ magic method.
     pub fn is_subclass(&self, cls: &PyObject, vm: &VirtualMachine) -> PyResult<bool> {
-        if cls.class().is(&vm.ctx.types.type_type) {
+        if cls.class().is(vm.ctx.types.type_type) {
             if self.is(cls) {
                 return Ok(true);
             }
@@ -420,7 +428,9 @@ impl PyObject {
             return Ok(false);
         }
 
-        if let Ok(meth) = vm.get_special_method(cls.to_owned(), "__subclasscheck__")? {
+        if let Ok(meth) =
+            vm.get_special_method(cls.to_owned(), identifier!(vm, __subclasscheck__))?
+        {
             let ret = vm.with_recursion("in __subclasscheck__", || {
                 meth.invoke((self.to_owned(),), vm)
             })?;
@@ -434,9 +444,10 @@ impl PyObject {
         if let Ok(typ) = PyTypeRef::try_from_object(vm, cls.to_owned()) {
             if self.class().fast_issubclass(&typ) {
                 Ok(true)
-            } else if let Ok(icls) =
-                PyTypeRef::try_from_object(vm, self.to_owned().get_attr("__class__", vm)?)
-            {
+            } else if let Ok(icls) = PyTypeRef::try_from_object(
+                vm,
+                self.to_owned().get_attr(identifier!(vm, __class__), vm)?,
+            ) {
                 if icls.is(&self.class()) {
                     Ok(false)
                 } else {
@@ -453,7 +464,7 @@ impl PyObject {
                 )
             })
             .and_then(|_| {
-                let icls: PyObjectRef = self.to_owned().get_attr("__class__", vm)?;
+                let icls: PyObjectRef = self.to_owned().get_attr(identifier!(vm, __class__), vm)?;
                 if vm.is_none(&icls) {
                     Ok(false)
                 } else {
@@ -472,7 +483,7 @@ impl PyObject {
             return Ok(true);
         }
 
-        if cls.class().is(&vm.ctx.types.type_type) {
+        if cls.class().is(vm.ctx.types.type_type) {
             return self.abstract_isinstance(cls, vm);
         }
 
@@ -485,7 +496,9 @@ impl PyObject {
             return Ok(false);
         }
 
-        if let Ok(meth) = vm.get_special_method(cls.to_owned(), "__instancecheck__")? {
+        if let Ok(meth) =
+            vm.get_special_method(cls.to_owned(), identifier!(vm, __instancecheck__))?
+        {
             let ret = vm.with_recursion("in __instancecheck__", || {
                 meth.invoke((self.to_owned(),), vm)
             })?;
@@ -532,13 +545,13 @@ impl PyObject {
             let i = needle.key_as_isize(vm)?;
             seq.get_item(i, vm)
         } else {
-            if self.class().fast_issubclass(&vm.ctx.types.type_type) {
-                if self.is(&vm.ctx.types.type_type) {
+            if self.class().fast_issubclass(vm.ctx.types.type_type) {
+                if self.is(vm.ctx.types.type_type) {
                     return PyGenericAlias::new(self.class().clone(), needle, vm).to_pyresult(vm);
                 }
 
                 if let Some(class_getitem) =
-                    vm.get_attribute_opt(self.to_owned(), "__class_getitem__")?
+                    vm.get_attribute_opt(self.to_owned(), identifier!(vm, __class_getitem__))?
                 {
                     return vm.invoke(&class_getitem, (needle,));
                 }

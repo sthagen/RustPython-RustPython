@@ -600,7 +600,7 @@ impl PyObject {
         } else {
             None
         };
-        let cls_is_weakref = typ.is(&vm.ctx.types.weakref_type);
+        let cls_is_weakref = typ.is(vm.ctx.types.weakref_type);
         self.weak_ref_list()
             .map(|wrl| wrl.add(self, typ, cls_is_weakref, callback, dict))
             .ok_or_else(|| {
@@ -616,7 +616,7 @@ impl PyObject {
         callback: Option<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult<PyRef<PyWeak>> {
-        self.downgrade_with_typ(callback, vm.ctx.types.weakref_type.clone(), vm)
+        self.downgrade_with_typ(callback, vm.ctx.types.weakref_type.to_owned(), vm)
     }
 
     pub fn get_weak_references(&self) -> Option<Vec<PyRef<PyWeak>>> {
@@ -744,7 +744,7 @@ impl PyObject {
             let ret = crate::vm::thread::with_vm(zelf, |vm| {
                 zelf.0.ref_count.inc();
                 if let Err(e) = slot_del(zelf, vm) {
-                    let del_method = zelf.get_class_attr("__del__").unwrap();
+                    let del_method = zelf.get_class_attr(identifier!(vm, __del__)).unwrap();
                     vm.run_unraisable(e, None, del_method);
                 }
                 zelf.0.ref_count.dec()
@@ -782,6 +782,16 @@ impl PyObject {
         let drop_dealloc = ptr.as_ref().0.vtable.drop_dealloc;
         // call drop only when there are no references in scope - stacked borrows stuff
         drop_dealloc(ptr.as_ptr())
+    }
+
+    /// # Safety
+    /// This call will make the object live forever.
+    pub(crate) unsafe fn mark_intern(&self) {
+        self.0.ref_count.leak();
+    }
+
+    pub(crate) fn is_interned(&self) -> bool {
+        self.0.ref_count.is_leaked()
     }
 }
 
@@ -957,6 +967,12 @@ impl<T: PyObjectPayload> PyRef<T> {
         Self {
             ptr: unsafe { NonNull::new_unchecked(inner.cast::<Py<T>>()) },
         }
+    }
+
+    pub fn leak(pyref: Self) -> &'static Py<T> {
+        let ptr = pyref.ptr;
+        std::mem::forget(pyref);
+        unsafe { &*ptr.as_ptr() }
     }
 }
 
@@ -1186,7 +1202,7 @@ mod tests {
 
     #[test]
     fn miri_test_drop() {
-        let ctx = crate::Context::default();
+        let ctx = crate::Context::genesis();
         let obj = ctx.new_bytes(b"dfghjkl".to_vec());
         drop(obj);
     }

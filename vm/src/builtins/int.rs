@@ -1,4 +1,4 @@
-use super::{float, PyByteArray, PyBytes, PyStr, PyStrRef, PyTypeRef};
+use super::{float, PyByteArray, PyBytes, PyStr, PyStrRef, PyType, PyTypeRef};
 use crate::{
     bytesinner::PyBytesInner,
     class::PyClassImpl,
@@ -10,8 +10,8 @@ use crate::{
         PyComparisonValue,
     },
     types::{Comparable, Constructor, Hashable, PyComparisonOp},
-    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromBorrowedObject,
-    VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
+    TryFromBorrowedObject, VirtualMachine,
 };
 use bstr::ByteSlice;
 use num_bigint::{BigInt, BigUint, Sign};
@@ -57,8 +57,8 @@ where
 }
 
 impl PyPayload for PyInt {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.int_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.int_type
     }
 
     fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
@@ -252,7 +252,7 @@ impl Constructor for PyInt {
                     })?;
                 try_int_radix(&val, base, vm)
             } else {
-                let val = if cls.is(&vm.ctx.types.int_type) {
+                let val = if cls.is(vm.ctx.types.int_type) {
                     match val.downcast_exact::<PyInt>(vm) {
                         Ok(i) => {
                             return Ok(i.to_pyobject(vm));
@@ -280,9 +280,9 @@ impl PyInt {
     where
         T: Into<BigInt> + ToPrimitive,
     {
-        if cls.is(&vm.ctx.types.int_type) {
+        if cls.is(vm.ctx.types.int_type) {
             Ok(vm.ctx.new_int(value))
-        } else if cls.is(&vm.ctx.types.bool_type) {
+        } else if cls.is(vm.ctx.types.bool_type) {
             Ok(vm.ctx.new_bool(!value.into().eq(&BigInt::zero())))
         } else {
             PyInt::from(value).into_ref_with_type(vm, cls)
@@ -690,7 +690,7 @@ impl PyInt {
 
     #[inline]
     fn clone_if_subclass(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyRef<Self> {
-        if zelf.class().is(&vm.ctx.types.int_type) {
+        if zelf.class().is(vm.ctx.types.int_type) {
             return zelf;
         }
 
@@ -952,7 +952,7 @@ pub(crate) fn try_int(obj: &PyObject, vm: &VirtualMachine) -> PyResult<BigInt> {
     }
     // call __int__, then __index__, then __trunc__ (converting the __trunc__ result via  __index__ if needed)
     // TODO: using __int__ is deprecated and removed in Python 3.10
-    if let Some(method) = vm.get_method(obj.to_owned(), "__int__") {
+    if let Some(method) = vm.get_method(obj.to_owned(), identifier!(vm, __int__)) {
         let result = vm.invoke(&method?, ())?;
         return match result.payload::<PyInt>() {
             Some(int_obj) => Ok(int_obj.as_bigint().clone()),
@@ -966,7 +966,7 @@ pub(crate) fn try_int(obj: &PyObject, vm: &VirtualMachine) -> PyResult<BigInt> {
     if let Some(r) = vm.to_index_opt(obj.to_owned()).transpose()? {
         return Ok(r.as_bigint().clone());
     }
-    if let Some(method) = vm.get_method(obj.to_owned(), "__trunc__") {
+    if let Some(method) = vm.get_method(obj.to_owned(), identifier!(vm, __trunc__)) {
         let result = vm.invoke(&method?, ())?;
         return vm
             .to_index_opt(result.clone())
@@ -986,7 +986,7 @@ pub(crate) fn try_int(obj: &PyObject, vm: &VirtualMachine) -> PyResult<BigInt> {
 }
 
 pub(crate) fn init(context: &Context) {
-    PyInt::extend_class(context, &context.types.int_type);
+    PyInt::extend_class(context, context.types.int_type);
 }
 
 #[test]

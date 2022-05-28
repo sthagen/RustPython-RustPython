@@ -1,6 +1,6 @@
 use super::genericalias;
 use crate::{
-    builtins::{PyFrozenSet, PyStr, PyStrRef, PyTuple, PyTupleRef, PyTypeRef},
+    builtins::{PyFrozenSet, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef},
     class::PyClassImpl,
     common::hash,
     convert::ToPyObject,
@@ -27,8 +27,8 @@ impl fmt::Debug for PyUnion {
 }
 
 impl PyPayload for PyUnion {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.union_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.union_type
     }
 }
 
@@ -46,16 +46,20 @@ impl PyUnion {
                 return Ok("None".to_string());
             }
 
-            if vm.get_attribute_opt(obj.clone(), "__origin__")?.is_some()
-                && vm.get_attribute_opt(obj.clone(), "__args__")?.is_some()
+            if vm
+                .get_attribute_opt(obj.clone(), identifier!(vm, __origin__))?
+                .is_some()
+                && vm
+                    .get_attribute_opt(obj.clone(), identifier!(vm, __args__))?
+                    .is_some()
             {
                 return Ok(obj.repr(vm)?.as_str().to_string());
             }
 
             match (
-                vm.get_attribute_opt(obj.clone(), "__qualname__")?
+                vm.get_attribute_opt(obj.clone(), identifier!(vm, __qualname__))?
                     .and_then(|o| o.downcast_ref::<PyStr>().map(|n| n.as_str().to_string())),
-                vm.get_attribute_opt(obj.clone(), "__module__")?
+                vm.get_attribute_opt(obj.clone(), identifier!(vm, __module__))?
                     .and_then(|o| o.downcast_ref::<PyStr>().map(|m| m.as_str().to_string())),
             ) {
                 (None, _) | (_, None) => Ok(obj.repr(vm)?.as_str().to_string()),
@@ -99,17 +103,17 @@ impl PyUnion {
 }
 
 pub fn is_unionable(obj: PyObjectRef, vm: &VirtualMachine) -> bool {
-    obj.class().is(&vm.ctx.types.none_type)
-        || obj.class().is(&vm.ctx.types.type_type)
-        || obj.class().is(&vm.ctx.types.generic_alias_type)
-        || obj.class().is(&vm.ctx.types.union_type)
+    obj.class().is(vm.ctx.types.none_type)
+        || obj.class().is(vm.ctx.types.type_type)
+        || obj.class().is(vm.ctx.types.generic_alias_type)
+        || obj.class().is(vm.ctx.types.union_type)
 }
 
-fn is_typevar(obj: &PyObjectRef) -> bool {
+fn is_typevar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
     let class = obj.class();
     class.slot_name() == "TypeVar"
         && class
-            .get_attr("__module__")
+            .get_attr(identifier!(vm, __module__))
             .and_then(|o| o.downcast_ref::<PyStr>().map(|s| s.as_str() == "typing"))
             .unwrap_or(false)
 }
@@ -117,13 +121,13 @@ fn is_typevar(obj: &PyObjectRef) -> bool {
 fn make_parameters(args: &PyTupleRef, vm: &VirtualMachine) -> PyTupleRef {
     let mut parameters: Vec<PyObjectRef> = Vec::with_capacity(args.len());
     for arg in args {
-        if is_typevar(arg) {
+        if is_typevar(arg, vm) {
             if !parameters.iter().any(|param| param.is(arg)) {
                 parameters.push(arg.clone());
             }
         } else if let Ok(subparams) = arg
             .clone()
-            .get_attr("__parameters__", vm)
+            .get_attr(identifier!(vm, __parameters__), vm)
             .and_then(|obj| PyTupleRef::try_from_object(vm, obj))
         {
             for subparam in &subparams {
@@ -171,8 +175,8 @@ fn dedup_and_flatten_args(args: PyTupleRef, vm: &VirtualMachine) -> PyTupleRef {
                 PyTypeRef::try_from_object(vm, arg.clone()),
             ) {
                 (Ok(a), Ok(b))
-                    if a.is(&vm.ctx.types.generic_alias_type)
-                        && b.is(&vm.ctx.types.generic_alias_type) =>
+                    if a.is(vm.ctx.types.generic_alias_type)
+                        && b.is(vm.ctx.types.generic_alias_type) =>
                 {
                     param
                         .rich_compare_bool(arg, PyComparisonOp::Eq, vm)

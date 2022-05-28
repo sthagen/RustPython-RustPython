@@ -1,15 +1,13 @@
-use std::borrow::Cow;
-
-use super::{PyDict, PyGenericAlias, PyList, PyStr, PyStrRef, PyTuple, PyTypeRef};
+use super::{PyDict, PyGenericAlias, PyList, PyTuple, PyType, PyTypeRef};
 use crate::{
     class::PyClassImpl,
     convert::ToPyObject,
     function::OptionalArg,
     protocol::{PyMapping, PyMappingMethods, PySequence, PySequenceMethods},
     types::{AsMapping, AsSequence, Constructor, Iterable},
-    AsObject, Context, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
-    VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
+use std::borrow::Cow;
 
 #[pyclass(module = false, name = "mappingproxy")]
 #[derive(Debug)]
@@ -24,8 +22,8 @@ enum MappingProxyInner {
 }
 
 impl PyPayload for PyMappingProxy {
-    fn class(vm: &VirtualMachine) -> &PyTypeRef {
-        &vm.ctx.types.mappingproxy_type
+    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
+        vm.ctx.types.mappingproxy_type
     }
 }
 
@@ -63,10 +61,9 @@ impl Constructor for PyMappingProxy {
 impl PyMappingProxy {
     fn get_inner(&self, key: PyObjectRef, vm: &VirtualMachine) -> PyResult<Option<PyObjectRef>> {
         let opt = match &self.mapping {
-            MappingProxyInner::Class(class) => {
-                let key = PyStrRef::try_from_object(vm, key)?;
-                class.attributes.read().get(key.as_str()).cloned()
-            }
+            MappingProxyInner::Class(class) => key
+                .as_interned_str(vm)
+                .and_then(|key| class.attributes.read().get(key).cloned()),
             MappingProxyInner::Dict(obj) => obj.get_item(&*key, vm).ok(),
         };
         Ok(opt)
@@ -92,13 +89,9 @@ impl PyMappingProxy {
 
     fn _contains(&self, key: &PyObject, vm: &VirtualMachine) -> PyResult<bool> {
         match &self.mapping {
-            MappingProxyInner::Class(class) => {
-                // let key = PyStrRef::try_from_object(vm, key)?;
-                let key = key
-                    .payload::<PyStr>()
-                    .ok_or_else(|| vm.new_downcast_type_error(PyStr::class(vm), key))?;
-                Ok(class.attributes.read().contains_key(key.as_str()))
-            }
+            MappingProxyInner::Class(class) => Ok(key
+                .as_interned_str(vm)
+                .map_or(false, |key| class.attributes.read().contains_key(key))),
             MappingProxyInner::Dict(obj) => PySequence::from(obj.as_ref()).contains(key, vm),
         }
     }
@@ -116,7 +109,7 @@ impl PyMappingProxy {
                 PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
-        vm.call_method(&obj, "items", ())
+        vm.call_method(&obj, identifier!(vm, items).as_str(), ())
     }
     #[pymethod]
     pub fn keys(&self, vm: &VirtualMachine) -> PyResult {
@@ -126,7 +119,7 @@ impl PyMappingProxy {
                 PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
-        vm.call_method(&obj, "keys", ())
+        vm.call_method(&obj, identifier!(vm, keys).as_str(), ())
     }
     #[pymethod]
     pub fn values(&self, vm: &VirtualMachine) -> PyResult {
@@ -136,12 +129,12 @@ impl PyMappingProxy {
                 PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm)
             }
         };
-        vm.call_method(&obj, "values", ())
+        vm.call_method(&obj, identifier!(vm, values).as_str(), ())
     }
     #[pymethod]
     pub fn copy(&self, vm: &VirtualMachine) -> PyResult {
         match &self.mapping {
-            MappingProxyInner::Dict(d) => vm.call_method(d, "copy", ()),
+            MappingProxyInner::Dict(d) => vm.call_method(d, identifier!(vm, copy).as_str(), ()),
             MappingProxyInner::Class(c) => {
                 Ok(PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm))
             }
@@ -211,5 +204,5 @@ impl Iterable for PyMappingProxy {
 }
 
 pub fn init(context: &Context) {
-    PyMappingProxy::extend_class(context, &context.types.mappingproxy_type)
+    PyMappingProxy::extend_class(context, context.types.mappingproxy_type)
 }
