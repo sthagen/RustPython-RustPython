@@ -1,4 +1,4 @@
-use super::{PositionIterInternal, PyGenericAlias, PyTupleRef, PyType, PyTypeRef};
+use super::{PositionIterInternal, PyGenericAlias, PyIntRef, PyTupleRef, PyType, PyTypeRef};
 use crate::common::lock::{
     PyMappedRwLockReadGuard, PyMutex, PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard,
 };
@@ -6,10 +6,11 @@ use crate::{
     class::PyClassImpl,
     convert::ToPyObject,
     function::{FuncArgs, OptionalArg, PyComparisonValue},
+    iter::PyExactSizeIterator,
     protocol::{PyIterReturn, PyMappingMethods, PySequence, PySequenceMethods},
     recursion::ReprGuard,
-    sequence::{MutObjectSequenceOp, ObjectSequenceOp, SequenceMutOp, SequenceOp},
-    sliceable::{saturate_index, SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
+    sequence::{MutObjectSequenceOp, SequenceExt, SequenceMutExt},
+    sliceable::{pyint_saturate_index, SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, Initializer, IterNext,
         IterNextIterable, Iterable, PyComparisonOp, Unconstructible, Unhashable,
@@ -270,15 +271,17 @@ impl PyList {
     fn index(
         &self,
         needle: PyObjectRef,
-        start: OptionalArg<isize>,
-        stop: OptionalArg<isize>,
+        start: OptionalArg<PyObjectRef>,
+        stop: OptionalArg<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult<usize> {
         let len = self.len();
-        let start = start.map(|i| saturate_index(i, len)).unwrap_or(0);
-        let stop = stop
-            .map(|i| saturate_index(i, len))
-            .unwrap_or(isize::MAX as usize);
+        let saturate = |obj: PyObjectRef, len| -> PyResult<_> {
+            obj.try_into_value(vm)
+                .map(|int: PyIntRef| pyint_saturate_index(int, len))
+        };
+        let start = start.map_or(Ok(0), |obj| saturate(obj, len))?;
+        let stop = stop.map_or(Ok(len), |obj| saturate(obj, len))?;
         let index = self.mut_index_range(vm, &needle, start..stop)?;
         if let Some(index) = index.into() {
             Ok(index)
@@ -491,7 +494,9 @@ impl Comparable for PyList {
         let other = class_or_notimplemented!(Self, other);
         let a = &*zelf.borrow_vec();
         let b = &*other.borrow_vec();
-        a.cmp(vm, b, op).map(PyComparisonValue::Implemented)
+        a.iter()
+            .richcompare(b.iter(), op, vm)
+            .map(PyComparisonValue::Implemented)
     }
 }
 
