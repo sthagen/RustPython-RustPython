@@ -17,7 +17,7 @@ use crate::{
     protocol::{
         BufferDescriptor, BufferMethods, PyBuffer, PyMappingMethods, PySequenceMethods, VecBuffer,
     },
-    sliceable::wrap_index,
+    sliceable::SequenceIndexOp,
     types::{AsBuffer, AsMapping, AsSequence, Comparable, Constructor, Hashable, PyComparisonOp},
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
     TryFromBorrowedObject, TryFromObject, VirtualMachine,
@@ -36,7 +36,7 @@ pub struct PyMemoryViewNewArgs {
 pub struct PyMemoryView {
     // avoid double release when memoryview had released the buffer before drop
     buffer: ManuallyDrop<PyBuffer>,
-    // the released memoryview does not mean the buffer is destoryed
+    // the released memoryview does not mean the buffer is destroyed
     // because the possible another memeoryview is viewing from it
     released: AtomicCell<bool>,
     // start does NOT mean the bytes before start will not be visited,
@@ -67,7 +67,7 @@ impl PyMemoryView {
         FormatSpec::parse(format.as_bytes(), vm)
     }
 
-    /// this should be the main entrence to create the memoryview
+    /// this should be the main entrance to create the memoryview
     /// to avoid the chained memoryview
     pub fn from_object(obj: &PyObject, vm: &VirtualMachine) -> PyResult<Self> {
         if let Some(other) = obj.payload::<Self>() {
@@ -78,7 +78,7 @@ impl PyMemoryView {
         }
     }
 
-    /// don't use this function to create the memeoryview if the buffer is exporting
+    /// don't use this function to create the memoryview if the buffer is exporting
     /// via another memoryview, use PyMemoryView::new_view() or PyMemoryView::from_object
     /// to reduce the chain
     pub fn from_buffer(buffer: PyBuffer, vm: &VirtualMachine) -> PyResult<Self> {
@@ -113,7 +113,7 @@ impl PyMemoryView {
         Ok(zelf)
     }
 
-    /// this should be the only way to create a memroyview from another memoryview
+    /// this should be the only way to create a memoryview from another memoryview
     pub fn new_view(&self) -> Self {
         let zelf = PyMemoryView {
             buffer: self.buffer.clone(),
@@ -243,7 +243,8 @@ impl PyMemoryView {
             ));
         }
         let (shape, stride, suboffset) = self.desc.dim_desc[0];
-        let index = wrap_index(i, shape)
+        let index = i
+            .wrapped_at(shape)
             .ok_or_else(|| vm.new_index_error("index out of range".to_owned()))?;
         let index = index as isize * stride + suboffset;
         let pos = (index + self.start as isize) as usize;
@@ -292,7 +293,8 @@ impl PyMemoryView {
             return Err(vm.new_not_implemented_error("sub-views are not implemented".to_owned()));
         }
         let (shape, stride, suboffset) = self.desc.dim_desc[0];
-        let index = wrap_index(i, shape)
+        let index = i
+            .wrapped_at(shape)
             .ok_or_else(|| vm.new_index_error("index out of range".to_owned()))?;
         let index = index as isize * stride + suboffset;
         let pos = (index + self.start as isize) as usize;
@@ -316,7 +318,7 @@ impl PyMemoryView {
         if zelf.is(&src) {
             return if !is_equiv_structure(&zelf.desc, &dest.desc) {
                 Err(vm.new_value_error(
-                    "memoryview assigment: lvalue and rvalue have different structures".to_owned(),
+                    "memoryview assignment: lvalue and rvalue have different structures".to_owned(),
                 ))
             } else {
                 // assign self[:] to self
@@ -336,7 +338,7 @@ impl PyMemoryView {
 
         if !is_equiv_structure(&src.desc, &dest.desc) {
             return Err(vm.new_value_error(
-                "memoryview assigment: lvalue and rvalue have different structures".to_owned(),
+                "memoryview assignment: lvalue and rvalue have different structures".to_owned(),
             ));
         }
 
@@ -479,7 +481,7 @@ impl PyMemoryView {
     fn init_slice(&mut self, slice: &PySlice, dim: usize, vm: &VirtualMachine) -> PyResult<()> {
         let (shape, stride, _) = self.desc.dim_desc[dim];
         let slice = slice.to_saturated(vm)?;
-        let (range, step, slicelen) = slice.adjust_indices(shape);
+        let (range, step, slice_len) = slice.adjust_indices(shape);
 
         let mut is_adjusted_suboffset = false;
         for (_, _, suboffset) in self.desc.dim_desc.iter_mut().rev() {
@@ -498,7 +500,7 @@ impl PyMemoryView {
                     range.start
                 };
         }
-        self.desc.dim_desc[dim].0 = slicelen;
+        self.desc.dim_desc[dim].0 = slice_len;
         self.desc.dim_desc[dim].1 *= step;
 
         Ok(())

@@ -5,7 +5,7 @@ mod _collections {
     use crate::{
         builtins::{
             IterStatus::{Active, Exhausted},
-            PositionIterInternal, PyGenericAlias, PyInt, PyTypeRef,
+            PositionIterInternal, PyGenericAlias, PyInt, PyIntRef, PyTypeRef,
         },
         common::lock::{PyMutex, PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard},
         function::{FuncArgs, KwArgs, OptionalArg, PyComparisonValue},
@@ -13,8 +13,7 @@ mod _collections {
         protocol::{PyIterReturn, PySequenceMethods},
         recursion::ReprGuard,
         sequence::MutObjectSequenceOp,
-        sliceable,
-        sliceable::saturate_index,
+        sliceable::SequenceIndexOp,
         types::{
             AsSequence, Comparable, Constructor, Hashable, Initializer, IterNext, IterNextIterable,
             Iterable, PyComparisonOp, Unhashable,
@@ -157,26 +156,29 @@ mod _collections {
         #[pymethod]
         fn index(
             &self,
-            obj: PyObjectRef,
-            start: OptionalArg<isize>,
-            stop: OptionalArg<isize>,
+            needle: PyObjectRef,
+            start: OptionalArg<PyObjectRef>,
+            stop: OptionalArg<PyObjectRef>,
             vm: &VirtualMachine,
         ) -> PyResult<usize> {
             let start_state = self.state.load();
 
             let len = self.len();
-            let start = start.map(|i| saturate_index(i, len)).unwrap_or(0);
-            let stop = stop
-                .map(|i| saturate_index(i, len))
-                .unwrap_or(isize::MAX as usize);
-            let index = self.mut_index_range(vm, &obj, start..stop)?;
+            let saturate = |obj: PyObjectRef, len| -> PyResult<_> {
+                obj.try_into_value(vm)
+                    .map(|int: PyIntRef| int.as_bigint().saturated_at(len))
+            };
+            let start = start.map_or(Ok(0), |i| saturate(i, len))?;
+            let stop = stop.map_or(Ok(len), |i| saturate(i, len))?;
+            let index = self.mut_index_range(vm, &needle, start..stop)?;
             if start_state != self.state.load() {
                 Err(vm.new_runtime_error("deque mutated during iteration".to_owned()))
             } else if let Some(index) = index.into() {
                 Ok(index)
             } else {
                 Err(vm.new_value_error(
-                    obj.repr(vm)
+                    needle
+                        .repr(vm)
                         .map(|repr| format!("{} is not in deque", repr))
                         .unwrap_or_else(|_| String::new()),
                 ))
@@ -277,7 +279,7 @@ mod _collections {
         #[pymethod(magic)]
         fn getitem(&self, idx: isize, vm: &VirtualMachine) -> PyResult {
             let deque = self.borrow_deque();
-            sliceable::wrap_index(idx, deque.len())
+            idx.wrapped_at(deque.len())
                 .and_then(|i| deque.get(i).cloned())
                 .ok_or_else(|| vm.new_index_error("deque index out of range".to_owned()))
         }
@@ -285,7 +287,7 @@ mod _collections {
         #[pymethod(magic)]
         fn setitem(&self, idx: isize, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let mut deque = self.borrow_deque_mut();
-            sliceable::wrap_index(idx, deque.len())
+            idx.wrapped_at(deque.len())
                 .and_then(|i| deque.get_mut(i))
                 .map(|x| *x = value)
                 .ok_or_else(|| vm.new_index_error("deque index out of range".to_owned()))
@@ -294,7 +296,7 @@ mod _collections {
         #[pymethod(magic)]
         fn delitem(&self, idx: isize, vm: &VirtualMachine) -> PyResult<()> {
             let mut deque = self.borrow_deque_mut();
-            sliceable::wrap_index(idx, deque.len())
+            idx.wrapped_at(deque.len())
                 .and_then(|i| deque.remove(i).map(drop))
                 .ok_or_else(|| vm.new_index_error("deque index out of range".to_owned()))
         }

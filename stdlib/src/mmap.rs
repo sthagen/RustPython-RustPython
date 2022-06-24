@@ -14,7 +14,7 @@ mod mmap {
         protocol::{
             BufferDescriptor, BufferMethods, PyBuffer, PyMappingMethods, PySequenceMethods,
         },
-        sliceable::{saturate_index, wrap_index, SaturatedSlice, SequenceIndex},
+        sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp},
         types::{AsBuffer, AsMapping, AsSequence, Constructor},
         AsObject, FromArgs, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
         TryFromBorrowedObject, VirtualMachine,
@@ -592,11 +592,11 @@ mod mmap {
             let size = self.len();
             let start = options
                 .start
-                .map(|start| saturate_index(start, size))
+                .map(|start| start.saturated_at(size))
                 .unwrap_or_else(|| self.pos());
             let end = options
                 .end
-                .map(|end| saturate_index(end, size))
+                .map(|end| end.saturated_at(size))
                 .unwrap_or(size);
             (start, end)
         }
@@ -918,7 +918,8 @@ mod mmap {
         }
 
         fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-            let i = wrap_index(i, self.len())
+            let i = i
+                .wrapped_at(self.len())
                 .ok_or_else(|| vm.new_index_error("mmap index out of range".to_owned()))?;
 
             let b = match self.check_valid(vm)?.deref().as_ref().unwrap() {
@@ -934,11 +935,11 @@ mod mmap {
             slice: &SaturatedSlice,
             vm: &VirtualMachine,
         ) -> PyResult<PyObjectRef> {
-            let (range, step, slicelen) = slice.adjust_indices(self.len());
+            let (range, step, slice_len) = slice.adjust_indices(self.len());
 
             let mmap = self.check_valid(vm)?;
 
-            if slicelen == 0 {
+            if slice_len == 0 {
                 return Ok(PyBytes::from(vec![]).into_ref(vm).into());
             } else if step == 1 {
                 let bytes = match mmap.deref().as_ref().unwrap() {
@@ -948,7 +949,7 @@ mod mmap {
                 return Ok(PyBytes::from(bytes.to_vec()).into_ref(vm).into());
             }
 
-            let mut result_buf = Vec::with_capacity(slicelen);
+            let mut result_buf = Vec::with_capacity(slice_len);
             if step.is_negative() {
                 for i in range.rev().step_by(step.unsigned_abs()) {
                     let b = match mmap.deref().as_ref().unwrap() {
@@ -999,7 +1000,8 @@ mod mmap {
             value: PyObjectRef,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
-            let i = wrap_index(i, zelf.len())
+            let i = i
+                .wrapped_at(zelf.len())
                 .ok_or_else(|| vm.new_index_error("mmap index out of range".to_owned()))?;
 
             let b = value_from_object(vm, &value)?;
@@ -1017,15 +1019,15 @@ mod mmap {
             value: PyObjectRef,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
-            let (range, step, slicelen) = slice.adjust_indices(zelf.len());
+            let (range, step, slice_len) = slice.adjust_indices(zelf.len());
 
             let bytes = bytes_from_object(vm, &value)?;
 
-            if bytes.len() != slicelen {
+            if bytes.len() != slice_len {
                 return Err(vm.new_index_error("mmap slice assignment is wrong size".to_owned()));
             }
 
-            if slicelen == 0 {
+            if slice_len == 0 {
                 // do nothing
                 Ok(())
             } else if step == 1 {
