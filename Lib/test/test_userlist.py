@@ -7,14 +7,19 @@ import unittest
 class UserListTest(list_tests.CommonTest):
     type2test = UserList
 
-    # TODO: RUSTPYTHON, parent method is marked but this version passes
-    def test_init(self):
-        super().test_init()
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
+    def test_contains_fake(self):  # XXX: RUSTPYTHON; the method also need to be removed when done
+        super().test_contains_fake()
 
-    # TODO: RUSTPYTHON, parent method is marked but this version passes
+    # TODO: RUSTPYTHON
+    @unittest.expectedFailure
+    def test_count(self):  # XXX: RUSTPYTHON; the method also need to be removed when done
+        super().test_count()
+
     import sys
     @unittest.skipIf(sys.platform == "win32", "TODO: RUSTPYTHON, unexpectedly panics somewhere")
-    def test_repr_deep(self):
+    def test_repr_deep(self):  # XXX: RUSTPYTHON; remove this method when fixed
         super().test_repr_deep()
 
     def test_getslice(self):
