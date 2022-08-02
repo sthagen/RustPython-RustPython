@@ -6,7 +6,7 @@ use crate::{
     convert::ToPyObject,
     function::PyComparisonValue,
     protocol::PyMappingMethods,
-    types::{AsMapping, Comparable, GetAttr, Hashable, Iterable, PyComparisonOp},
+    types::{AsMapping, Comparable, GetAttr, Hashable, PyComparisonOp},
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     VirtualMachine,
 };
@@ -271,9 +271,14 @@ impl Comparable for PyUnion {
     ) -> PyResult<PyComparisonValue> {
         op.eq_only(|| {
             let other = class_or_notimplemented!(Self, other);
+            let a = PyFrozenSet::from_iter(vm, zelf.args.into_iter().cloned())?;
+            let b = PyFrozenSet::from_iter(vm, other.args.into_iter().cloned())?;
             Ok(PyComparisonValue::Implemented(
-                zelf.args()
-                    .rich_compare_bool(other.args().as_ref(), PyComparisonOp::Eq, vm)?,
+                a.into_pyobject(vm).as_object().rich_compare_bool(
+                    b.into_pyobject(vm).as_object(),
+                    PyComparisonOp::Eq,
+                    vm,
+                )?,
             ))
         })
     }
@@ -282,8 +287,7 @@ impl Comparable for PyUnion {
 impl Hashable for PyUnion {
     #[inline]
     fn hash(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<hash::PyHash> {
-        let it = PyTuple::iter(zelf.args.clone(), vm);
-        let set = PyFrozenSet::from_iter(vm, it)?;
+        let set = PyFrozenSet::from_iter(vm, zelf.args.into_iter().cloned())?;
         PyFrozenSet::hash(&set.into_ref(vm), vm)
     }
 }

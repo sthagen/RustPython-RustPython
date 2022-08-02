@@ -637,8 +637,6 @@ class TypesTests(unittest.TestCase):
 
 class UnionTests(unittest.TestCase):
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_or_types_operator(self):
         self.assertEqual(int | str, typing.Union[int, str])
         self.assertNotEqual(int | list, typing.Union[int, str])
@@ -703,8 +701,6 @@ class UnionTests(unittest.TestCase):
         y.__args__ = [str, int]
         self.assertEqual(x, y)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hash(self):
         self.assertEqual(hash(int | str), hash(str | int))
         self.assertEqual(hash(int | str), hash(typing.Union[int, str]))
