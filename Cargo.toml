@@ -27,6 +27,7 @@ jit = ["rustpython-vm/jit"]
 threading = ["rustpython-vm/threading", "rustpython-stdlib/threading"]
 pylib = ["rustpython-vm/pylib"]
 zlib = ["stdlib", "rustpython-stdlib/zlib"]
+bz2 = ["stdlib", "rustpython-stdlib/bz2"]
 ssl = ["rustpython-stdlib/ssl"]
 ssl-vendor = ["rustpython-stdlib/ssl-vendor"]
 
@@ -75,9 +76,12 @@ opt-level = 3
 # lto = "thin"
 
 [profile.bench]
-lto = true
+lto = "thin"
 codegen-units = 1
 opt-level = 3
+
+[profile.release]
+lto = "thin"
 
 [patch.crates-io]
 # REDOX START, Uncommment when you want to compile/check with redoxer
