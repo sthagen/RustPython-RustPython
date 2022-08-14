@@ -761,13 +761,14 @@ impl Compiler {
                     self.switch_to_block(after_block);
                 }
             }
-            Break => {
-                if self.ctx.loop_data.is_some() {
-                    self.emit(Instruction::Break);
-                } else {
+            Break => match self.ctx.loop_data {
+                Some((_, end)) => {
+                    self.emit(Instruction::Break { target: end });
+                }
+                None => {
                     return Err(self.error_loc(CompileErrorType::InvalidBreak, statement.location));
                 }
-            }
+            },
             Continue => match self.ctx.loop_data {
                 Some((start, _)) => {
                     self.emit(Instruction::Continue { target: start });
@@ -1373,8 +1374,7 @@ impl Compiler {
 
         self.compile_jump_if(test, false, else_block)?;
 
-        let was_in_loop = self.ctx.loop_data;
-        self.ctx.loop_data = Some((while_block, after_block));
+        let was_in_loop = self.ctx.loop_data.replace((while_block, after_block));
         self.compile_statements(body)?;
         self.ctx.loop_data = was_in_loop;
         self.emit(Instruction::Jump {
@@ -1393,53 +1393,68 @@ impl Compiler {
         body: &[ast::Stmt],
         is_async: bool,
     ) -> CompileResult<()> {
-        let end_blocks = items
-            .iter()
-            .map(|item| {
-                let end_block = self.new_block();
-                self.compile_expression(&item.context_expr)?;
+        let with_location = self.current_source_location;
 
-                if is_async {
-                    self.emit(Instruction::BeforeAsyncWith);
-                    self.emit(Instruction::GetAwaitable);
-                    self.emit_constant(ConstantData::None);
-                    self.emit(Instruction::YieldFrom);
-                    self.emit(Instruction::SetupAsyncWith { end: end_block });
-                } else {
-                    self.emit(Instruction::SetupWith { end: end_block });
-                }
+        let (item, items) = if let Some(parts) = items.split_first() {
+            parts
+        } else {
+            return Err(self.error(CompileErrorType::EmptyWithItems));
+        };
 
-                match &item.optional_vars {
-                    Some(var) => {
-                        self.compile_store(var)?;
-                    }
-                    None => {
-                        self.emit(Instruction::Pop);
-                    }
-                }
-                Ok(end_block)
-            })
-            .collect::<CompileResult<Vec<_>>>()?;
+        let final_block = {
+            let final_block = self.new_block();
+            self.compile_expression(&item.context_expr)?;
 
-        self.compile_statements(body)?;
-
-        // sort of "stack up" the layers of with blocks:
-        // with a, b: body -> start_with(a) start_with(b) body() end_with(b) end_with(a)
-        for end_block in end_blocks.into_iter().rev() {
-            self.emit(Instruction::PopBlock);
-            self.emit(Instruction::EnterFinally);
-
-            self.switch_to_block(end_block);
-            self.emit(Instruction::WithCleanupStart);
-
+            self.set_source_location(with_location);
             if is_async {
+                self.emit(Instruction::BeforeAsyncWith);
                 self.emit(Instruction::GetAwaitable);
                 self.emit_constant(ConstantData::None);
                 self.emit(Instruction::YieldFrom);
+                self.emit(Instruction::SetupAsyncWith { end: final_block });
+            } else {
+                self.emit(Instruction::SetupWith { end: final_block });
             }
 
-            self.emit(Instruction::WithCleanupFinish);
+            match &item.optional_vars {
+                Some(var) => {
+                    self.set_source_location(var.location);
+                    self.compile_store(var)?;
+                }
+                None => {
+                    self.emit(Instruction::Pop);
+                }
+            }
+            final_block
+        };
+
+        if items.is_empty() {
+            if body.is_empty() {
+                return Err(self.error(CompileErrorType::EmptyWithBody));
+            }
+            self.compile_statements(body)?;
+        } else {
+            self.set_source_location(with_location);
+            self.compile_with(items, body, is_async)?;
         }
+
+        // sort of "stack up" the layers of with blocks:
+        // with a, b: body -> start_with(a) start_with(b) body() end_with(b) end_with(a)
+        self.set_source_location(with_location);
+        self.emit(Instruction::PopBlock);
+
+        self.emit(Instruction::EnterFinally);
+
+        self.switch_to_block(final_block);
+        self.emit(Instruction::WithCleanupStart);
+
+        if is_async {
+            self.emit(Instruction::GetAwaitable);
+            self.emit_constant(ConstantData::None);
+            self.emit(Instruction::YieldFrom);
+        }
+
+        self.emit(Instruction::WithCleanupFinish);
 
         Ok(())
     }
@@ -1487,8 +1502,7 @@ impl Compiler {
             self.compile_store(target)?;
         };
 
-        let was_in_loop = self.ctx.loop_data;
-        self.ctx.loop_data = Some((for_block, after_block));
+        let was_in_loop = self.ctx.loop_data.replace((for_block, after_block));
         self.compile_statements(body)?;
         self.ctx.loop_data = was_in_loop;
         self.emit(Instruction::Jump { target: for_block });
@@ -2468,11 +2482,6 @@ impl Compiler {
             let loop_block = self.new_block();
             let after_block = self.new_block();
 
-            // Setup for loop:
-            self.emit(Instruction::SetupLoop {
-                break_target: after_block,
-            });
-
             if loop_labels.is_empty() {
                 // Load iterator onto stack (passed as first argument):
                 self.emit(Instruction::LoadFast(arg0));
@@ -2507,7 +2516,6 @@ impl Compiler {
 
             // End of for loop:
             self.switch_to_block(after_block);
-            self.emit(Instruction::PopBlock);
         }
 
         if return_none {

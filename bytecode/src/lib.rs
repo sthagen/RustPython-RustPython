@@ -105,7 +105,7 @@ pub struct CodeObject<C: Constant = ConstantData> {
     pub kwonlyarg_count: usize,
     pub source_path: C::Name,
     pub first_line_number: usize,
-    pub max_stacksize: u32,
+    pub max_stackdepth: u32,
     pub obj_name: C::Name,
     // Name of the object that created this code object
     pub cell2arg: Option<Box<[isize]>>,
@@ -249,7 +249,9 @@ pub enum Instruction {
     Continue {
         target: Label,
     },
-    Break,
+    Break {
+        target: Label,
+    },
     Jump {
         target: Label,
     },
@@ -693,17 +695,39 @@ impl<C: Constant> CodeObject<C> {
         level: usize,
     ) -> fmt::Result {
         let label_targets = self.label_targets();
-
+        let line_digits = (3).max(self.locations.last().unwrap().row.to_string().len());
+        let offset_digits = (4).max(self.instructions.len().to_string().len());
+        let mut last_line = u32::MAX;
         for (offset, instruction) in self.instructions.iter().enumerate() {
+            // optional line number
+            let line = self.locations[offset].row;
+            if line != last_line {
+                if last_line != u32::MAX {
+                    writeln!(f)?;
+                }
+                last_line = line;
+                write!(f, "{line:line_digits$}")?;
+            } else {
+                for _ in 0..line_digits {
+                    write!(f, " ")?;
+                }
+            }
+            write!(f, " ")?;
+
+            // level indent
+            for _ in 0..level {
+                write!(f, "    ")?;
+            }
+
+            // arrow and offset
             let arrow = if label_targets.contains(&Label(offset as u32)) {
                 ">>"
             } else {
                 "  "
             };
-            for _ in 0..level {
-                write!(f, "          ")?;
-            }
-            write!(f, "{} {:5} ", arrow, offset)?;
+            write!(f, "{arrow} {offset:offset_digits$} ")?;
+
+            // instruction
             instruction.fmt_dis(
                 f,
                 &self.constants,
@@ -759,7 +783,7 @@ impl<C: Constant> CodeObject<C> {
             arg_count: self.arg_count,
             kwonlyarg_count: self.kwonlyarg_count,
             first_line_number: self.first_line_number,
-            max_stacksize: self.max_stacksize,
+            max_stackdepth: self.max_stackdepth,
             cell2arg: self.cell2arg,
         }
     }
@@ -788,7 +812,7 @@ impl<C: Constant> CodeObject<C> {
             arg_count: self.arg_count,
             kwonlyarg_count: self.kwonlyarg_count,
             first_line_number: self.first_line_number,
-            max_stacksize: self.max_stacksize,
+            max_stackdepth: self.max_stackdepth,
             cell2arg: self.cell2arg.clone(),
         }
     }
@@ -908,7 +932,7 @@ impl Instruction {
     pub fn unconditional_branch(&self) -> bool {
         matches!(
             self,
-            Jump { .. } | Continue { .. } | Break | ReturnValue | Raise { .. }
+            Jump { .. } | Continue { .. } | Break { .. } | ReturnValue | Raise { .. }
         )
     }
 
@@ -951,7 +975,7 @@ impl Instruction {
             Duplicate2 => 2,
             GetIter => 0,
             Continue { .. } => 0,
-            Break => 0,
+            Break { .. } => 0,
             Jump { .. } => 0,
             JumpIfTrue { .. } | JumpIfFalse { .. } => -1,
             JumpIfTrueOrPop { .. } | JumpIfFalseOrPop { .. } => {
@@ -1138,7 +1162,7 @@ impl Instruction {
             Duplicate2 => w!(Duplicate2),
             GetIter => w!(GetIter),
             Continue { target } => w!(Continue, target),
-            Break => w!(Break),
+            Break { target } => w!(Break, target),
             Jump { target } => w!(Jump, target),
             JumpIfTrue { target } => w!(JumpIfTrue, target),
             JumpIfFalse { target } => w!(JumpIfFalse, target),

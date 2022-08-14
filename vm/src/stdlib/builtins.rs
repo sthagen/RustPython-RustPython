@@ -24,8 +24,8 @@ mod builtins {
         format::call_object_format,
         function::Either,
         function::{
-            ArgBytesLike, ArgCallable, ArgIntoBool, ArgIterable, ArgMapping, FuncArgs, KwArgs,
-            OptionalArg, OptionalOption, PosArgs, PyArithmeticValue,
+            ArgBytesLike, ArgCallable, ArgIntoBool, ArgIterable, ArgMapping, ArgStrOrBytesLike,
+            FuncArgs, KwArgs, OptionalArg, OptionalOption, PosArgs, PyArithmeticValue,
         },
         protocol::{PyIter, PyIterReturn},
         py_io,
@@ -248,11 +248,34 @@ mod builtins {
     #[cfg(feature = "rustpython-compiler")]
     #[pyfunction]
     fn eval(
-        source: Either<PyStrRef, PyRef<crate::builtins::PyCode>>,
+        source: Either<ArgStrOrBytesLike, PyRef<crate::builtins::PyCode>>,
         scope: ScopeArgs,
         vm: &VirtualMachine,
     ) -> PyResult {
-        run_code(vm, source, scope, compile::Mode::Eval, "eval")
+        // source as string
+        let code = match source {
+            Either::A(either) => {
+                let source: &[u8] = &either.borrow_bytes();
+                if source.contains(&0) {
+                    return Err(vm.new_value_error(
+                        "source code string cannot contain null bytes".to_owned(),
+                    ));
+                }
+
+                let source = std::str::from_utf8(source).map_err(|err| {
+                    let msg = format!(
+                        "(unicode error) 'utf-8' codec can't decode byte 0x{:x?} in position {}: invalid start byte",
+                        source[err.valid_up_to()],
+                        err.valid_up_to()
+                    );
+
+                    vm.new_exception_msg(vm.ctx.exceptions.syntax_error.to_owned(), msg)
+                })?;
+                Ok(Either::A(vm.ctx.new_str(source)))
+            }
+            Either::B(code) => Ok(Either::B(code)),
+        }?;
+        run_code(vm, code, scope, compile::Mode::Eval, "eval")
     }
 
     /// Implements `exec`
@@ -913,7 +936,19 @@ mod builtins {
         )?;
 
         if let Some(ref classcell) = classcell {
-            classcell.set(Some(class.clone()));
+            let classcell = classcell.get().ok_or_else(|| {
+                vm.new_type_error(format!(
+                    "__class__ not set defining {:?} as {:?}. Was __classcell__ propagated to type.__new__?",
+                    meta_name, class
+                ))
+            })?;
+
+            if !classcell.is(&class) {
+                return Err(vm.new_type_error(format!(
+                    "__class__ set to {:?} defining {:?} as {:?}",
+                    classcell, meta_name, class
+                )));
+            }
         }
 
         Ok(class)

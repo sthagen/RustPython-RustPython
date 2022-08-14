@@ -8,13 +8,15 @@ use crate::common::{
     lock::{PyRwLock, PyRwLockReadGuard},
 };
 use crate::{
+    builtins::function::PyCellRef,
     builtins::PyBaseExceptionRef,
     class::{PyClassImpl, StaticType},
+    convert::ToPyObject,
     function::{FuncArgs, KwArgs, OptionalArg, PySetterValue},
     identifier,
     protocol::PyNumberMethods,
     types::{Callable, GetAttr, PyTypeFlags, PyTypeSlots, SetAttr},
-    AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 use indexmap::{map::Entry, IndexMap};
 use itertools::Itertools;
@@ -405,6 +407,34 @@ impl PyType {
             .unwrap_or_else(|| vm.ctx.new_str(self.name().deref()).into())
     }
 
+    #[pyproperty(magic, setter)]
+    fn set_qualname(&self, value: PySetterValue, vm: &VirtualMachine) -> PyResult<()> {
+        // TODO: we should replace heaptype flag check to immutable flag check
+        if !self.slots.flags.has_feature(PyTypeFlags::HEAPTYPE) {
+            return Err(vm.new_type_error(format!(
+                "cannot set '__qualname__' attribute of immutable type '{}'",
+                self.name()
+            )));
+        };
+        let value = value.ok_or_else(|| {
+            vm.new_type_error(format!(
+                "cannot delete '__qualname__' attribute of immutable type '{}'",
+                self.name()
+            ))
+        })?;
+        if !value.class().fast_issubclass(vm.ctx.types.str_type) {
+            return Err(vm.new_type_error(format!(
+                "can only assign string to {}.__qualname__, not '{}'",
+                self.name(),
+                value.class().name()
+            )));
+        }
+        self.attributes
+            .write()
+            .insert(identifier!(vm, __qualname__), value);
+        Ok(())
+    }
+
     #[pyproperty(magic)]
     pub fn module(&self, vm: &VirtualMachine) -> PyObjectRef {
         self.attributes
@@ -593,6 +623,16 @@ impl PyType {
 
         let typ = Self::new_verbose_ref(name.as_str(), base, bases, attributes, slots, metatype)
             .map_err(|e| vm.new_type_error(e))?;
+
+        if let Some(cell) = typ.attributes.write().get(identifier!(vm, __classcell__)) {
+            let cell = PyCellRef::try_from_object(vm, cell.clone()).map_err(|_| {
+                vm.new_type_error(format!(
+                    "__classcell__ must be a nonlocal cell, not {}",
+                    cell.class().name()
+                ))
+            })?;
+            cell.set(Some(typ.clone().to_pyobject(vm)));
+        };
 
         // avoid deadlock
         let attributes = typ
