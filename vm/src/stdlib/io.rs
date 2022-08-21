@@ -2989,7 +2989,7 @@ mod _io {
             if let Some((dec_buffer, dec_flags)) = dec_state {
                 // TODO: inplace append to bytes when refcount == 1
                 let mut next_input = dec_buffer.as_bytes().to_vec();
-                next_input.extend_from_slice(&*buf.borrow_buf());
+                next_input.extend_from_slice(&buf.borrow_buf());
                 self.snapshot = Some((dec_flags, PyBytes::from(next_input).into_ref(vm)));
             }
 
@@ -3298,7 +3298,7 @@ mod _io {
             let mut buf = self.buffer(vm)?;
             let ret = buf
                 .cursor
-                .read(&mut *obj.borrow_buf_mut())
+                .read(&mut obj.borrow_buf_mut())
                 .map_err(|_| vm.new_value_error("Error readinto from Take".to_owned()))?;
 
             Ok(ret)
@@ -3676,7 +3676,8 @@ mod _io {
         vm: &VirtualMachine,
     ) -> PyResult<PyStrRef> {
         if vm.is_none(&encoding) {
-            return Ok(vm.ctx.new_str("locale"));
+            // TODO: This is `locale` encoding - but we don't have locale encoding yet
+            return Ok(vm.ctx.new_str("utf-8"));
         }
         encoding.try_into_value(vm)
     }

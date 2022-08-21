@@ -731,6 +731,8 @@ impl ExceptionZoo {
 
         extend_exception!(PyImportError, ctx, excs.import_error, {
             "msg" => ctx.new_readonly_getset("msg", excs.import_error, make_arg_getter(0)),
+            "name" => ctx.none(),
+            "path" => ctx.none(),
         });
         extend_exception!(PyModuleNotFoundError, ctx, excs.module_not_found_error);
 
@@ -908,18 +910,30 @@ fn system_exit_code(exc: PyBaseExceptionRef) -> Option<PyObjectRef> {
     })
 }
 
-pub struct SerializeException<'s> {
-    vm: &'s VirtualMachine,
+pub struct SerializeException<'vm, 's> {
+    vm: &'vm VirtualMachine,
     exc: &'s PyBaseExceptionRef,
 }
 
-impl<'s> SerializeException<'s> {
-    pub fn new(vm: &'s VirtualMachine, exc: &'s PyBaseExceptionRef) -> Self {
+impl<'vm, 's> SerializeException<'vm, 's> {
+    pub fn new(vm: &'vm VirtualMachine, exc: &'s PyBaseExceptionRef) -> Self {
         SerializeException { vm, exc }
     }
 }
 
-impl serde::Serialize for SerializeException<'_> {
+pub struct SerializeExceptionOwned<'vm> {
+    vm: &'vm VirtualMachine,
+    exc: PyBaseExceptionRef,
+}
+
+impl serde::Serialize for SerializeExceptionOwned<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let Self { vm, exc } = self;
+        SerializeException::new(vm, exc).serialize(s)
+    }
+}
+
+impl serde::Serialize for SerializeException<'_, '_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::*;
 
@@ -941,11 +955,17 @@ impl serde::Serialize for SerializeException<'_> {
         struc.serialize_field("traceback", &tbs)?;
         struc.serialize_field(
             "cause",
-            &self.exc.cause().as_ref().map(|e| Self::new(self.vm, e)),
+            &self
+                .exc
+                .cause()
+                .map(|exc| SerializeExceptionOwned { vm: self.vm, exc }),
         )?;
         struc.serialize_field(
             "context",
-            &self.exc.context().as_ref().map(|e| Self::new(self.vm, e)),
+            &self
+                .exc
+                .context()
+                .map(|exc| SerializeExceptionOwned { vm: self.vm, exc }),
         )?;
         struc.serialize_field("suppress_context", &self.exc.get_suppress_context())?;
 

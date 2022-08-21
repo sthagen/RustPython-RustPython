@@ -12,17 +12,6 @@ use crate::{
 };
 use rand::Rng;
 
-pub(crate) fn init_importlib(
-    vm: &mut VirtualMachine,
-    allow_external_library: bool,
-) -> PyResult<()> {
-    let importlib = init_importlib_base(vm)?;
-    if allow_external_library && cfg!(feature = "rustpython-compiler") {
-        init_importlib_package(vm, importlib)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn init_importlib_base(vm: &mut VirtualMachine) -> PyResult<PyObjectRef> {
     flame_guard!("init importlib");
 
@@ -172,7 +161,7 @@ fn remove_importlib_frames_inner(
     let file_name = traceback.frame.code.source_path.as_str();
 
     let (inner_tb, mut now_in_importlib) =
-        remove_importlib_frames_inner(vm, traceback.next.clone(), always_trim);
+        remove_importlib_frames_inner(vm, traceback.next.lock().clone(), always_trim);
     if file_name == "_frozen_importlib" || file_name == "_frozen_importlib_external" {
         if traceback.frame.code.obj_name.as_str() == "_call_with_frames_removed" {
             now_in_importlib = true;

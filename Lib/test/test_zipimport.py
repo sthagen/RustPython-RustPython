@@ -189,8 +189,6 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
                  TESTMOD + pyc_ext: (NOW, test_pyc)}
         self.doTest(pyc_ext, files, TESTMOD)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def testUncheckedHashBasedPyc(self):
         source = b"state = 'old'"
         source_hash = importlib.util.source_hash(source)
@@ -205,8 +203,6 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
             self.assertEqual(mod.state, 'old')
         self.doTest(None, files, TESTMOD, call=check)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @unittest.mock.patch('_imp.check_hash_based_pycs', 'always')
     def test_checked_hash_based_change_pyc(self):
         source = b"state = 'old'"
@@ -234,8 +230,6 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
                  TESTMOD + pyc_ext: (NOW, badmagic_pyc)}
         self.doTest(".py", files, TESTMOD)
 
-    # TODO: RUSTPYTHON, zipimport.ZipImportError: can't find module 'ziptestmodule'
-    @unittest.expectedFailure
     def testBadMagic2(self):
         # make pyc magic word invalid, causing an ImportError
         badmagic_pyc = bytearray(test_pyc)
@@ -442,8 +436,6 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
         mod = importlib.import_module('.'.join((subpkg, TESTMOD + '3')))
         self.assertEqual('path1.zip', mod.__file__.split(os.sep)[-4])
 
-    # TODO: RUSTPYTHON, AttributeError: 'zipimporter' object has no attribute 'find_spec'
-    @unittest.expectedFailure
     def testZipImporterMethods(self):
         packdir = TESTPACK + os.sep
         packdir2 = packdir + TESTPACK2 + os.sep
@@ -467,15 +459,15 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
         # PEP 302
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
-        find_mod = zi.find_module('spam')
-        self.assertIsNotNone(find_mod)
-        self.assertIsInstance(find_mod, zipimport.zipimporter)
-        self.assertFalse(find_mod.is_package('spam'))
-        load_mod = find_mod.load_module('spam')
-        self.assertEqual(find_mod.get_filename('spam'), load_mod.__file__)
+            find_mod = zi.find_module('spam')
+            self.assertIsNotNone(find_mod)
+            self.assertIsInstance(find_mod, zipimport.zipimporter)
+            self.assertFalse(find_mod.is_package('spam'))
+            load_mod = find_mod.load_module('spam')
+            self.assertEqual(find_mod.get_filename('spam'), load_mod.__file__)
 
-        mod = zi.load_module(TESTPACK)
-        self.assertEqual(zi.get_filename(TESTPACK), mod.__file__)
+            mod = zi.load_module(TESTPACK)
+            self.assertEqual(zi.get_filename(TESTPACK), mod.__file__)
 
         # PEP 451
         spec = zi.find_spec('spam')
@@ -517,8 +509,6 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
         self.assertEqual(zi2.archive, TEMP_ZIP)
         self.assertEqual(zi2.prefix, TESTPACK + os.sep)
 
-    # TODO: RUSTPYTHON, AttributeError: 'zipimporter' object has no attribute 'invalidate_caches'
-    @unittest.expectedFailure
     def testInvalidateCaches(self):
         packdir = TESTPACK + os.sep
         packdir2 = packdir + TESTPACK2 + os.sep
@@ -561,8 +551,6 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
         self.assertIsNone(zipimport._zip_directory_cache.get(zi.archive))
         self.assertIsNone(zi.find_spec("name_does_not_matter"))
 
-    # TODO: RUSTPYTHON, AttributeError: 'zipimporter' object has no attribute 'find_spec'
-    @unittest.expectedFailure
     def testZipImporterMethodsInSubDirectory(self):
         packdir = TESTPACK + os.sep
         packdir2 = packdir + TESTPACK2 + os.sep
@@ -584,8 +572,8 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
         # PEP 302
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
-        mod = zi.load_module(TESTPACK2)
-        self.assertEqual(zi.get_filename(TESTPACK2), mod.__file__)
+            mod = zi.load_module(TESTPACK2)
+            self.assertEqual(zi.get_filename(TESTPACK2), mod.__file__)
         # PEP 451
         spec = zi.find_spec(TESTPACK2)
         mod = importlib.util.module_from_spec(spec)
@@ -600,13 +588,13 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
         # PEP 302
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
-        find_mod_dotted = zi2.find_module(TESTMOD)
-        self.assertIsNotNone(find_mod_dotted)
-        self.assertIsInstance(find_mod_dotted, zipimport.zipimporter)
-        self.assertFalse(zi2.is_package(TESTMOD))
-        load_mod = find_mod_dotted.load_module(TESTMOD)
-        self.assertEqual(
-            find_mod_dotted.get_filename(TESTMOD), load_mod.__file__)
+            find_mod_dotted = zi2.find_module(TESTMOD)
+            self.assertIsNotNone(find_mod_dotted)
+            self.assertIsInstance(find_mod_dotted, zipimport.zipimporter)
+            self.assertFalse(zi2.is_package(TESTMOD))
+            load_mod = find_mod_dotted.load_module(TESTMOD)
+            self.assertEqual(
+                find_mod_dotted.get_filename(TESTMOD), load_mod.__file__)
 
         # PEP 451
         spec = zi2.find_spec(TESTMOD)
@@ -740,8 +728,6 @@ class UncompressedZipImportTestCase(ImportHooksBaseTestCase):
         files = {TESTMOD + ".py": (NOW, raise_src)}
         self.doTest(None, files, TESTMOD, call=self.doTraceback)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @unittest.skipIf(os_helper.TESTFN_UNENCODABLE is None,
                      "need an unencodable filename")
     def testUnencodable(self):
@@ -846,7 +832,7 @@ class BadFileZipImportTestCase(unittest.TestCase):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
-            self.assertRaises(TypeError, z.load_module, None)
+                self.assertRaises(TypeError, z.load_module, None)
             self.assertRaises(TypeError, z.find_module, None)
             self.assertRaises(TypeError, z.find_spec, None)
             self.assertRaises(TypeError, z.exec_module, None)
@@ -861,7 +847,7 @@ class BadFileZipImportTestCase(unittest.TestCase):
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
-            self.assertRaises(error, z.load_module, 'abc')
+                self.assertRaises(error, z.load_module, 'abc')
             self.assertRaises(error, z.get_code, 'abc')
             self.assertRaises(OSError, z.get_data, 'abc')
             self.assertRaises(error, z.get_source, 'abc')
@@ -871,7 +857,7 @@ class BadFileZipImportTestCase(unittest.TestCase):
 
 
 def tearDownModule():
-        os_helper.unlink(TESTMOD)
+    os_helper.unlink(TESTMOD)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CARGO_ARGS: --features ssl,jit
+  CARGO_ARGS: --no-default-features --features stdlib,zlib,importlib,encodings,ssl,jit
   NON_WASM_PACKAGES: >-
     -p rustpython-bytecode
     -p rustpython-common
@@ -101,6 +101,7 @@ jobs:
     env:
       RUST_BACKTRACE: full
     name: Run rust tests
+    needs: lalrpop
     runs-on:  ${{ matrix.os }}
     strategy:
       matrix:
@@ -108,7 +109,12 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v2
-      - uses: dtolnay/rust-toolchain@1.62.1
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
+      - uses: dtolnay/rust-toolchain@stable
       - name: Set up the Windows environment
         shell: bash
         run: |
@@ -120,9 +126,9 @@ jobs:
         if: runner.os == 'macOS'
       - uses: Swatinem/rust-cache@v1
       - name: run rust tests
-        run: cargo test --workspace --exclude rustpython_wasm --verbose ${{ env.CARGO_ARGS }} ${{ env.NON_WASM_PACKAGES }}
+        run: cargo test --workspace --exclude rustpython_wasm --verbose --features threading ${{ env.CARGO_ARGS }} ${{ env.NON_WASM_PACKAGES }}
       - name: check compilation without threading
-        run: cargo check ${{ env.CARGO_ARGS }} --no-default-features
+        run: cargo check ${{ env.CARGO_ARGS }}
 
       - name: prepare AppleSilicon build
         uses: dtolnay/rust-toolchain@stable
@@ -143,9 +149,15 @@ jobs:
 
   exotic_targets:
     name: Ensure compilation on various targets
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -200,6 +212,7 @@ jobs:
           command: check
 
   snippets_cpython:
+    needs: lalrpop
     env:
       RUST_BACKTRACE: full
     name: Run snippets and cpython tests
@@ -210,7 +223,13 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v2
-      - uses: dtolnay/rust-toolchain@1.62.1
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
+
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v2
         with:
           python-version: "3.10"
@@ -225,7 +244,7 @@ jobs:
         if: runner.os == 'macOS'
       - uses: Swatinem/rust-cache@v1
       - name: build rustpython
-        run: cargo build --release --verbose ${{ env.CARGO_ARGS }}
+        run: cargo build --release --verbose --features=threading ${{ env.CARGO_ARGS }}
       - uses: actions/setup-python@v2
         with:
           python-version: "3.10"
@@ -258,11 +277,49 @@ jobs:
           mkdir site-packages
           target/release/rustpython --install-pip ensurepip --user
 
+  lalrpop:
+    name: Generate parser with lalrpop
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on:  ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
+      - name: Check if cached generated parser exists
+        id: generated_parser
+        uses: andstor/file-existence-action@v1
+        with:
+          files: "parser/python.rs"
+      - if: runner.os == 'Windows'
+        name: Force python.lalrpop to be lf  # actions@checkout ignore .gitattributes
+        run: |
+          set file parser/python.lalrpop; ((Get-Content $file) -join "`n") + "`n" | Set-Content -NoNewline $file
+      - name: Install lalrpop
+        if: steps.generated_parser.outputs.files_exists == 'false'
+        uses: baptiste0928/cargo-install@v1
+        with:
+          crate: lalrpop
+          version: "0.19.8"
+      - name: Run lalrpop
+        if: steps.generated_parser.outputs.files_exists == 'false'
+        run: lalrpop parser/python.lalrpop
+
   lint:
     name: Check Rust code with rustfmt and clippy
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
       - uses: dtolnay/rust-toolchain@stable
         with:
             components: rustfmt, clippy
@@ -284,11 +341,18 @@ jobs:
       - name: check wasm code with prettier
         # prettier doesn't handle ignore files very well: https://github.com/prettier/prettier/issues/8506
         run: cd wasm && git ls-files -z | xargs -0 prettier --check -u
+
   miri:
     name: Run tests under miri
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
       - uses: dtolnay/rust-toolchain@master
         with:
             toolchain: nightly
@@ -301,21 +365,17 @@ jobs:
 
   wasm:
     name: Check the WASM package and demo
-    needs: rust_tests
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo dependencies
+      - name: Cache generated parser
         uses: actions/cache@v2
         with:
-          path: |
-              ~/.cargo/registry
-              ~/.cargo/git
-              target
-          key: ${{ runner.os }}-wasm_opt3-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-               ${{ runner.os }}-debug_opt3-${{ hashFiles('**/Cargo.lock') }}
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v1
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: install geckodriver
@@ -353,26 +413,23 @@ jobs:
 
   wasm-wasi:
     name: Run snippets and cpython tests on wasm-wasi
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: parser/python.rs
+          key: lalrpop-${{ hashFiles('parser/python.lalrpop') }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           target: wasm32-wasi
+      - uses: Swatinem/rust-cache@v1
       - name: Setup Wasmer
         uses: wasmerio/setup-wasmer@v1
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install clang -y
-      - name: Cache cargo dependencies
-        uses: actions/cache@v2
-        with:
-          path: |
-              ~/.cargo/registry
-              ~/.cargo/git
-              target
-          key: ${{ runner.os }}-wasm_opt3-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-               ${{ runner.os }}-debug_opt3-${{ hashFiles('**/Cargo.lock') }}
       - name: build rustpython
         run: cargo build --release --target wasm32-wasi --features freeze-stdlib,stdlib --verbose
       - name: run snippets

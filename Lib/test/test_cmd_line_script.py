@@ -298,8 +298,6 @@ class CmdLineTest(unittest.TestCase):
             self._check_script(zip_name, run_name, zip_name, zip_name, '',
                                zipimport.zipimporter)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_zipfile_compiled_checked_hash(self):
         with os_helper.temp_dir() as script_dir:
             script_name = _make_test_script(script_dir, '__main__')
@@ -310,8 +308,6 @@ class CmdLineTest(unittest.TestCase):
             self._check_script(zip_name, run_name, zip_name, zip_name, '',
                                zipimport.zipimporter)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_zipfile_compiled_unchecked_hash(self):
         with os_helper.temp_dir() as script_dir:
             script_name = _make_test_script(script_dir, '__main__')
@@ -523,8 +519,6 @@ class CmdLineTest(unittest.TestCase):
             self.assertNotIn(b'is a package', err)
             self.assertNotIn(b'Traceback', err)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_hint_when_triying_to_import_a_py_file(self):
         with os_helper.temp_dir() as script_dir, \
                 os_helper.change_cwd(path=script_dir):

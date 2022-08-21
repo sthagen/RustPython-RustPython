@@ -9,13 +9,12 @@ edition = "2021"
 include = ["src/**/*.rs", "Cargo.toml", "build.rs", "Lib/**/*.py"]
 
 [features]
-default = ["compile-parse", "pylib"]
+default = ["compile-parse"]
 importlib = []
 encodings = ["importlib"]
 vm-tracing-logging = []
 flame-it = ["flame", "flamer"]
-pylib = ["rustpython-pylib"]
-freeze-stdlib = ["rustpython-pylib", "rustpython-pylib/compiled-bytecode"]
+freeze-stdlib = ["rustpython-pylib/freeze-stdlib"]
 jit = ["rustpython-jit"]
 threading = ["rustpython-common/threading"]
 compile-parse = ["parser", "compiler"]
@@ -37,7 +36,7 @@ rustpython-compiler = { path = "../compiler/porcelain", optional = true, version
 rustpython-compiler-core = { path = "../compiler", optional = true, version = "0.1.2" }
 rustpython-bytecode = { path = "../bytecode", version = "0.1.2" }
 rustpython-jit = { path = "../jit", optional = true, version = "0.1.2" }
-rustpython-pylib = { path = "pylib-crate", optional = true, version = "0.1.0" }
+rustpython-pylib = { path = "pylib-crate", version = "0.1.0" }
 rand = "0.8.5"
 getrandom = { version = "0.2.6", features = ["js"] }
 log = "0.4.16"
@@ -51,13 +50,13 @@ indexmap = "1.8.1"
 ahash = "0.7.6"
 bitflags = "1.3.2"
 libc = "0.2.126"
-nix = "0.23.1"
+nix = "0.24.2"
 paste = "1.0.7"
 is-macro = "0.2.0"
 result-like = "0.4.5"
 num_enum = "0.5.7"
 bstr = "0.2.17"
-crossbeam-utils = "0.8.8"
+crossbeam-utils = "=0.8.9"
 parking_lot = "0.12.0"
 thread_local = "1.1.4"
 cfg-if = "1.0.0"
@@ -74,13 +73,14 @@ memoffset = "0.6.5"
 optional = "0.5.0"
 
 # RustPython crates implementing functionality based on CPython
-sre-engine = "0.3.0"
+sre-engine = "0.4.1"
 # to work on sre-engine locally or git version
-# sre-engine = { git = "https://github.com/RustPython/sre-engine", rev = "refs/pull/12/head" }
+# sre-engine = { git = "https://github.com/RustPython/sre-engine", rev = "refs/pull/14/head" }
+# sre-engine = { git = "https://github.com/RustPython/sre-engine" }
 # sre-engine = { path = "../../sre-engine" }
 
 ## unicode stuff
-unicode_names2 = "0.5.0"
+unicode_names2 = "0.5.1"
 # TODO: use unic for this; needed for title case:
 # https://github.com/RustPython/RustPython/pull/832#discussion_r275428939
 unicode-casing = "0.1.0"
@@ -101,7 +101,7 @@ strum = "0.24.0"
 strum_macros = "0.24.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rustyline = "9"
+rustyline = "10.0.0"
 which = "4.2.5"
 
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dependencies]
@@ -111,6 +111,12 @@ num_cpus = "1.13.1"
 winreg = "0.10.1"
 schannel = "0.1.19"
 widestring = "0.5.1"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.39"
+features = [
+  "Win32_UI_Shell",
+]
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3.9"
@@ -126,3 +132,4 @@ wasm-bindgen = "0.2.80"
 [build-dependencies]
 itertools = "0.10.3"
 rustc_version = "0.4.0"
+glob = "0.3"

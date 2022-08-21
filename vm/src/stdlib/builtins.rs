@@ -109,6 +109,8 @@ mod builtins {
         dont_inherit: OptionalArg<bool>,
         #[pyarg(any, optional)]
         optimize: OptionalArg<PyIntRef>,
+        #[pyarg(any, optional)]
+        _feature_version: OptionalArg<i32>,
     }
 
     #[cfg(feature = "rustpython-compiler")]
@@ -121,6 +123,10 @@ mod builtins {
         #[cfg(feature = "rustpython-ast")]
         {
             use crate::{class::PyClassImpl, stdlib::ast};
+
+            if args._feature_version.is_present() {
+                eprintln!("TODO: compile() got `_feature_version` but ignored");
+            }
 
             let mode_str = args.mode.as_str();
 
@@ -402,9 +408,6 @@ mod builtins {
                     Err(vm.new_exception_empty(vm.ctx.exceptions.keyboard_interrupt.to_owned()))
                 }
                 ReadlineResult::Io(e) => Err(vm.new_os_error(e.to_string())),
-                ReadlineResult::EncodingError => {
-                    Err(vm.new_unicode_decode_error("Error decoding readline input".to_owned()))
-                }
                 ReadlineResult::Other(e) => Err(vm.new_runtime_error(e.to_string())),
             }
         } else {

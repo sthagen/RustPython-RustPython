@@ -62,6 +62,9 @@ pub struct Settings {
     // TODO: use this; can TextIOWrapper even work with a non-buffered?
     pub stdio_unbuffered: bool,
 
+    /// --check-hash-based-pycs
+    pub check_hash_based_pycs: String,
+
     /// false for wasm. Not a command-line option
     pub allow_external_library: bool,
 }
@@ -86,13 +89,11 @@ impl Default for Settings {
             dev_mode: false,
             warn_default_encoding: false,
             warnopts: vec![],
-            path_list: vec![
-                #[cfg(all(feature = "pylib", not(feature = "freeze-stdlib")))]
-                rustpython_pylib::LIB_PATH.to_owned(),
-            ],
+            path_list: vec![rustpython_pylib::LIB_PATH.to_owned()],
             argv: vec![],
             hash_seed: None,
             stdio_unbuffered: false,
+            check_hash_based_pycs: "default".to_owned(),
             allow_external_library: cfg!(feature = "importlib"),
         }
     }
