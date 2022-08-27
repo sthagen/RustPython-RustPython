@@ -11,9 +11,15 @@ env:
 jobs:
   codecov:
     name: Collect code coverage data
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: compiler/parser/python.rs
+          key: lalrpop-${{ hashFiles('compiler/parser/python.lalrpop') }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -31,14 +37,21 @@ jobs:
         working-directory: ./extra_tests
         continue-on-error: true
       - name: run cpython tests
-        run: LLVM_PROFILE_FILE="$PWD/regrtest.profraw" target/release/rustpython -m test -v
+        run: |
+          alltests=($(target/release/rustpython -c 'from test.libregrtest.runtest import findtests; print(*findtests())'))
+          i=0
+          # chunk into chunks of 10 tests each. idk at this point
+          while subtests=("${alltests[@]:$i:10}"); [[ ${#subtests[@]} -ne 0 ]]; do
+            LLVM_PROFILE_FILE="$PWD/regrtest-%p.profraw" target/release/rustpython -m test -v "${subtests[@]}" || true
+            ((i+=10))
+          done
         continue-on-error: true
       - name: prepare code coverage data
         run: |
           rusttool() {
             local tool=$1; shift; "$(rustc --print target-libdir)/../bin/llvm-$tool" "$@"
           }
-          rusttool profdata merge extra_tests/snippet-*.profraw regrtest.profraw --output codecov.profdata
+          rusttool profdata merge extra_tests/snippet-*.profraw regrtest-*.profraw --output codecov.profdata
           rusttool cov export --instr-profile codecov.profdata target/release/rustpython --format lcov > codecov_tmp.lcov
           lcov -e codecov_tmp.lcov "$PWD"/'*' -o codecov_tmp2.lcov
           lcov -r codecov_tmp2.lcov "$PWD"/target/'*' -o codecov.lcov  # remove LALRPOP-generated parser
@@ -49,9 +62,15 @@ jobs:
 
   testdata:
     name: Collect regression test data
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: compiler/parser/python.rs
+          key: lalrpop-${{ hashFiles('compiler/parser/python.lalrpop') }}
       - uses: dtolnay/rust-toolchain@stable
       - name: build rustpython
         run: cargo build --release --verbose
@@ -72,14 +91,21 @@ jobs:
           cd website
           cp ../extra_tests/cpython_tests_results.json ./_data/regrtests_results.json
           git add ./_data/regrtests_results.json
-          git -c user.name="Github Actions" -c user.email="actions@github.com" commit -m "Update regression test results" --author="$GITHUB_ACTOR"
-          git push
+          if git -c user.name="Github Actions" -c user.email="actions@github.com" commit -m "Update regression test results" --author="$GITHUB_ACTOR"; then
+            git push
+          fi
 
   whatsleft:
     name: Collect what is left data
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: compiler/parser/python.rs
+          key: lalrpop-${{ hashFiles('compiler/parser/python.lalrpop') }}
       - uses: dtolnay/rust-toolchain@stable
       - name: build rustpython
         run: cargo build --release --verbose
@@ -103,14 +129,21 @@ jobs:
           [ -f ./_data/whats_left.temp ] && cp ./_data/whats_left.temp ./_data/whats_left_lastrun.temp
           cp ../whats_left.temp ./_data/whats_left.temp
           git add -A
-          git -c user.name="Github Actions" -c user.email="actions@github.com" commit -m "Update what is left results" --author="$GITHUB_ACTOR"
-          git push
+          if git -c user.name="Github Actions" -c user.email="actions@github.com" commit -m "Update what is left results" --author="$GITHUB_ACTOR"; then
+            git push
+          fi
 
   benchmark:
     name: Collect benchmark data
+    needs: lalrpop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: compiler/parser/python.rs
+          key: lalrpop-${{ hashFiles('compiler/parser/python.lalrpop') }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v2
         with:
@@ -147,5 +180,38 @@ jobs:
           rm -rf ./assets/criterion
           cp -r ../target/criterion ./assets/criterion
           git add ./assets/criterion
-          git -c user.name="Github Actions" -c user.email="actions@github.com" commit -m "Update benchmark results"
-          git push
+          if git -c user.name="Github Actions" -c user.email="actions@github.com" commit -m "Update benchmark results"; then
+            git push
+          fi
+
+  lalrpop:
+    name: Generate parser with lalrpop
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on:  ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - name: Cache generated parser
+        uses: actions/cache@v2
+        with:
+          path: compiler/parser/python.rs
+          key: lalrpop-${{ hashFiles('compiler/parser/python.lalrpop') }}
+      - name: Check if cached generated parser exists
+        id: generated_parser
+        uses: andstor/file-existence-action@v1
+        with:
+          files: "compiler/parser/python.rs"
+      - if: runner.os == 'Windows'
+        name: Force python.lalrpop to be lf  # actions@checkout ignore .gitattributes
+        run: |
+          set file compiler/parser/python.lalrpop; ((Get-Content $file) -join "`n") + "`n" | Set-Content -NoNewline $file
+      - name: Install lalrpop
+        if: steps.generated_parser.outputs.files_exists == 'false'
+        uses: baptiste0928/cargo-install@v1
+        with:
+          crate: lalrpop
+          version: "0.19.8"
+      - name: Run lalrpop
+        if: steps.generated_parser.outputs.files_exists == 'false'
+        run: lalrpop compiler/parser/python.lalrpop
