@@ -56,7 +56,12 @@ pub mod module {
     #[pyattr]
     use libc::{PRIO_PGRP, PRIO_PROCESS, PRIO_USER};
 
-    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "linux"))]
+    #[cfg(any(
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "linux",
+        target_os = "macos"
+    ))]
     #[pyattr]
     use libc::{SEEK_DATA, SEEK_HOLE};
 
@@ -65,6 +70,9 @@ pub mod module {
     use libc::O_DSYNC;
     #[pyattr]
     use libc::{O_CLOEXEC, O_NONBLOCK, WNOHANG};
+    #[cfg(target_os = "macos")]
+    #[pyattr]
+    use libc::{O_EVTONLY, O_FSYNC, O_NOFOLLOW_ANY, O_SYMLINK};
     #[cfg(not(target_os = "redox"))]
     #[pyattr]
     use libc::{O_NDELAY, O_NOCTTY};
@@ -536,7 +544,7 @@ pub mod module {
 
     #[pyclass(with(Constructor))]
     impl SchedParam {
-        #[pyproperty]
+        #[pygetset]
         fn sched_priority(&self, vm: &VirtualMachine) -> PyObjectRef {
             self.sched_priority.clone().to_pyobject(vm)
         }

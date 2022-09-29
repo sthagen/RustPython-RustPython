@@ -14,7 +14,7 @@ use crate::{
     bytecode,
     class::PyClassImpl,
     frame::Frame,
-    function::{FuncArgs, OptionalArg, PyComparisonValue},
+    function::{FuncArgs, OptionalArg, PyComparisonValue, PySetterValue},
     scope::Scope,
     types::{Callable, Comparable, Constructor, GetAttr, GetDescriptor, PyComparisonOp},
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
@@ -31,6 +31,7 @@ pub struct PyFunction {
     closure: Option<PyTupleTyped<PyCellRef>>,
     defaults_and_kwdefaults: PyMutex<(Option<PyTupleRef>, Option<PyDictRef>)>,
     name: PyMutex<PyStrRef>,
+    qualname: PyMutex<PyStrRef>,
     #[cfg(feature = "jit")]
     jitted_code: OnceCell<CompiledCode>,
 }
@@ -42,6 +43,7 @@ impl PyFunction {
         closure: Option<PyTupleTyped<PyCellRef>>,
         defaults: Option<PyTupleRef>,
         kw_only_defaults: Option<PyDictRef>,
+        qualname: PyMutex<PyStrRef>,
     ) -> Self {
         let name = PyMutex::new(code.obj_name.to_owned());
         PyFunction {
@@ -50,6 +52,7 @@ impl PyFunction {
             closure,
             defaults_and_kwdefaults: PyMutex::new((defaults, kw_only_defaults)),
             name,
+            qualname,
             #[cfg(feature = "jit")]
             jitted_code: OnceCell::new(),
         }
@@ -330,25 +333,25 @@ impl PyPayload for PyFunction {
 
 #[pyclass(with(GetDescriptor, Callable), flags(HAS_DICT, METHOD_DESCR))]
 impl PyFunction {
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn code(&self) -> PyRef<PyCode> {
         self.code.clone()
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn defaults(&self) -> Option<PyTupleRef> {
         self.defaults_and_kwdefaults.lock().0.clone()
     }
-    #[pyproperty(magic, setter)]
+    #[pygetset(magic, setter)]
     fn set_defaults(&self, defaults: Option<PyTupleRef>) {
         self.defaults_and_kwdefaults.lock().0 = defaults
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn kwdefaults(&self) -> Option<PyDictRef> {
         self.defaults_and_kwdefaults.lock().1.clone()
     }
-    #[pyproperty(magic, setter)]
+    #[pygetset(magic, setter)]
     fn set_kwdefaults(&self, kwdefaults: Option<PyDictRef>) {
         self.defaults_and_kwdefaults.lock().1 = kwdefaults
     }
@@ -370,28 +373,45 @@ impl PyFunction {
         Ok(vm.unwrap_or_none(zelf.closure.clone().map(|x| x.to_pyobject(vm))))
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn name(&self) -> PyStrRef {
         self.name.lock().clone()
     }
 
-    #[pyproperty(magic, setter)]
+    #[pygetset(magic, setter)]
     fn set_name(&self, name: PyStrRef) {
         *self.name.lock() = name;
     }
 
-    #[pymethod(magic)]
-    fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> String {
-        let qualname = zelf
-            .as_object()
-            .to_owned()
-            .get_attr("__qualname__", vm)
-            .ok()
-            .and_then(|qualname_attr| qualname_attr.downcast::<PyStr>().ok())
-            .map(|qualname| qualname.as_str().to_owned())
-            .unwrap_or_else(|| zelf.name().as_str().to_owned());
+    #[pygetset(magic)]
+    fn qualname(&self) -> PyStrRef {
+        self.qualname.lock().clone()
+    }
 
-        format!("<function {} at {:#x}>", qualname, zelf.get_id())
+    #[pygetset(magic, setter)]
+    fn set_qualname(&self, value: PySetterValue, vm: &VirtualMachine) -> PyResult<()> {
+        match value {
+            PySetterValue::Assign(value) => {
+                if let Ok(qualname) = value.downcast::<PyStr>() {
+                    *self.qualname.lock() = qualname;
+                } else {
+                    return Err(vm.new_type_error(
+                        "__qualname__ must be set to a string object".to_string(),
+                    ));
+                }
+            }
+            PySetterValue::Delete => {
+                return Err(
+                    vm.new_type_error("__qualname__ must be set to a string object".to_string())
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[pymethod(magic)]
+    fn repr(zelf: PyRef<Self>) -> String {
+        format!("<function {} at {:#x}>", zelf.qualname(), zelf.get_id())
     }
 
     #[cfg(feature = "jit")]
@@ -532,27 +552,27 @@ impl PyBoundMethod {
         ))
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn doc(&self, vm: &VirtualMachine) -> PyResult {
         self.function.get_attr("__doc__", vm)
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn func(&self) -> PyObjectRef {
         self.function.clone()
     }
 
-    #[pyproperty(name = "__self__")]
+    #[pygetset(name = "__self__")]
     fn get_self(&self) -> PyObjectRef {
         self.object.clone()
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn module(&self, vm: &VirtualMachine) -> Option<PyObjectRef> {
         self.function.get_attr("__module__", vm).ok()
     }
 
-    #[pyproperty(magic)]
+    #[pygetset(magic)]
     fn qualname(&self, vm: &VirtualMachine) -> PyResult {
         if self
             .function
@@ -619,12 +639,12 @@ impl PyCell {
         *self.contents.lock() = x;
     }
 
-    #[pyproperty]
+    #[pygetset]
     fn cell_contents(&self, vm: &VirtualMachine) -> PyResult {
         self.get()
             .ok_or_else(|| vm.new_value_error("Cell is empty".to_owned()))
     }
-    #[pyproperty(setter)]
+    #[pygetset(setter)]
     fn set_cell_contents(&self, x: PyObjectRef) {
         self.set(Some(x))
     }
