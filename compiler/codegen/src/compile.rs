@@ -342,7 +342,7 @@ impl Compiler {
             self.emit(Instruction::StoreGlobal(doc))
         }
 
-        if self.find_ann(statements) {
+        if Self::find_ann(statements) {
             self.emit(Instruction::SetupAnnotation);
         }
 
@@ -1229,22 +1229,22 @@ impl Compiler {
     }
 
     // Python/compile.c find_ann
-    fn find_ann(&self, body: &[ast::Stmt]) -> bool {
+    fn find_ann(body: &[ast::Stmt]) -> bool {
         use ast::StmtKind::*;
 
         for statement in body {
             let res = match &statement.node {
                 AnnAssign { .. } => true,
-                For { body, orelse, .. } => self.find_ann(body) || self.find_ann(orelse),
-                If { body, orelse, .. } => self.find_ann(body) || self.find_ann(orelse),
-                While { body, orelse, .. } => self.find_ann(body) || self.find_ann(orelse),
-                With { body, .. } => self.find_ann(body),
+                For { body, orelse, .. } => Self::find_ann(body) || Self::find_ann(orelse),
+                If { body, orelse, .. } => Self::find_ann(body) || Self::find_ann(orelse),
+                While { body, orelse, .. } => Self::find_ann(body) || Self::find_ann(orelse),
+                With { body, .. } => Self::find_ann(body),
                 Try {
                     body,
                     orelse,
                     finalbody,
                     ..
-                } => self.find_ann(body) || self.find_ann(orelse) || self.find_ann(finalbody),
+                } => Self::find_ann(body) || Self::find_ann(orelse) || Self::find_ann(finalbody),
                 _ => false,
             };
             if res {
@@ -1275,6 +1275,15 @@ impl Compiler {
 
         let prev_class_name = std::mem::replace(&mut self.class_name, Some(name.to_owned()));
 
+        // Check if the class is declared global
+        let symbol_table = self.symbol_table_stack.last().unwrap();
+        let symbol = symbol_table.lookup(name.as_ref()).expect(
+            "The symbol must be present in the symbol table, even when it is undefined in python.",
+        );
+        let mut global_path_prefix = Vec::new();
+        if symbol.scope == SymbolScope::GlobalExplicit {
+            global_path_prefix.append(&mut self.qualified_path);
+        }
         self.push_qualified_path(name);
         let qualified_name = self.qualified_path.join(".");
 
@@ -1287,7 +1296,7 @@ impl Compiler {
         let dunder_module = self.name("__module__");
         self.emit(Instruction::StoreLocal(dunder_module));
         self.emit_constant(ConstantData::Str {
-            value: qualified_name.clone(),
+            value: qualified_name,
         });
         let qualname = self.name("__qualname__");
         self.emit(Instruction::StoreLocal(qualname));
@@ -1295,7 +1304,7 @@ impl Compiler {
         let doc = self.name("__doc__");
         self.emit(Instruction::StoreLocal(doc));
         // setup annotations
-        if self.find_ann(body) {
+        if Self::find_ann(body) {
             self.emit(Instruction::SetupAnnotation);
         }
         self.compile_statements(body)?;
@@ -1323,6 +1332,7 @@ impl Compiler {
 
         self.class_name = prev_class_name;
         self.qualified_path.pop();
+        self.qualified_path.append(global_path_prefix.as_mut());
         self.ctx = prev_ctx;
 
         let mut funcflags = bytecode::MakeFunctionFlags::empty();
@@ -1342,7 +1352,7 @@ impl Compiler {
         self.emit(Instruction::MakeFunction(funcflags));
 
         self.emit_constant(ConstantData::Str {
-            value: qualified_name,
+            value: name.to_owned(),
         });
 
         let call = self.compile_call_inner(2, bases, keywords)?;
@@ -2118,14 +2128,15 @@ impl Compiler {
             Name { id, .. } => self.load_name(id)?,
             Lambda { args, body } => {
                 let prev_ctx = self.ctx;
+
+                let name = "<lambda>".to_owned();
+                let mut funcflags = self.enter_function(&name, args)?;
+
                 self.ctx = CompileContext {
                     loop_data: Option::None,
                     in_class: prev_ctx.in_class,
                     func: FunctionContext::Function,
                 };
-
-                let name = "<lambda>".to_owned();
-                let mut funcflags = self.enter_function(&name, args)?;
 
                 self.current_codeinfo()
                     .constants

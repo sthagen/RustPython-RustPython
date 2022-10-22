@@ -3,9 +3,6 @@
 //! Implements the list of [builtin Python functions](https://docs.python.org/3/library/builtins.html).
 use crate::{class::PyClassImpl, PyObjectRef, VirtualMachine};
 
-/// Built-in functions, exceptions, and other objects.
-///
-/// Noteworthy: None is the `nil' object; Ellipsis represents `...' in slices.
 #[pymodule]
 mod builtins {
     use crate::{
@@ -243,8 +240,6 @@ mod builtins {
         }
     }
 
-    /// Implements `eval`.
-    /// See also: https://docs.python.org/3/library/functions.html#eval
     #[pyfunction]
     fn eval(
         source: Either<ArgStrOrBytesLike, PyRef<crate::builtins::PyCode>>,
@@ -277,8 +272,6 @@ mod builtins {
         run_code(vm, code, scope, crate::compiler::Mode::Eval, "eval")
     }
 
-    /// Implements `exec`
-    /// https://docs.python.org/3/library/functions.html#exec
     #[pyfunction]
     fn exec(
         source: Either<PyStrRef, PyRef<crate::builtins::PyCode>>,
@@ -485,7 +478,7 @@ mod builtins {
             std::cmp::Ordering::Greater => {
                 if default.is_some() {
                     return Err(vm.new_type_error(format!(
-                        "Cannot specify a default for {} with multiple positional arguments",
+                        "Cannot specify a default for {}() with multiple positional arguments",
                         func_name
                     )));
                 }
@@ -494,7 +487,9 @@ mod builtins {
             std::cmp::Ordering::Equal => args.args[0].try_to_value(vm)?,
             std::cmp::Ordering::Less => {
                 // zero arguments means type error:
-                return Err(vm.new_type_error("Expected 1 or more arguments".to_owned()));
+                return Err(
+                    vm.new_type_error(format!("{} expected at least 1 argument, got 0", func_name))
+                );
             }
         };
 
@@ -503,7 +498,7 @@ mod builtins {
             Some(x) => x,
             None => {
                 return default.ok_or_else(|| {
-                    vm.new_value_error(format!("{} arg is an empty sequence", func_name))
+                    vm.new_value_error(format!("{}() arg is an empty sequence", func_name))
                 })
             }
         };
@@ -531,12 +526,12 @@ mod builtins {
 
     #[pyfunction]
     fn max(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        min_or_max(args, vm, "max()", PyComparisonOp::Gt)
+        min_or_max(args, vm, "max", PyComparisonOp::Gt)
     }
 
     #[pyfunction]
     fn min(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        min_or_max(args, vm, "min()", PyComparisonOp::Lt)
+        min_or_max(args, vm, "min", PyComparisonOp::Lt)
     }
 
     #[pyfunction]
