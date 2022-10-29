@@ -43,7 +43,7 @@ impl Location {
 
     pub fn reset(&mut self) {
         self.row = 1;
-        self.column = 1;
+        self.column = 0;
     }
 
     pub fn go_right(&mut self) {
@@ -56,7 +56,7 @@ impl Location {
 
     pub fn newline(&mut self) {
         self.row += 1;
-        self.column = 1;
+        self.column = 0;
     }
 }
 

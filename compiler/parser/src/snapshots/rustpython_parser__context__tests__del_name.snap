@@ -4,26 +4,30 @@ expression: parse_ast
 ---
 [
     Located {
-        start: Location {
+        location: Location {
             row: 1,
-            column: 1,
+            column: 0,
         },
-        end: Location {
-            row: 1,
-            column: 6,
-        },
+        end_location: Some(
+            Location {
+                row: 1,
+                column: 5,
+            },
+        ),
         custom: (),
         node: Delete {
             targets: [
                 Located {
-                    start: Location {
+                    location: Location {
                         row: 1,
-                        column: 5,
+                        column: 4,
                     },
-                    end: Location {
-                        row: 1,
-                        column: 6,
-                    },
+                    end_location: Some(
+                        Location {
+                            row: 1,
+                            column: 5,
+                        },
+                    ),
                     custom: (),
                     node: Name {
                         id: "x",

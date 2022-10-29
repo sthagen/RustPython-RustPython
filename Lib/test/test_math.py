@@ -833,8 +833,6 @@ class MathTests(unittest.TestCase):
     @requires_IEEE_754
     @unittest.skipIf(HAVE_DOUBLE_ROUNDING,
                      "hypot() loses accuracy on machines with double rounding")
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def testHypotAccuracy(self):
         # Verify improved accuracy in cases that were known to be inaccurate.
         #
@@ -1137,8 +1135,6 @@ class MathTests(unittest.TestCase):
             self.assertEqual(math.ldexp(NINF, n), NINF)
             self.assertTrue(math.isnan(math.ldexp(NAN, n)))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def testLog(self):
         self.assertRaises(TypeError, math.log)
         self.ftest('log(1/e)', math.log(1/math.e), -1)
@@ -1162,8 +1158,6 @@ class MathTests(unittest.TestCase):
         self.assertRaises(ValueError, math.log1p, -1)
         self.assertEqual(math.log1p(INF), INF)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     @requires_IEEE_754
     def testLog2(self):
         self.assertRaises(TypeError, math.log2)
@@ -1182,7 +1176,6 @@ class MathTests(unittest.TestCase):
         self.assertRaises(ValueError, math.log2, NINF)
         self.assertTrue(math.isnan(math.log2(NAN)))
 
-    # TODO: RUSTPYTHON
     @requires_IEEE_754
     # log2() is not accurate enough on Mac OS X Tiger (10.4)
     @support.requires_mac_ver(10, 5)
@@ -1192,8 +1185,6 @@ class MathTests(unittest.TestCase):
         expected = [float(n) for n in range(-1074, 1024)]
         self.assertEqual(actual, expected)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def testLog10(self):
         self.assertRaises(TypeError, math.log10)
         self.ftest('log10(0.1)', math.log10(0.1), -1)
@@ -1568,7 +1559,6 @@ class MathTests(unittest.TestCase):
         self.ftest('tanh(-inf)', math.tanh(NINF), -1)
         self.assertTrue(math.isnan(math.tanh(NAN)))
 
-    # TODO: RUSTPYTHON
     @requires_IEEE_754
     def testTanhSign(self):
         # check that tanh(-0.) == -0. on IEEE 754 systems
@@ -1631,7 +1621,6 @@ class MathTests(unittest.TestCase):
         self.assertFalse(math.isinf(0.))
         self.assertFalse(math.isinf(1.))
 
-    # TODO: RUSTPYTHON
     @requires_IEEE_754
     def test_nan_constant(self):
         self.assertTrue(math.isnan(math.nan))

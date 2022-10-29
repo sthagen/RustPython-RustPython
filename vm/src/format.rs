@@ -438,7 +438,7 @@ impl FormatSpec {
             }
         };
 
-        self.format_sign_and_align(&magnitude_string, sign_str)
+        self.format_sign_and_align(&magnitude_string, sign_str, FormatAlign::Right)
     }
 
     #[inline]
@@ -510,12 +510,19 @@ impl FormatSpec {
             },
         };
 
-        self.format_sign_and_align(&magnitude_string, sign_str)
+        self.format_sign_and_align(&magnitude_string, sign_str, FormatAlign::Right)
     }
 
     pub(crate) fn format_string(&self, s: &str) -> Result<String, &'static str> {
         match self.format_type {
-            Some(FormatType::String) | None => self.format_sign_and_align(s, ""),
+            Some(FormatType::String) | None => self
+                .format_sign_and_align(s, "", FormatAlign::Left)
+                .map(|mut value| {
+                    if let Some(precision) = self.precision {
+                        value.truncate(precision);
+                    }
+                    value
+                }),
             _ => Err("Unknown format code for object of type 'str'"),
         }
     }
@@ -524,8 +531,9 @@ impl FormatSpec {
         &self,
         magnitude_string: &str,
         sign_str: &str,
+        default_align: FormatAlign,
     ) -> Result<String, &'static str> {
-        let align = self.align.unwrap_or(FormatAlign::Right);
+        let align = self.align.unwrap_or(default_align);
 
         // Use the byte length as the string length since we're in ascii
         let num_chars = magnitude_string.len();
@@ -943,7 +951,7 @@ impl<'a> FromTemplate<'a> for FormatString {
         let mut cur_text: &str = text;
         let mut parts: Vec<FormatPart> = Vec::new();
         while !cur_text.is_empty() {
-            // Try to parse both literals and bracketed format parts util we
+            // Try to parse both literals and bracketed format parts until we
             // run out of text
             cur_text = FormatString::parse_literal(cur_text)
                 .or_else(|_| FormatString::parse_spec(cur_text))
