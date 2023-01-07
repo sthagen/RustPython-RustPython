@@ -8,6 +8,7 @@
 use crate::lexer::{LexResult, Tok};
 pub use crate::mode::Mode;
 use crate::{ast, error::ParseError, lexer, python};
+use ast::Location;
 use itertools::Itertools;
 use std::iter;
 
@@ -65,7 +66,15 @@ pub fn parse_program(source: &str, source_path: &str) -> Result<ast::Suite, Pars
 ///
 /// ```
 pub fn parse_expression(source: &str, path: &str) -> Result<ast::Expr, ParseError> {
-    parse(source, Mode::Expression, path).map(|top| match top {
+    parse_expression_located(source, path, Location::new(1, 0))
+}
+
+pub fn parse_expression_located(
+    source: &str,
+    path: &str,
+    location: Location,
+) -> Result<ast::Expr, ParseError> {
+    parse_located(source, Mode::Expression, path, location).map(|top| match top {
         ast::Mod::Expression { body } => *body,
         _ => unreachable!(),
     })
@@ -73,11 +82,21 @@ pub fn parse_expression(source: &str, path: &str) -> Result<ast::Expr, ParseErro
 
 // Parse a given source code
 pub fn parse(source: &str, mode: Mode, source_path: &str) -> Result<ast::Mod, ParseError> {
-    let lxr = lexer::make_tokenizer(source);
+    parse_located(source, mode, source_path, Location::new(1, 0))
+}
+
+// Parse a given source code from a given location
+pub fn parse_located(
+    source: &str,
+    mode: Mode,
+    source_path: &str,
+    location: Location,
+) -> Result<ast::Mod, ParseError> {
+    let lxr = lexer::make_tokenizer_located(source, location);
     let marker_token = (Default::default(), mode.to_marker(), Default::default());
     let tokenizer = iter::once(Ok(marker_token))
         .chain(lxr)
-        .filter_ok(|(_, tok, _)| !matches!(tok, Tok::Comment));
+        .filter_ok(|(_, tok, _)| !matches!(tok, Tok::Comment { .. }));
 
     python::TopParser::new()
         .parse(tokenizer)
@@ -93,7 +112,7 @@ pub fn parse_tokens(
     let marker_token = (Default::default(), mode.to_marker(), Default::default());
     let tokenizer = iter::once(Ok(marker_token))
         .chain(lxr)
-        .filter_ok(|(_, tok, _)| !matches!(tok, Tok::Comment));
+        .filter_ok(|(_, tok, _)| !matches!(tok, Tok::Comment(_)));
 
     python::TopParser::new()
         .parse(tokenizer)
@@ -232,5 +251,69 @@ class Foo(A, B):
         let source = String::from("x and y");
         let parse_ast = parse_expression(&source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
+    }
+
+    #[test]
+    fn test_slice() {
+        let source = String::from("x[1:2:3]");
+        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        insta::assert_debug_snapshot!(parse_ast);
+    }
+
+    #[test]
+    fn test_with_statement() {
+        let source = "\
+with 0: pass
+with 0 as x: pass
+with 0, 1: pass
+with 0 as x, 1 as y: pass
+with 0 if 1 else 2: pass
+with 0 if 1 else 2 as x: pass
+with (): pass
+with () as x: pass
+with (0): pass
+with (0) as x: pass
+with (0,): pass
+with (0,) as x: pass
+with (0, 1): pass
+with (0, 1) as x: pass
+with (*a,): pass
+with (*a,) as x: pass
+with (0, *a): pass
+with (0, *a) as x: pass
+with (a := 0): pass
+with (a := 0) as x: pass
+with (a := 0, b := 1): pass
+with (a := 0, b := 1) as x: pass
+with (0 as a): pass
+with (0 as a,): pass
+with (0 as a, 1 as b): pass
+with (0 as a, 1 as b,): pass
+";
+        insta::assert_debug_snapshot!(parse_program(source, "<test>").unwrap());
+    }
+
+    #[test]
+    fn test_with_statement_invalid() {
+        for source in [
+            "with 0,: pass",
+            "with 0 as x,: pass",
+            "with 0 as *x: pass",
+            "with *a: pass",
+            "with *a as x: pass",
+            "with (*a): pass",
+            "with (*a) as x: pass",
+            "with *a, 0 as x: pass",
+            "with (*a, 0 as x): pass",
+            "with 0 as x, *a: pass",
+            "with (0 as x, *a): pass",
+            "with (0 as x) as y: pass",
+            "with (0 as x), 1: pass",
+            "with ((0 as x)): pass",
+            "with a := 0 as x: pass",
+            "with (a := 0 as x): pass",
+        ] {
+            assert!(parse_program(source, "<test>").is_err());
+        }
     }
 }

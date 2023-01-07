@@ -6,7 +6,7 @@
 use crate::{
     ast,
     error::{LexicalError, LexicalErrorType},
-    function::{ArgumentList, parse_args, parse_params},
+    function::{ArgumentList, parse_args, parse_params, validate_arguments},
     lexer,
     context::set_context,
     string::parse_strings,
@@ -161,6 +161,11 @@ TestOrStarExprList: ast::Expr = {
 
 TestOrStarExpr: ast::Expr = {
     Test<"all">,
+    StarExpr,
+};
+
+NamedOrStarExpr: ast::Expr = {
+    NamedExpression,
     StarExpr,
 };
 
@@ -518,7 +523,7 @@ WithItems: Vec<ast::Withitem> = {
 
 #[inline]
 WithItemsNoAs: Vec<ast::Withitem> = {
-    <OneOrMore<NamedExpressionTest>> => {
+    <OneOrMore<Test<"all">>> => {
         <>.into_iter().map(|context_expr| ast::Withitem { context_expr, optional_vars: None }).collect()
     },
 }
@@ -547,16 +552,20 @@ FuncDef: ast::Stmt = {
 };
 
 Parameters: ast::Arguments = {
-    "(" <a: (ParameterList<TypedParameter>)?> ")" => {
-        a.unwrap_or_else(|| ast::Arguments {
-            posonlyargs: vec![],
-            args: vec![],
-            vararg: None,
-            kwonlyargs: vec![],
-            kw_defaults: vec![],
-            kwarg: None,
-            defaults: vec![]
-        })
+    "(" <a: (ParameterList<TypedParameter>)?> ")" =>? {
+        let args = validate_arguments(
+            a.unwrap_or_else(|| ast::Arguments {
+                posonlyargs: vec![],
+                args: vec![],
+                vararg: None,
+                kwonlyargs: vec![],
+                kw_defaults: vec![],
+                kwarg: None,
+                defaults: vec![]
+            })
+        )?;
+
+        Ok(args)
     }
 };
 
@@ -658,7 +667,7 @@ TypedParameter: ast::Arg = {
 // TODO: figure out another grammar that makes this inline no longer required.
 #[inline]
 ParameterListStarArgs<ArgType>: (Option<Box<ast::Arg>>, Vec<ast::Arg>, Vec<ast::Expr>, Option<Box<ast::Arg>>) = {
-    "*" <va:ArgType?> <kw:("," ParameterDef<ArgType>)*> <kwarg:("," KwargParameter<ArgType>)?> => {
+    <location:@L> "*" <va:ArgType?> <kw:("," ParameterDef<ArgType>)*> <kwarg:("," KwargParameter<ArgType>)?> =>? {
         // Extract keyword arguments:
         let mut kwonlyargs = Vec::new();
         let mut kw_defaults = Vec::new();
@@ -673,10 +682,17 @@ ParameterListStarArgs<ArgType>: (Option<Box<ast::Arg>>, Vec<ast::Arg>, Vec<ast::
         }
         kwargs.extend(kwonlyargs.into_iter());
 
+        if va.is_none() && kwargs.is_empty() && kwarg.is_none() {
+            Err(LexicalError {
+                error: LexicalErrorType::OtherError("named arguments must follow bare *".to_string()),
+                location: location,
+            })?
+        }
+
         let kwarg = kwarg.map(|n| n.1).flatten();
         let va = va.map(Box::new);
 
-        (va, kwargs, kw_defaults, kwarg)
+        Ok((va, kwargs, kw_defaults, kwarg))
     }
 };
 
@@ -746,41 +762,45 @@ Test<Goal>: ast::Expr = {
 };
 
 NamedExpressionTest: ast::Expr = {
-    <location:@L> <left: (Identifier ":=")?> <right:Test<"all">> <end_location:@R> => {
-        if let Some(l) = left {
-            ast::Expr {
-                location,
-                end_location: Some(end_location),
-                custom: (),
-                node: ast::ExprKind::NamedExpr {
-                    target: Box::new(ast::Expr::new(
-                        location,
-                        end_location,
-                        ast::ExprKind::Name { id: l.0, ctx: ast::ExprContext::Store },
-                    )),
-                    value: Box::new(right),
-                }
-            }
-        } else {
-            right
-        }
-    }
+    NamedExpression,
+    Test<"all">,
 }
 
-LambdaDef: ast::Expr = {
-    <location:@L> "lambda" <p:ParameterList<UntypedParameter>?> ":" <body:Test<"all">> <end_location:@R> => {
-        let p = p.unwrap_or_else(|| {
-            ast::Arguments {
-                posonlyargs: vec![],
-                args: vec![],
-                vararg: None,
-                kwonlyargs: vec![],
-                kw_defaults: vec![],
-                kwarg: None,
-                defaults: vec![]
-            }
-        });
+NamedExpression: ast::Expr = {
+    <location:@L> <id:Identifier> <end_location:@R> ":=" <value:Test<"all">> => {
         ast::Expr {
+            location,
+            end_location: value.end_location,
+            custom: (),
+            node: ast::ExprKind::NamedExpr {
+                target: Box::new(ast::Expr::new(
+                    location,
+                    end_location,
+                    ast::ExprKind::Name { id, ctx: ast::ExprContext::Store },
+                )),
+                value: Box::new(value),
+            }
+        }
+    },
+};
+
+LambdaDef: ast::Expr = {
+    <location:@L> "lambda" <p:ParameterList<UntypedParameter>?> ":" <body:Test<"all">> <end_location:@R> =>? {
+        let p = validate_arguments(
+            p.unwrap_or_else(|| {
+                ast::Arguments {
+                    posonlyargs: vec![],
+                    args: vec![],
+                    vararg: None,
+                    kwonlyargs: vec![],
+                    kw_defaults: vec![],
+                    kwarg: None,
+                    defaults: vec![]
+                }
+            }
+        ))?;
+
+        Ok(ast::Expr {
             location,
             end_location: Some(end_location),
             custom: (),
@@ -788,7 +808,7 @@ LambdaDef: ast::Expr = {
                 args: Box::new(p),
                 body: Box::new(body)
             }
-        }
+        })
     }
 }
 
@@ -1017,8 +1037,8 @@ SubscriptList: ast::Expr = {
 };
 
 Subscript: ast::Expr = {
-    Test<"all">,
-    <e1:Test<"all">?> <location:@L> ":" <e2:Test<"all">?> <e3:SliceOp?> <end_location:@R> => {
+    NamedExpressionTest,
+    <location:@L> <e1:Test<"all">?> ":" <e2:Test<"all">?> <e3:SliceOp?> <end_location:@R> => {
         let lower = e1.map(Box::new);
         let upper = e2.map(Box::new);
         let step = e3.flatten().map(Box::new);
@@ -1066,7 +1086,7 @@ Atom<Goal>: ast::Expr = {
             node: ast::ExprKind::ListComp { elt: Box::new(elt), generators }
         }
     },
-    <location:@L> "(" <elts:OneOrMore<NamedExpressionTest>> <trailing_comma:","?> ")" <end_location:@R> if Goal != "no-withitems" => {
+    <location:@L> "(" <elts:OneOrMore<Test<"all">>> <trailing_comma:","?> ")" <end_location:@R> if Goal != "no-withitems" => {
         if elts.len() == 1 && trailing_comma.is_none() {
             elts.into_iter().next().unwrap()
         } else {
@@ -1077,19 +1097,23 @@ Atom<Goal>: ast::Expr = {
             )
         }
     },
-    <location:@L> "(" <left:(<OneOrMore<NamedExpressionTest>> ",")?> <mid:StarExpr> <right:("," <TestOrStarNamedExpr>)*> <trailing_comma:","?> ")" <end_location:@R> =>? {
+    <location:@L> "(" <left:(<OneOrMore<Test<"all">>> ",")?> <mid:NamedOrStarExpr> <right:("," <TestOrStarNamedExpr>)*> <trailing_comma:","?> ")" <end_location:@R> =>? {
         if left.is_none() && right.is_empty() && trailing_comma.is_none() {
-            Err(LexicalError{
-                error: LexicalErrorType::OtherError("cannot use starred expression here".to_string()),
-                location: mid.location,
-            })?
+            if matches!(mid.node, ast::ExprKind::Starred { .. }) {
+                Err(LexicalError{
+                    error: LexicalErrorType::OtherError("cannot use starred expression here".to_string()),
+                    location: mid.location,
+                })?
+            }
+            Ok(mid)
+        } else {
+            let elts = left.into_iter().flatten().chain([mid]).chain(right).collect();
+            Ok(ast::Expr::new(
+                location,
+                end_location,
+                ast::ExprKind::Tuple { elts, ctx: ast::ExprContext::Load },
+            ))
         }
-        let elts = left.into_iter().flatten().chain([mid]).chain(right).collect();
-        Ok(ast::Expr::new(
-            location,
-            end_location,
-            ast::ExprKind::Tuple { elts, ctx: ast::ExprContext::Load },
-        ))
     },
     <location:@L> "(" ")" <end_location:@R> => ast::Expr::new(
         location,
@@ -1175,7 +1199,7 @@ Atom<Goal>: ast::Expr = {
         custom: (),
         node: ast::ExprKind::Set { elts }
     },
-    <location:@L> "{" <elt:Test<"all">> <generators:CompFor> "}" <end_location:@R> => {
+    <location:@L> "{" <elt:NamedExpressionTest> <generators:CompFor> "}" <end_location:@R> => {
         ast::Expr {
             location,
             end_location: Some(end_location),
@@ -1329,16 +1353,9 @@ OneOrMore<T>: Vec<T> = {
 };
 
 Constant: ast::Constant = {
-    <b:bytes+> => ast::Constant::Bytes(b.into_iter().flatten().collect()),
     <value:int> => ast::Constant::Int(value),
     <value:float> => ast::Constant::Float(value),
     <s:complex> => ast::Constant::Complex { real: s.0, imag: s.1 },
-};
-
-Bytes: Vec<u8> = {
-    <s:bytes+> => {
-        s.into_iter().flatten().collect::<Vec<u8>>()
-    },
 };
 
 Identifier: String = <s:name> => s;
@@ -1418,10 +1435,9 @@ extern {
         "from" => lexer::Tok::From,
         "global" => lexer::Tok::Global,
         "if" => lexer::Tok::If,
+        "import" => lexer::Tok::Import,
         "in" => lexer::Tok::In,
         "is" => lexer::Tok::Is,
-        "import" => lexer::Tok::Import,
-        "from" => lexer::Tok::From,
         "lambda" => lexer::Tok::Lambda,
         "nonlocal" => lexer::Tok::Nonlocal,
         "not" => lexer::Tok::Not,
@@ -1439,11 +1455,14 @@ extern {
         int => lexer::Tok::Int { value: <BigInt> },
         float => lexer::Tok::Float { value: <f64> },
         complex => lexer::Tok::Complex { real: <f64>, imag: <f64> },
-        string => lexer::Tok::String { value: <String>, kind: <StringKind> },
-        bytes => lexer::Tok::Bytes { value: <Vec<u8>> },
+        string => lexer::Tok::String {
+            value: <String>,
+            kind: <StringKind>,
+            triple_quoted: <bool>
+        },
         name => lexer::Tok::Name { name: <String> },
         "\n" => lexer::Tok::Newline,
         ";" => lexer::Tok::Semi,
-        "#" => lexer::Tok::Comment,
+        "#" => lexer::Tok::Comment(_),
     }
 }

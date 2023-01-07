@@ -4,9 +4,9 @@ use super::{
 use crate::{
     atomic_func,
     class::PyClassImpl,
+    common::format::FormatSpec,
     common::{float_ops, hash},
-    convert::{ToPyObject, ToPyResult},
-    format::FormatSpec,
+    convert::{IntoPyException, ToPyObject, ToPyResult},
     function::{
         ArgBytesLike, OptionalArg, OptionalOption,
         PyArithmeticValue::{self, *},
@@ -189,12 +189,9 @@ fn float_from_string(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<f64> {
 impl PyFloat {
     #[pymethod(magic)]
     fn format(&self, spec: PyStrRef, vm: &VirtualMachine) -> PyResult<String> {
-        match FormatSpec::parse(spec.as_str())
+        FormatSpec::parse(spec.as_str())
             .and_then(|format_spec| format_spec.format_float(self.value))
-        {
-            Ok(string) => Ok(string),
-            Err(err) => Err(vm.new_value_error(err.to_string())),
-        }
+            .map_err(|err| err.into_pyexception(vm))
     }
 
     #[pystaticmethod(magic)]

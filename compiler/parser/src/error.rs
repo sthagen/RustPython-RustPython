@@ -12,6 +12,12 @@ pub struct LexicalError {
     pub location: Location,
 }
 
+impl LexicalError {
+    pub fn new(error: LexicalErrorType, location: Location) -> Self {
+        Self { error, location }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum LexicalErrorType {
     StringError,
@@ -21,8 +27,10 @@ pub enum LexicalErrorType {
     TabError,
     TabsAfterSpaces,
     DefaultArgumentError,
+    DuplicateArgumentError(String),
     PositionalArgumentError,
-    DuplicateKeywordArgumentError,
+    UnpackedArgumentError,
+    DuplicateKeywordArgumentError(String),
     UnrecognizedToken { tok: char },
     FStringError(FStringErrorType),
     LineContinuationError,
@@ -34,7 +42,7 @@ impl fmt::Display for LexicalErrorType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             LexicalErrorType::StringError => write!(f, "Got unexpected string"),
-            LexicalErrorType::FStringError(error) => write!(f, "Got error in f-string: {error}"),
+            LexicalErrorType::FStringError(error) => write!(f, "f-string: {error}"),
             LexicalErrorType::UnicodeError => write!(f, "Got unexpected unicode"),
             LexicalErrorType::NestingError => write!(f, "Got unexpected nesting"),
             LexicalErrorType::IndentationError => {
@@ -49,11 +57,20 @@ impl fmt::Display for LexicalErrorType {
             LexicalErrorType::DefaultArgumentError => {
                 write!(f, "non-default argument follows default argument")
             }
-            LexicalErrorType::DuplicateKeywordArgumentError => {
-                write!(f, "keyword argument repeated")
+            LexicalErrorType::DuplicateArgumentError(arg_name) => {
+                write!(f, "duplicate argument '{arg_name}' in function definition")
+            }
+            LexicalErrorType::DuplicateKeywordArgumentError(arg_name) => {
+                write!(f, "keyword argument repeated: {arg_name}")
             }
             LexicalErrorType::PositionalArgumentError => {
                 write!(f, "positional argument follows keyword argument")
+            }
+            LexicalErrorType::UnpackedArgumentError => {
+                write!(
+                    f,
+                    "iterable argument unpacking follows keyword argument unpacking"
+                )
             }
             LexicalErrorType::UnrecognizedToken { tok } => {
                 write!(f, "Got unexpected token {tok}")
@@ -72,6 +89,21 @@ impl fmt::Display for LexicalErrorType {
 pub struct FStringError {
     pub error: FStringErrorType,
     pub location: Location,
+}
+
+impl FStringError {
+    pub fn new(error: FStringErrorType, location: Location) -> Self {
+        Self { error, location }
+    }
+}
+
+impl From<FStringError> for LexicalError {
+    fn from(err: FStringError) -> Self {
+        LexicalError {
+            error: LexicalErrorType::FStringError(err.error),
+            location: err.location,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -181,15 +213,27 @@ pub(crate) fn parse_error_from_lalrpop(
             let expected = (expected.len() == 1).then(|| expected[0].clone());
             ParseError {
                 error: ParseErrorType::UnrecognizedToken(token.1, expected),
-                location: Location::new(token.0.row(), token.0.column() + 1),
+                location: token.0.with_col_offset(1),
                 source_path,
             }
         }
-        LalrpopError::UnrecognizedEOF { location, .. } => ParseError {
-            error: ParseErrorType::Eof,
-            location,
-            source_path,
-        },
+        LalrpopError::UnrecognizedEOF { location, expected } => {
+            // This could be an initial indentation error that we should ignore
+            let indent_error = expected == ["Indent"];
+            if indent_error {
+                ParseError {
+                    error: ParseErrorType::Lexical(LexicalErrorType::IndentationError),
+                    location,
+                    source_path,
+                }
+            } else {
+                ParseError {
+                    error: ParseErrorType::Eof,
+                    location,
+                    source_path,
+                }
+            }
+        }
     }
 }
 

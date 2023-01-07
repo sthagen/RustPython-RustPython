@@ -3,9 +3,9 @@ use crate::{
     atomic_func,
     bytesinner::PyBytesInner,
     class::PyClassImpl,
+    common::format::FormatSpec,
     common::hash,
-    convert::{ToPyObject, ToPyResult},
-    format::FormatSpec,
+    convert::{IntoPyException, ToPyObject, ToPyResult},
     function::{
         ArgByteOrder, ArgIntoBool, OptionalArg, OptionalOption, PyArithmeticValue,
         PyComparisonValue,
@@ -570,7 +570,7 @@ impl PyInt {
     fn format(&self, spec: PyStrRef, vm: &VirtualMachine) -> PyResult<String> {
         FormatSpec::parse(spec.as_str())
             .and_then(|format_spec| format_spec.format_int(&self.value))
-            .map_err(|msg| vm.new_value_error(msg.to_owned()))
+            .map_err(|err| err.into_pyexception(vm))
     }
 
     #[pymethod(magic)]

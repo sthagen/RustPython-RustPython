@@ -1,17 +1,29 @@
 //! Different token definitions.
 //! Loosely based on token.h from CPython source:
 use num_bigint::BigInt;
-use std::fmt::{self, Write};
+use std::fmt;
 
 /// Python source code can be tokenized in a sequence of these tokens.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
-    Name { name: String },
-    Int { value: BigInt },
-    Float { value: f64 },
-    Complex { real: f64, imag: f64 },
-    String { value: String, kind: StringKind },
-    Bytes { value: Vec<u8> },
+    Name {
+        name: String,
+    },
+    Int {
+        value: BigInt,
+    },
+    Float {
+        value: f64,
+    },
+    Complex {
+        real: f64,
+        imag: f64,
+    },
+    String {
+        value: String,
+        kind: StringKind,
+        triple_quoted: bool,
+    },
     Newline,
     Indent,
     Dedent,
@@ -25,7 +37,7 @@ pub enum Tok {
     Rsqb,
     Colon,
     Comma,
-    Comment,
+    Comment(String),
     Semi,
     Plus,
     Minus,
@@ -107,13 +119,6 @@ pub enum Tok {
     Yield,
 }
 
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub enum StringKind {
-    Normal,
-    F,
-    U,
-}
-
 impl fmt::Display for Tok {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Tok::*;
@@ -122,26 +127,13 @@ impl fmt::Display for Tok {
             Int { value } => write!(f, "'{value}'"),
             Float { value } => write!(f, "'{value}'"),
             Complex { real, imag } => write!(f, "{real}j{imag}"),
-            String { value, kind } => {
-                match kind {
-                    StringKind::F => f.write_str("f")?,
-                    StringKind::U => f.write_str("u")?,
-                    StringKind::Normal => {}
-                }
-                write!(f, "{value:?}")
-            }
-            Bytes { value } => {
-                write!(f, "b\"")?;
-                for i in value {
-                    match i {
-                        9 => f.write_str("\\t")?,
-                        10 => f.write_str("\\n")?,
-                        13 => f.write_str("\\r")?,
-                        32..=126 => f.write_char(*i as char)?,
-                        _ => write!(f, "\\x{i:02x}")?,
-                    }
-                }
-                f.write_str("\"")
+            String {
+                value,
+                kind,
+                triple_quoted,
+            } => {
+                let quotes = "\"".repeat(if *triple_quoted { 3 } else { 1 });
+                write!(f, "{kind}{quotes}{value}{quotes}")
             }
             Newline => f.write_str("Newline"),
             Indent => f.write_str("Indent"),
@@ -156,7 +148,7 @@ impl fmt::Display for Tok {
             Rsqb => f.write_str("']'"),
             Colon => f.write_str("':'"),
             Comma => f.write_str("','"),
-            Comment => f.write_str("#"),
+            Comment(value) => f.write_str(value),
             Semi => f.write_str("';'"),
             Plus => f.write_str("'+'"),
             Minus => f.write_str("'-'"),
@@ -233,6 +225,90 @@ impl fmt::Display for Tok {
             With => f.write_str("'with'"),
             Yield => f.write_str("'yield'"),
             ColonEqual => f.write_str("':='"),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub enum StringKind {
+    String,
+    FString,
+    Bytes,
+    RawString,
+    RawFString,
+    RawBytes,
+    Unicode,
+}
+
+impl TryFrom<char> for StringKind {
+    type Error = String;
+
+    fn try_from(ch: char) -> Result<Self, String> {
+        match ch {
+            'r' | 'R' => Ok(StringKind::RawString),
+            'f' | 'F' => Ok(StringKind::FString),
+            'u' | 'U' => Ok(StringKind::Unicode),
+            'b' | 'B' => Ok(StringKind::Bytes),
+            c => Err(format!("Unexpected string prefix: {c}")),
+        }
+    }
+}
+
+impl TryFrom<[char; 2]> for StringKind {
+    type Error = String;
+
+    fn try_from(chars: [char; 2]) -> Result<Self, String> {
+        match chars {
+            ['r' | 'R', 'f' | 'F'] => Ok(StringKind::RawFString),
+            ['f' | 'F', 'r' | 'R'] => Ok(StringKind::RawFString),
+            ['r' | 'R', 'b' | 'B'] => Ok(StringKind::RawBytes),
+            ['b' | 'B', 'r' | 'R'] => Ok(StringKind::RawBytes),
+            [c1, c2] => Err(format!("Unexpected string prefix: {c1}{c2}")),
+        }
+    }
+}
+
+impl fmt::Display for StringKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use StringKind::*;
+        match self {
+            String => f.write_str(""),
+            FString => f.write_str("f"),
+            Bytes => f.write_str("b"),
+            RawString => f.write_str("r"),
+            RawFString => f.write_str("rf"),
+            RawBytes => f.write_str("rb"),
+            Unicode => f.write_str("u"),
+        }
+    }
+}
+
+impl StringKind {
+    pub fn is_raw(&self) -> bool {
+        use StringKind::{RawBytes, RawFString, RawString};
+        matches!(self, RawString | RawFString | RawBytes)
+    }
+
+    pub fn is_fstring(&self) -> bool {
+        use StringKind::{FString, RawFString};
+        matches!(self, FString | RawFString)
+    }
+
+    pub fn is_bytes(&self) -> bool {
+        use StringKind::{Bytes, RawBytes};
+        matches!(self, Bytes | RawBytes)
+    }
+
+    pub fn is_unicode(&self) -> bool {
+        matches!(self, StringKind::Unicode)
+    }
+
+    pub fn prefix_len(&self) -> usize {
+        use StringKind::*;
+        match self {
+            String => 0,
+            RawString | FString | Unicode | Bytes => 1,
+            RawFString | RawBytes => 2,
         }
     }
 }

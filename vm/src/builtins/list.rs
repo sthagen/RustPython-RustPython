@@ -300,7 +300,8 @@ impl PyList {
 
         if let Some(index) = index.into() {
             // defer delete out of borrow
-            Ok(self.borrow_vec_mut().remove(index))
+            let is_inside_range = index < self.borrow_vec().len();
+            Ok(is_inside_range.then(|| self.borrow_vec_mut().remove(index)))
         } else {
             Err(vm.new_value_error(format!("'{}' is not in list", needle.str(vm)?)))
         }
@@ -309,8 +310,8 @@ impl PyList {
 
     fn _delitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
         match SequenceIndex::try_from_borrowed_object(vm, needle, "list")? {
-            SequenceIndex::Int(i) => self.borrow_vec_mut().del_item_by_index(vm, i),
-            SequenceIndex::Slice(slice) => self.borrow_vec_mut().del_item_by_slice(vm, slice),
+            SequenceIndex::Int(i) => self.borrow_vec_mut().delitem_by_index(vm, i),
+            SequenceIndex::Slice(slice) => self.borrow_vec_mut().delitem_by_slice(vm, slice),
         }
     }
 
@@ -444,7 +445,7 @@ impl AsSequence for PyList {
                 if let Some(value) = value {
                     zelf.borrow_vec_mut().setitem_by_index(vm, i, value)
                 } else {
-                    zelf.borrow_vec_mut().del_item_by_index(vm, i)
+                    zelf.borrow_vec_mut().delitem_by_index(vm, i)
                 }
             }),
             contains: atomic_func!(|seq, target, vm| {
