@@ -700,7 +700,7 @@ impl VirtualMachine {
     }
 
     pub(crate) fn set_exception(&self, exc: Option<PyBaseExceptionRef>) {
-        // don't be holding the refcell guard while __del__ is called
+        // don't be holding the RefCell guard while __del__ is called
         let prev = std::mem::replace(&mut self.exceptions.borrow_mut().exc, exc);
         drop(prev);
     }
@@ -757,6 +757,19 @@ impl VirtualMachine {
                 writeln!(stderr, "{msg}");
             }
             1
+        } else if exc.fast_isinstance(self.ctx.exceptions.keyboard_interrupt) {
+            #[allow(clippy::if_same_then_else)]
+            {
+                self.print_exception(exc);
+                #[cfg(unix)]
+                {
+                    (libc::SIGINT as u8) + 128u8
+                }
+                #[cfg(not(unix))]
+                {
+                    1
+                }
+            }
         } else {
             self.print_exception(exc);
             1

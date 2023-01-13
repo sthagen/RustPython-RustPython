@@ -206,9 +206,9 @@ checksum = "14c189c53d098945499cdfa7ecc63567cf3886b3332b312a5b4585d8d3a6a610"
 
 [[package]]
 name = "bzip2"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6afcd980b5f3a45017c57e57a2fcccbb351cc43a356ce117ef760ef8052b89b0"
+checksum = "bdb116a6ef3f6c3698828873ad02c3014b3c85cadb88496095628e3ef1e347f8"
 dependencies = [
  "bzip2-sys",
  "libc",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "atty",
  "cfg-if",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-ast"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "num-bigint",
  "rustpython-common",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-codegen"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-common"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "ascii",
  "bitflags",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-compiler"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rustpython-codegen",
  "rustpython-compiler-core",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-compiler-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "bitflags",
@@ -2002,14 +2002,14 @@ dependencies = [
  "lz4_flex",
  "num-bigint",
  "num-complex",
+ "num_enum",
  "serde",
- "static_assertions",
  "thiserror",
 ]
 
 [[package]]
 name = "rustpython-derive"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rustpython-compiler",
  "rustpython-derive-impl",
@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-derive-impl"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "itertools",
@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-jit"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "approx",
  "cranelift",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-parser"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2083,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-pylib"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glob",
  "rustpython-compiler-core",
@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-stdlib"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "adler32",
  "ahash",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython-vm"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "adler32",
  "ahash",
@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "rustpython_wasm"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
