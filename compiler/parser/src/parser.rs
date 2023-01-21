@@ -93,14 +93,7 @@ pub fn parse_located(
     location: Location,
 ) -> Result<ast::Mod, ParseError> {
     let lxr = lexer::make_tokenizer_located(source, location);
-    let marker_token = (Default::default(), mode.to_marker(), Default::default());
-    let tokenizer = iter::once(Ok(marker_token))
-        .chain(lxr)
-        .filter_ok(|(_, tok, _)| !matches!(tok, Tok::Comment { .. } | Tok::NonLogicalNewline));
-
-    python::TopParser::new()
-        .parse(tokenizer)
-        .map_err(|e| crate::error::parse_error_from_lalrpop(e, source_path))
+    parse_tokens(lxr, mode, source_path)
 }
 
 // Parse a given token iterator.
@@ -112,7 +105,7 @@ pub fn parse_tokens(
     let marker_token = (Default::default(), mode.to_marker(), Default::default());
     let tokenizer = iter::once(Ok(marker_token))
         .chain(lxr)
-        .filter_ok(|(_, tok, _)| !matches!(tok, Tok::Comment(_)));
+        .filter_ok(|(_, tok, _)| !matches!(tok, Tok::Comment { .. } | Tok::NonLogicalNewline));
 
     python::TopParser::new()
         .parse(tokenizer)
@@ -131,43 +124,43 @@ mod tests {
 
     #[test]
     fn test_parse_string() {
-        let source = String::from("'Hello world'");
-        let parse_ast = parse_program(&source, "<test>").unwrap();
+        let source = "'Hello world'";
+        let parse_ast = parse_program(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_f_string() {
-        let source = String::from("f'Hello world'");
-        let parse_ast = parse_program(&source, "<test>").unwrap();
+        let source = "f'Hello world'";
+        let parse_ast = parse_program(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_print_hello() {
-        let source = String::from("print('Hello world')");
-        let parse_ast = parse_program(&source, "<test>").unwrap();
+        let source = "print('Hello world')";
+        let parse_ast = parse_program(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_print_2() {
-        let source = String::from("print('Hello world', 2)");
-        let parse_ast = parse_program(&source, "<test>").unwrap();
+        let source = "print('Hello world', 2)";
+        let parse_ast = parse_program(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_kwargs() {
-        let source = String::from("my_func('positional', keyword=2)");
-        let parse_ast = parse_program(&source, "<test>").unwrap();
+        let source = "my_func('positional', keyword=2)";
+        let parse_ast = parse_program(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_if_elif_else() {
-        let source = String::from("if 1: 10\nelif 2: 20\nelse: 30");
-        let parse_ast = parse_program(&source, "<test>").unwrap();
+        let source = "if 1: 10\nelif 2: 20\nelse: 30";
+        let parse_ast = parse_program(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
@@ -199,64 +192,64 @@ class Foo(A, B):
 
     #[test]
     fn test_parse_dict_comprehension() {
-        let source = String::from("{x1: x2 for y in z}");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "{x1: x2 for y in z}";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_list_comprehension() {
-        let source = String::from("[x for y in z]");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "[x for y in z]";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_double_list_comprehension() {
-        let source = String::from("[x for y, y2 in z for a in b if a < 5 if a > 10]");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "[x for y, y2 in z for a in b if a < 5 if a > 10]";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_generator_comprehension() {
-        let source = String::from("(x for y in z)");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "(x for y in z)";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_named_expression_generator_comprehension() {
-        let source = String::from("(x := y + 1 for y in z)");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "(x := y + 1 for y in z)";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_if_else_generator_comprehension() {
-        let source = String::from("(x if y else y for y in z)");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "(x if y else y for y in z)";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_boolop_or() {
-        let source = String::from("x or y");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "x or y";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_parse_boolop_and() {
-        let source = String::from("x and y");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "x and y";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
     #[test]
     fn test_slice() {
-        let source = String::from("x[1:2:3]");
-        let parse_ast = parse_expression(&source, "<test>").unwrap();
+        let source = "x[1:2:3]";
+        let parse_ast = parse_expression(source, "<test>").unwrap();
         insta::assert_debug_snapshot!(parse_ast);
     }
 
