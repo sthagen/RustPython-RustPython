@@ -1,4 +1,32 @@
-pub(crate) use array::make_module;
+use rustpython_vm::{PyObjectRef, VirtualMachine};
+
+pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
+    let module = array::make_module(vm);
+
+    let array = module
+        .get_attr("array", vm)
+        .expect("Expect array has array type.");
+
+    let collections_abc = vm
+        .import("collections.abc", None, 0)
+        .expect("Expect collections exist.");
+    let abc = collections_abc
+        .get_attr("abc", vm)
+        .expect("Expect collections has abc submodule.");
+    let mutable_sequence = abc
+        .get_attr("MutableSequence", vm)
+        .expect("Expect collections.abc has MutableSequence type.");
+
+    vm.invoke(
+        &mutable_sequence
+            .get_attr("register", vm)
+            .expect("Expect collections.abc.MutableSequence has register method."),
+        (array,),
+    )
+    .expect("Expect collections.abc.MutableSequence.register(array.array) not fail.");
+
+    module
+}
 
 #[pymodule(name = "array")]
 mod array {
@@ -1159,6 +1187,23 @@ mod array {
                 vm.new_tuple((typecode, values)),
                 zelf.as_object().dict(),
             ))
+        }
+
+        #[pymethod(magic)]
+        fn contains(&self, value: PyObjectRef, vm: &VirtualMachine) -> bool {
+            let array = self.array.read();
+            for element in array
+                .iter(vm)
+                .map(|x| x.expect("Expected to be checked by array.len() and read lock."))
+            {
+                if let Ok(true) =
+                    element.rich_compare_bool(value.as_object(), PyComparisonOp::Eq, vm)
+                {
+                    return true;
+                }
+            }
+
+            false
         }
     }
 
