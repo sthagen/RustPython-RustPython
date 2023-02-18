@@ -872,7 +872,11 @@ mod builtins {
         // Use downcast_exact to keep ref to old object on error.
         let metaclass = kwargs
             .pop_kwarg("metaclass")
-            .map(|metaclass| metaclass.downcast_exact::<PyType>(vm))
+            .map(|metaclass| {
+                metaclass
+                    .downcast_exact::<PyType>(vm)
+                    .map(|m| m.into_pyref())
+            })
             .unwrap_or_else(|| Ok(vm.ctx.types.type_type.to_owned()));
 
         let (metaclass, meta_name) = match metaclass {
@@ -996,7 +1000,7 @@ pub fn make_module(vm: &VirtualMachine, module: PyObjectRef) {
         "NotImplemented" => ctx.not_implemented(),
         "Ellipsis" => vm.ctx.ellipsis.clone(),
 
-        // ordered by exception_hierarachy.txt
+        // ordered by exception_hierarchy.txt
         // Exceptions:
         "BaseException" => ctx.exceptions.base_exception_type.to_owned(),
         "SystemExit" => ctx.exceptions.system_exit.to_owned(),

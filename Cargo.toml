@@ -37,7 +37,7 @@ insta = "1.14.0"
 itertools = "0.10.3"
 libc = "0.2.133"
 log = "0.4.16"
-nix = "0.24"
+nix = "0.26"
 num-complex = "0.4.0"
 num-bigint = "0.4.3"
 num-integer = "0.1.44"
@@ -128,5 +128,5 @@ opt-level = 3
 lto = "thin"
 
 [patch.crates-io]
-# REDOX START, Uncommment when you want to compile/check with redoxer
+# REDOX START, Uncomment when you want to compile/check with redoxer
 # REDOX END

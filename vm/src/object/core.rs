@@ -12,7 +12,7 @@
 //! but not to do to remember it is a PyRef object.
 
 use super::{
-    ext::{AsObject, PyResult},
+    ext::{AsObject, PyRefExact, PyResult},
     payload::PyObjectPayload,
     PyAtomicRef,
 };
@@ -564,7 +564,7 @@ impl PyObjectRef {
     pub fn downcast_exact<T: PyObjectPayload + crate::PyPayload>(
         self,
         vm: &VirtualMachine,
-    ) -> Result<PyRef<T>, Self> {
+    ) -> Result<PyRefExact<T>, Self> {
         if self.class().is(T::class(vm)) {
             // TODO: is this always true?
             assert!(
@@ -572,7 +572,7 @@ impl PyObjectRef {
                 "obj.__class__ is T::class() but payload is not T"
             );
             // SAFETY: just asserted that payload_is::<T>()
-            Ok(unsafe { PyRef::from_obj_unchecked(self) })
+            Ok(unsafe { PyRefExact::new_unchecked(PyRef::from_obj_unchecked(self)) })
         } else {
             Err(self)
         }
@@ -1077,7 +1077,7 @@ impl<T: PyObjectPayload> PyWeakRef<T> {
     }
 }
 
-/// Paritally initialize a struct, ensuring that all fields are
+/// Partially initialize a struct, ensuring that all fields are
 /// either given values or explicitly left uninitialized
 macro_rules! partially_init {
     (

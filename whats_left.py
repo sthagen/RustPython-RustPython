@@ -345,7 +345,7 @@ def compare():
     import json
     import platform
 
-    def method_incompatability_reason(typ, method_name, real_method_value):
+    def method_incompatibility_reason(typ, method_name, real_method_value):
         has_method = hasattr(typ, method_name)
         if not has_method:
             return ""
@@ -364,7 +364,7 @@ def compare():
     for name, (typ, real_value, methods) in expected_methods.items():
         missing_methods = {}
         for method, real_method_value in methods:
-            reason = method_incompatability_reason(typ, method, real_method_value)
+            reason = method_incompatibility_reason(typ, method, real_method_value)
             if reason is not None:
                 missing_methods[method] = reason
         if missing_methods:
@@ -441,7 +441,7 @@ def remove_one_indent(s):
 compare_src = inspect.getsourcelines(compare)[0][1:]
 output += "".join(remove_one_indent(line) for line in compare_src)
 
-with open(GENERATED_FILE, "w") as f:
+with open(GENERATED_FILE, "w", encoding='utf-8') as f:
     f.write(output + "\n")
 
 

@@ -20,7 +20,7 @@ use rustpython_common::hash;
 
 #[derive(Debug, Default, Clone)]
 pub struct PyBytesInner {
-    pub(crate) elements: Vec<u8>,
+    pub(super) elements: Vec<u8>,
 }
 
 impl From<Vec<u8>> for PyBytesInner {
@@ -79,9 +79,7 @@ impl ByteInnerNewOptions {
                 // construct an exact bytes from an exact bytes do not clone
                 let obj = if cls.is(PyBytes::class(vm)) {
                     match obj.downcast_exact::<PyBytes>(vm) {
-                        Ok(b) => {
-                            return Ok(b);
-                        }
+                        Ok(b) => return Ok(b.into_pyref()),
                         Err(obj) => obj,
                     }
                 } else {
@@ -243,6 +241,11 @@ impl ByteInnerTranslateOptions {
 pub type ByteInnerSplitOptions<'a> = anystr::SplitArgs<'a, PyBytesInner>;
 
 impl PyBytesInner {
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.elements
+    }
+
     pub fn repr(&self, class_name: Option<&str>) -> String {
         if let Some(class_name) = class_name {
             rustpython_common::bytes::repr_with(&self.elements, &[class_name, "("], ")")
@@ -578,24 +581,20 @@ impl PyBytesInner {
             .to_vec()
     }
 
-    pub fn lstrip(&self, chars: OptionalOption<PyBytesInner>) -> Vec<u8> {
-        self.elements
-            .py_strip(
-                chars,
-                |s, chars| s.trim_start_with(|c| chars.contains(&(c as u8))),
-                |s| s.trim_start(),
-            )
-            .to_vec()
+    pub fn lstrip(&self, chars: OptionalOption<PyBytesInner>) -> &[u8] {
+        self.elements.py_strip(
+            chars,
+            |s, chars| s.trim_start_with(|c| chars.contains(&(c as u8))),
+            |s| s.trim_start(),
+        )
     }
 
-    pub fn rstrip(&self, chars: OptionalOption<PyBytesInner>) -> Vec<u8> {
-        self.elements
-            .py_strip(
-                chars,
-                |s, chars| s.trim_end_with(|c| chars.contains(&(c as u8))),
-                |s| s.trim_end(),
-            )
-            .to_vec()
+    pub fn rstrip(&self, chars: OptionalOption<PyBytesInner>) -> &[u8] {
+        self.elements.py_strip(
+            chars,
+            |s, chars| s.trim_end_with(|c| chars.contains(&(c as u8))),
+            |s| s.trim_end(),
+        )
     }
 
     // new in Python 3.9
