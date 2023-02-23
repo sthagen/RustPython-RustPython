@@ -123,11 +123,10 @@ impl PyByteArray {
     }
 
     #[pymethod(magic)]
-    fn repr(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyResult<String> {
+    fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
         let class = zelf.class();
         let class_name = class.name();
-        let s = zelf.inner().repr(Some(&class_name));
-        Ok(s)
+        zelf.inner().repr(Some(&class_name), vm)
     }
 
     #[pymethod(magic)]
@@ -821,7 +820,7 @@ impl AsSequence for PyByteArray {
             }),
             repeat: atomic_func!(|seq, n, vm| {
                 PyByteArray::sequence_downcast(seq)
-                    .mul(n as isize, vm)
+                    .mul(n, vm)
                     .map(|x| x.into_pyobject(vm))
             }),
             item: atomic_func!(|seq, i, vm| {
@@ -850,7 +849,7 @@ impl AsSequence for PyByteArray {
             }),
             inplace_repeat: atomic_func!(|seq, n, vm| {
                 let zelf = PyByteArray::sequence_downcast(seq).to_owned();
-                PyByteArray::imul(zelf, n as isize, vm).map(|x| x.into())
+                PyByteArray::imul(zelf, n, vm).map(|x| x.into())
             }),
         };
         &AS_SEQUENCE

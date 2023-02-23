@@ -86,7 +86,7 @@ impl CompileContext {
     }
 }
 
-/// Compile an ast::Mod produced from rustpython_parser::parser::parse()
+/// Compile an ast::Mod produced from rustpython_parser::parse()
 pub fn compile_top(
     ast: &ast::Mod,
     source_path: String,
@@ -709,6 +709,12 @@ impl Compiler {
                 orelse,
                 finalbody,
             } => self.compile_try_statement(body, handlers, orelse, finalbody)?,
+            TryStar {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+            } => self.compile_try_star_statement(body, handlers, orelse, finalbody)?,
             FunctionDef {
                 name,
                 args,
@@ -1090,6 +1096,16 @@ impl Compiler {
         }
 
         Ok(())
+    }
+
+    fn compile_try_star_statement(
+        &mut self,
+        _body: &[ast::Stmt],
+        _handlers: &[ast::Excepthandler],
+        _orelse: &[ast::Stmt],
+        _finalbody: &[ast::Stmt],
+    ) -> CompileResult<()> {
+        Err(self.error(CodegenErrorType::NotImplementedYet))
     }
 
     fn is_forbidden_arg_name(name: &str) -> bool {
@@ -2827,10 +2843,8 @@ fn compile_constant(value: &ast::Constant) -> ConstantData {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompileOpts, Compiler};
-    use crate::symboltable::SymbolTable;
-    use rustpython_compiler_core::CodeObject;
-    use rustpython_parser::parser;
+    use super::*;
+    use rustpython_parser as parser;
 
     fn compile_exec(source: &str) -> CodeObject {
         let mut compiler: Compiler = Compiler::new(

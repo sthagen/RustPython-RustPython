@@ -1,5 +1,7 @@
+import sys
 import asyncio
 import unittest
+
 
 class ContextManager:
     async def __aenter__(self):
@@ -14,9 +16,6 @@ class ContextManager:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         ls.append(3)
         print("Wiedersehen")
-
-
-ls = []
 
 
 class AIterWrap:
@@ -41,16 +40,20 @@ async def a(s, m):
     async for i in AIterWrap(range(0, 2)):
         print(i)
         ls.append(m)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.2)
 
 
-loop = asyncio.get_event_loop()
-loop.run_until_complete(
-    asyncio.wait(
-        [a(0, "hello1"), a(0.75, "hello2"), a(1.5, "hello3"), a(2.25, "hello4")]
-    )
-)
 
+async def main():
+    tasks = [
+        asyncio.create_task(c)
+        for c in [a(0.0, "hello1"), a(0.2, "hello2"), a(0.4, "hello3"), a(0.6, "hello4")]
+    ]
+    await asyncio.wait(tasks)
+
+
+ls = []
+asyncio.run(main(), debug=True)
 
 assert ls == [
     1,
@@ -72,41 +75,43 @@ assert ls == [
 ]
 
 
-class TestAsyncWith(unittest.TestCase):
-    def testAenterAttributeError1(self):
-        class LacksAenter(object):
-            async def __aexit__(self, *exc):
+if sys.version_info < (3, 11, 0):
+
+    class TestAsyncWith(unittest.TestCase):
+        def testAenterAttributeError1(self):
+            class LacksAenter(object):
+                async def __aexit__(self, *exc):
+                    pass
+
+            async def foo():
+                async with LacksAenter():
+                    pass
+
+            with self.assertRaisesRegex(AttributeError, "__aenter__"):
+                foo().send(None)
+
+        def testAenterAttributeError2(self):
+            class LacksAenterAndAexit(object):
                 pass
 
-        async def foo():
-            async with LacksAenter():
-                pass
-        
-        with self.assertRaisesRegex(AttributeError, '__aenter__'):
-            foo().send(None)
+            async def foo():
+                async with LacksAenterAndAexit():
+                    pass
 
-    def testAenterAttributeError2(self):
-        class LacksAenterAndAexit(object):
-            pass
+            with self.assertRaisesRegex(AttributeError, "__aenter__"):
+                foo().send(None)
 
-        async def foo():
-            async with LacksAenterAndAexit():
-                pass
+        def testAexitAttributeError(self):
+            class LacksAexit(object):
+                async def __aenter__(self):
+                    pass
 
-        with self.assertRaisesRegex(AttributeError, '__aenter__'):
-            foo().send(None)
+            async def foo():
+                async with LacksAexit():
+                    pass
 
-    def testAexitAttributeError(self):
-        class LacksAexit(object):
-            async def __aenter__(self):
-                pass
-
-        async def foo():
-            async with LacksAexit():
-                pass
-            
-        with self.assertRaisesRegex(AttributeError, '__aexit__'):
-            foo().send(None)
+            with self.assertRaisesRegex(AttributeError, "__aexit__"):
+                foo().send(None)
 
 
 if __name__ == "__main__":

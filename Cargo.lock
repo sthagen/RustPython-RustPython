@@ -692,6 +692,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyn-clone"
+version = "1.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9b0705efd4599c15a38151f4721f7bc388306f61084d3bfd50bd07fbca5cb60"
+
+[[package]]
 name = "either"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2134,6 +2140,7 @@ dependencies = [
  "csv-core",
  "digest",
  "dns-lookup",
+ "dyn-clone",
  "flate2",
  "foreign-types-shared",
  "gethostname",
@@ -2174,6 +2181,7 @@ dependencies = [
  "socket2",
  "system-configuration",
  "termios",
+ "ucd",
  "unic-char-property",
  "unic-normal",
  "unic-ucd-age",
@@ -2752,6 +2760,12 @@ name = "typenum"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "497961ef93d974e23eb6f433eb5fe1b7930b659f06d12dec6fc44a8f554c0bba"
+
+[[package]]
+name = "ucd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe4fa6e588762366f1eb4991ce59ad1b93651d0b769dfb4e4d1c5c4b943d1159"
 
 [[package]]
 name = "uname"

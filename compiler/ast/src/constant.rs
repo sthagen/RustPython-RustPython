@@ -42,7 +42,9 @@ impl std::fmt::Display for Constant {
             Constant::None => f.pad("None"),
             Constant::Bool(b) => f.pad(if *b { "True" } else { "False" }),
             Constant::Str(s) => rustpython_common::str::repr(s).fmt(f),
-            Constant::Bytes(b) => f.pad(&rustpython_common::bytes::repr(b)),
+            Constant::Bytes(b) => {
+                f.pad(&rustpython_common::bytes::repr(b).map_err(|_err| std::fmt::Error)?)
+            }
             Constant::Int(i) => i.fmt(f),
             Constant::Tuple(tup) => {
                 if let [elt] = &**tup {
@@ -131,12 +133,12 @@ impl<U> crate::fold::Fold<U> for ConstantOptimizer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[cfg(feature = "constant-optimization")]
     #[test]
     fn test_constant_opt() {
-        use super::*;
-        use crate::fold::Fold;
-        use crate::*;
+        use crate::{fold::Fold, *};
 
         let start = Default::default();
         let end = None;
