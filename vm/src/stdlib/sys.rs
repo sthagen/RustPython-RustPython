@@ -17,12 +17,12 @@ mod sys {
         types::PyStructSequence,
         version,
         vm::{Settings, VirtualMachine},
-        AsObject, PyObjectRef, PyRef, PyRefExact, PyResult,
+        AsObject, PyObject, PyObjectRef, PyRef, PyRefExact, PyResult,
     };
     use num_traits::ToPrimitive;
     use std::{
         env::{self, VarError},
-        mem, path,
+        path,
         sync::atomic::Ordering,
     };
 
@@ -60,6 +60,8 @@ mod sys {
                 "darwin"
             } else if #[cfg(windows)] {
                 "win32"
+            } else if #[cfg(target_os = "wasi")] {
+                "wasi"
             } else {
                 "unknown"
             }
@@ -69,6 +71,9 @@ mod sys {
     const PS1: &str = ">>>>> ";
     #[pyattr(name = "ps2")]
     const PS2: &str = "..... ";
+    #[cfg(windows)]
+    #[pyattr(name = "_vpath")]
+    const VPATH: Option<&'static str> = None; // TODO: actual VPATH value
 
     #[pyattr]
     fn default_prefix(_vm: &VirtualMachine) -> &'static str {
@@ -414,10 +419,23 @@ mod sys {
         vm.recursion_limit.get()
     }
 
+    #[derive(FromArgs)]
+    struct GetsizeofArgs {
+        obj: PyObjectRef,
+        #[pyarg(any, optional)]
+        default: Option<PyObjectRef>,
+    }
+
     #[pyfunction]
-    fn getsizeof(obj: PyObjectRef) -> usize {
-        // TODO: implement default optional argument.
-        mem::size_of_val(&obj)
+    fn getsizeof(args: GetsizeofArgs, vm: &VirtualMachine) -> PyResult {
+        let sizeof = || -> PyResult<usize> {
+            let res = vm.call_special_method(args.obj, identifier!(vm, __sizeof__), ())?;
+            let res = res.try_index(vm)?.try_to_primitive::<usize>(vm)?;
+            Ok(res + std::mem::size_of::<PyObject>())
+        };
+        sizeof()
+            .map(|x| vm.ctx.new_int(x).into())
+            .or_else(|err| args.default.ok_or(err))
     }
 
     #[pyfunction]
@@ -684,6 +702,10 @@ mod sys {
         dev_mode: bool,
         /// -X utf8
         utf8_mode: u8,
+        /// -X int_max_str_digits=number
+        int_max_str_digits: i8,
+        /// -P, `PYTHONSAFEPATH`
+        safe_path: bool,
         /// -X warn_default_encoding, PYTHONWARNDEFAULTENCODING
         warn_default_encoding: u8,
     }
@@ -707,6 +729,8 @@ mod sys {
                 isolated: settings.isolated as u8,
                 dev_mode: settings.dev_mode,
                 utf8_mode: 1,
+                int_max_str_digits: -1,
+                safe_path: false,
                 warn_default_encoding: settings.warn_default_encoding as u8,
             }
         }
@@ -808,6 +832,8 @@ mod sys {
     pub(super) struct PyIntInfo {
         bits_per_digit: usize,
         sizeof_digit: usize,
+        default_max_str_digits: usize,
+        str_digits_check_threshold: usize,
     }
 
     #[pyclass(with(PyStructSequence))]
@@ -815,6 +841,8 @@ mod sys {
         const INFO: Self = PyIntInfo {
             bits_per_digit: 30, //?
             sizeof_digit: std::mem::size_of::<u32>(),
+            default_max_str_digits: 4300,
+            str_digits_check_threshold: 640,
         };
     }
 

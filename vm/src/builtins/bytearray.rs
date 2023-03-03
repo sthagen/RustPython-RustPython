@@ -19,24 +19,26 @@ use crate::{
             PyRwLockReadGuard, PyRwLockWriteGuard,
         },
     },
-    convert::ToPyObject,
+    convert::{ToPyObject, ToPyResult},
     function::Either,
     function::{
         ArgBytesLike, ArgIterable, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue,
     },
     protocol::{
         BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn,
-        PyMappingMethods, PySequenceMethods,
+        PyMappingMethods, PyNumberMethods, PySequenceMethods,
     },
     sliceable::{SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
-        AsBuffer, AsMapping, AsSequence, Callable, Comparable, Constructor, Hashable, Initializer,
-        IterNext, IterNextIterable, Iterable, PyComparisonOp, Unconstructible, Unhashable,
+        AsBuffer, AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, Hashable,
+        Initializer, IterNext, IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
+        Unhashable,
     },
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     VirtualMachine,
 };
 use bstr::ByteSlice;
+use once_cell::sync::Lazy;
 use std::mem::size_of;
 
 #[pyclass(module = false, name = "bytearray")]
@@ -103,6 +105,7 @@ pub(crate) fn init(context: &Context) {
         AsBuffer,
         AsMapping,
         AsSequence,
+        AsNumber,
         Iterable
     )
 )]
@@ -779,10 +782,10 @@ impl AsBuffer for PyByteArray {
     }
 }
 
-impl<'a> BufferResizeGuard<'a> for PyByteArray {
-    type Resizable = PyRwLockWriteGuard<'a, PyBytesInner>;
+impl BufferResizeGuard for PyByteArray {
+    type Resizable<'a> = PyRwLockWriteGuard<'a, PyBytesInner>;
 
-    fn try_resizable_opt(&'a self) -> Option<Self::Resizable> {
+    fn try_resizable_opt(&self) -> Option<Self::Resizable<'_>> {
         let w = self.inner.write();
         (self.exports.load(Ordering::SeqCst) == 0).then_some(w)
     }
@@ -853,6 +856,20 @@ impl AsSequence for PyByteArray {
             }),
         };
         &AS_SEQUENCE
+    }
+}
+
+impl AsNumber for PyByteArray {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: Lazy<PyNumberMethods> = Lazy::new(|| PyNumberMethods {
+            remainder: atomic_func!(|number, other, vm| {
+                PyByteArray::number_downcast(number)
+                    .mod_(other.to_owned(), vm)
+                    .to_pyresult(vm)
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        });
+        &AS_NUMBER
     }
 }
 
