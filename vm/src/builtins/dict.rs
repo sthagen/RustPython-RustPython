@@ -16,11 +16,11 @@ use crate::{
         ArgIterable, FuncArgs, KwArgs, OptionalArg, PyArithmeticValue::*, PyComparisonValue,
     },
     iter::PyExactSizeIterator,
-    protocol::{PyIterIter, PyIterReturn, PyMappingMethods, PySequenceMethods},
+    protocol::{PyIterIter, PyIterReturn, PyMappingMethods, PyNumberMethods, PySequenceMethods},
     recursion::ReprGuard,
     types::{
-        AsMapping, AsSequence, Callable, Comparable, Constructor, Hashable, Initializer, IterNext,
-        IterNextIterable, Iterable, PyComparisonOp, Unconstructible, Unhashable,
+        AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, Initializer, IterNext,
+        IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
     },
     vm::VirtualMachine,
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
@@ -32,7 +32,7 @@ use std::fmt;
 
 pub type DictContentType = dictdatatype::Dict;
 
-#[pyclass(module = false, name = "dict")]
+#[pyclass(module = false, name = "dict", unhashable = true)]
 #[derive(Default)]
 pub struct PyDict {
     entries: DictContentType,
@@ -72,7 +72,7 @@ impl PyDict {
         };
         let dict = &self.entries;
         if let Some(keys) = vm.get_method(other.clone(), vm.ctx.intern_str("keys")) {
-            let keys = vm.invoke(&keys?, ())?.get_iter(vm)?;
+            let keys = keys?.call((), vm)?.get_iter(vm)?;
             while let PyIterReturn::Return(key) = keys.next(vm)? {
                 let val = other.get_item(&*key, vm)?;
                 dict.insert(vm, &*key, val)?;
@@ -206,10 +206,10 @@ impl PyDict {
         Constructor,
         Initializer,
         AsMapping,
-        Hashable,
         Comparable,
         Iterable,
-        AsSequence
+        AsSequence,
+        AsNumber
     ),
     flags(BASETYPE)
 )]
@@ -477,6 +477,29 @@ impl AsSequence for PyDict {
     }
 }
 
+impl AsNumber for PyDict {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            or: Some(|num, args, vm| {
+                if let Some(num) = num.obj.downcast_ref::<PyDict>() {
+                    PyDict::or(num, args.to_pyobject(vm), vm)
+                } else {
+                    Ok(vm.ctx.not_implemented())
+                }
+            }),
+            inplace_or: Some(|num, args, vm| {
+                if let Some(num) = num.obj.downcast_ref::<PyDict>() {
+                    PyDict::ior(num.to_owned(), args.to_pyobject(vm), vm).map(|d| d.into())
+                } else {
+                    Ok(vm.ctx.not_implemented())
+                }
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
+    }
+}
+
 impl Comparable for PyDict {
     fn cmp(
         zelf: &Py<Self>,
@@ -490,8 +513,6 @@ impl Comparable for PyDict {
         })
     }
 }
-
-impl Unhashable for PyDict {}
 
 impl Iterable for PyDict {
     fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult {
@@ -511,7 +532,7 @@ impl Py<PyDict> {
         vm: &VirtualMachine,
     ) -> PyResult<Option<PyObjectRef>> {
         vm.get_method(self.to_owned().into(), identifier!(vm, __missing__))
-            .map(|methods| vm.invoke(&methods?, (key.to_pyobject(vm),)))
+            .map(|methods| methods?.call((key.to_pyobject(vm),), vm))
             .transpose()
     }
 
@@ -1071,7 +1092,15 @@ trait ViewSetOps: DictView {
 }
 
 impl ViewSetOps for PyDictKeys {}
-#[pyclass(with(DictView, Constructor, Comparable, Iterable, ViewSetOps, AsSequence))]
+#[pyclass(with(
+    DictView,
+    Constructor,
+    Comparable,
+    Iterable,
+    ViewSetOps,
+    AsSequence,
+    AsNumber
+))]
 impl PyDictKeys {
     #[pymethod(magic)]
     fn contains(zelf: PyRef<Self>, key: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
@@ -1112,8 +1141,70 @@ impl AsSequence for PyDictKeys {
     }
 }
 
+impl AsNumber for PyDictKeys {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            subtract: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num
+                        .difference(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
+                }
+                .into_pyobject(vm))
+            }),
+            and: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num
+                        .intersection(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
+                }
+                .into_pyobject(vm))
+            }),
+            xor: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num.symmetric_difference(
+                        ArgIterable::try_from_object(vm, args.to_owned())?,
+                        vm,
+                    )?,
+                }
+                .into_pyobject(vm))
+            }),
+            or: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num.union(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
+                }
+                .into_pyobject(vm))
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
+    }
+}
+
 impl ViewSetOps for PyDictItems {}
-#[pyclass(with(DictView, Constructor, Comparable, Iterable, ViewSetOps, AsSequence))]
+#[pyclass(with(
+    DictView,
+    Constructor,
+    Comparable,
+    Iterable,
+    ViewSetOps,
+    AsSequence,
+    AsNumber
+))]
 impl PyDictItems {
     #[pymethod(magic)]
     fn contains(zelf: PyRef<Self>, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
@@ -1165,6 +1256,60 @@ impl AsSequence for PyDictItems {
             ..PySequenceMethods::NOT_IMPLEMENTED
         });
         &AS_SEQUENCE
+    }
+}
+
+impl AsNumber for PyDictItems {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            subtract: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num
+                        .difference(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
+                }
+                .into_pyobject(vm))
+            }),
+            and: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num
+                        .intersection(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
+                }
+                .into_pyobject(vm))
+            }),
+            xor: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num.symmetric_difference(
+                        ArgIterable::try_from_object(vm, args.to_owned())?,
+                        vm,
+                    )?,
+                }
+                .into_pyobject(vm))
+            }),
+            or: Some(|num, args, vm| {
+                let num = PySetInner::from_iter(
+                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
+                    vm,
+                )?;
+                Ok(PySet {
+                    inner: num.union(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
+                }
+                .into_pyobject(vm))
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
     }
 }
 

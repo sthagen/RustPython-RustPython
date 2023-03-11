@@ -183,6 +183,7 @@ impl PyBaseObject {
     /// Return str(self).
     #[pymethod(magic)]
     fn str(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+        // FIXME: try tp_repr first and fallback to object.__repr__
         zelf.repr(vm)
     }
 
@@ -243,14 +244,13 @@ impl PyBaseObject {
 
     #[pymethod(magic)]
     fn format(obj: PyObjectRef, format_spec: PyStrRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
-        if format_spec.as_str().is_empty() {
-            obj.str(vm)
-        } else {
-            Err(vm.new_type_error(format!(
+        if !format_spec.is_empty() {
+            return Err(vm.new_type_error(format!(
                 "unsupported format string passed to {}.__format__",
                 obj.class().name()
-            )))
+            )));
         }
+        obj.str(vm)
     }
 
     #[pyslot]
@@ -313,7 +313,7 @@ impl PyBaseObject {
             let typ_obj: PyObjectRef = obj.class().to_owned().into();
             let class_reduce = typ_obj.get_attr(__reduce__, vm)?;
             if !class_reduce.is(&object_reduce) {
-                return vm.invoke(&reduce, ());
+                return reduce.call((), vm);
             }
         }
         common_reduce(obj, proto, vm)
@@ -353,10 +353,10 @@ fn common_reduce(obj: PyObjectRef, proto: usize, vm: &VirtualMachine) -> PyResul
     if proto >= 2 {
         let reducelib = vm.import("__reducelib", None, 0)?;
         let reduce_2 = reducelib.get_attr("reduce_2", vm)?;
-        vm.invoke(&reduce_2, (obj,))
+        reduce_2.call((obj,), vm)
     } else {
         let copyreg = vm.import("copyreg", None, 0)?;
         let reduce_ex = copyreg.get_attr("_reduce_ex", vm)?;
-        vm.invoke(&reduce_ex, (obj, proto))
+        reduce_ex.call((obj, proto), vm)
     }
 }

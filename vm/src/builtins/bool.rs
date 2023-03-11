@@ -1,6 +1,11 @@
 use super::{PyInt, PyStrRef, PyType, PyTypeRef};
 use crate::{
-    class::PyClassImpl, convert::ToPyObject, function::OptionalArg, identifier, types::Constructor,
+    class::PyClassImpl,
+    convert::{ToPyObject, ToPyResult},
+    function::OptionalArg,
+    identifier,
+    protocol::PyNumberMethods,
+    types::{AsNumber, Constructor},
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyResult, TryFromBorrowedObject,
     VirtualMachine,
 };
@@ -37,7 +42,7 @@ impl PyObjectRef {
             Some(method_or_err) => {
                 // If descriptor returns Error, propagate it further
                 let method = method_or_err?;
-                let bool_obj = vm.invoke(&method, ())?;
+                let bool_obj = method.call((), vm)?;
                 if !bool_obj.fast_isinstance(vm.ctx.types.bool_type) {
                     return Err(vm.new_type_error(format!(
                         "__bool__ should return bool, returned type {}",
@@ -50,7 +55,7 @@ impl PyObjectRef {
             None => match vm.get_method(self, identifier!(vm, __len__)) {
                 Some(method_or_err) => {
                     let method = method_or_err?;
-                    let bool_obj = vm.invoke(&method, ())?;
+                    let bool_obj = method.call((), vm)?;
                     let int_obj = bool_obj.payload::<PyInt>().ok_or_else(|| {
                         vm.new_type_error(format!(
                             "'{}' object cannot be interpreted as an integer",
@@ -102,7 +107,7 @@ impl Constructor for PyBool {
     }
 }
 
-#[pyclass(with(Constructor))]
+#[pyclass(with(Constructor, AsNumber))]
 impl PyBool {
     #[pymethod(magic)]
     fn repr(zelf: bool, vm: &VirtualMachine) -> PyStrRef {
@@ -116,7 +121,7 @@ impl PyBool {
 
     #[pymethod(magic)]
     fn format(obj: PyObjectRef, format_spec: PyStrRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
-        if format_spec.as_str().is_empty() {
+        if format_spec.is_empty() {
             obj.str(vm)
         } else {
             Err(vm.new_type_error("unsupported format string passed to bool.__format__".to_owned()))
@@ -163,6 +168,24 @@ impl PyBool {
         } else {
             get_py_int(&lhs).xor(rhs, vm).to_pyobject(vm)
         }
+    }
+}
+
+impl AsNumber for PyBool {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            and: Some(|number, other, vm| {
+                PyBool::and(number.obj.to_owned(), other.to_owned(), vm).to_pyresult(vm)
+            }),
+            xor: Some(|number, other, vm| {
+                PyBool::xor(number.obj.to_owned(), other.to_owned(), vm).to_pyresult(vm)
+            }),
+            or: Some(|number, other, vm| {
+                PyBool::or(number.obj.to_owned(), other.to_owned(), vm).to_pyresult(vm)
+            }),
+            ..PyInt::AS_NUMBER
+        };
+        &AS_NUMBER
     }
 }
 

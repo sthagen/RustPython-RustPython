@@ -262,6 +262,13 @@ mod sys {
         version::get_version()
     }
 
+    #[cfg(windows)]
+    #[pyattr]
+    fn winver(_vm: &VirtualMachine) -> String {
+        // Note: This is Python DLL version in CPython, but we arbitrary fill it for compatibility
+        version::get_winver_number()
+    }
+
     #[pyattr]
     fn _xoptions(vm: &VirtualMachine) -> PyDictRef {
         let ctx = &vm.ctx;
@@ -381,7 +388,7 @@ mod sys {
         };
 
         match vm.get_attribute_opt(module, attrname) {
-            Ok(Some(hook)) => vm.invoke(hook.as_ref(), args),
+            Ok(Some(hook)) => hook.as_ref().call(args, vm),
             _ => print_unimportable_module_warn(),
         }
     }
@@ -560,7 +567,7 @@ mod sys {
         // TODO: print received unraisable.exc_traceback
         let tb_module = vm.import("traceback", None, 0)?;
         let print_stack = tb_module.get_attr("print_stack", vm)?;
-        vm.invoke(&print_stack, ())?;
+        print_stack.call((), vm)?;
 
         if vm.is_none(unraisable.exc_type.as_object()) {
             // TODO: early return, but with what error?

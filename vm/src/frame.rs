@@ -11,7 +11,6 @@ use crate::{
     convert::{IntoObject, ToPyResult},
     coroutine::Coro,
     exceptions::ExceptionCtor,
-    format::call_object_format,
     function::{ArgMapping, Either, FuncArgs},
     protocol::{PyIter, PyIterReturn},
     scope::Scope,
@@ -437,7 +436,7 @@ impl ExecutingFrame<'_> {
                     Either::A(coro) => coro
                         .throw(gen, exc_type, exc_val, exc_tb, vm)
                         .to_pyresult(vm), // FIXME:
-                    Either::B(meth) => vm.invoke(&meth, (exc_type, exc_val, exc_tb)),
+                    Either::B(meth) => meth.call((exc_type, exc_val, exc_tb), vm),
                 };
                 return ret.map(ExecutionResult::Yield).or_else(|err| {
                     self.pop_value();
@@ -841,12 +840,24 @@ impl ExecutingFrame<'_> {
             }
             bytecode::Instruction::SetupWith { end } => {
                 let context_manager = self.pop_value();
-                let enter_res = vm.call_special_method(
-                    context_manager.clone(),
-                    identifier!(vm, __enter__),
-                    (),
-                )?;
-                let exit = context_manager.get_attr(identifier!(vm, __exit__), vm)?;
+                let error_string = || -> String {
+                    format!(
+                        "'{:.200}' object does not support the context manager protocol",
+                        context_manager.class().name(),
+                    )
+                };
+                let enter_res = vm
+                    .get_special_method(context_manager.clone(), identifier!(vm, __enter__))?
+                    .map_err(|_obj| vm.new_type_error(error_string()))?
+                    .invoke((), vm)?;
+
+                let exit = context_manager
+                    .get_attr(identifier!(vm, __exit__), vm)
+                    .map_err(|_exc| {
+                        vm.new_type_error({
+                            format!("'{} (missed __exit__ method)", error_string())
+                        })
+                    })?;
                 self.push_value(exit);
                 self.push_block(BlockType::Finally {
                     handler: end.get(arg),
@@ -856,9 +867,24 @@ impl ExecutingFrame<'_> {
             }
             bytecode::Instruction::BeforeAsyncWith => {
                 let mgr = self.pop_value();
-                let aenter_res =
-                    vm.call_special_method(mgr.clone(), identifier!(vm, __aenter__), ())?;
-                let aexit = mgr.get_attr(identifier!(vm, __aexit__), vm)?;
+                let error_string = || -> String {
+                    format!(
+                        "'{:.200}' object does not support the asynchronous context manager protocol",
+                        mgr.class().name(),
+                    )
+                };
+
+                let aenter_res = vm
+                    .get_special_method(mgr.clone(), identifier!(vm, __aenter__))?
+                    .map_err(|_obj| vm.new_type_error(error_string()))?
+                    .invoke((), vm)?;
+                let aexit = mgr
+                    .get_attr(identifier!(vm, __aexit__), vm)
+                    .map_err(|_exc| {
+                        vm.new_type_error({
+                            format!("'{} (missed __aexit__ method)", error_string())
+                        })
+                    })?;
                 self.push_value(aexit);
                 self.push_value(aenter_res);
 
@@ -890,7 +916,7 @@ impl ExecutingFrame<'_> {
                 } else {
                     (vm.ctx.none(), vm.ctx.none(), vm.ctx.none())
                 };
-                let exit_res = vm.invoke(&exit, args)?;
+                let exit_res = exit.call(args, vm)?;
                 self.push_value(exit_res);
 
                 Ok(None)
@@ -939,7 +965,7 @@ impl ExecutingFrame<'_> {
                             )
                         },
                     )?;
-                    vm.invoke(&await_method, ())?
+                    await_method.call((), vm)?
                 };
                 self.push_value(awaitable);
                 Ok(None)
@@ -1354,7 +1380,7 @@ impl ExecutingFrame<'_> {
     #[inline]
     fn execute_call(&mut self, args: FuncArgs, vm: &VirtualMachine) -> FrameResult {
         let func_ref = self.pop_value();
-        let value = vm.invoke(&func_ref, args)?;
+        let value = func_ref.call(args, vm)?;
         self.push_value(value);
         Ok(None)
     }
@@ -1430,7 +1456,7 @@ impl ExecutingFrame<'_> {
             None if vm.is_none(&val) => PyIter::new(gen).next(vm),
             None => {
                 let meth = gen.to_owned().get_attr("send", vm)?;
-                PyIterReturn::from_pyresult(vm.invoke(&meth, (val,)), vm)
+                PyIterReturn::from_pyresult(meth.call((val,), vm), vm)
             }
         }
     }
@@ -1717,7 +1743,7 @@ impl ExecutingFrame<'_> {
             .clone()
             .get_attr("displayhook", vm)
             .map_err(|_| vm.new_runtime_error("lost sys.displayhook".to_owned()))?;
-        vm.invoke(&displayhook, (expr,))?;
+        displayhook.call((expr,), vm)?;
 
         Ok(None)
     }
@@ -1766,12 +1792,7 @@ impl ExecutingFrame<'_> {
         };
 
         let spec = self.pop_value();
-        let formatted = call_object_format(
-            vm,
-            value,
-            None,
-            spec.downcast_ref::<PyStr>().unwrap().as_str(),
-        )?;
+        let formatted = vm.format(&value, spec.downcast::<PyStr>().unwrap())?;
         self.push_value(formatted.into());
         Ok(None)
     }

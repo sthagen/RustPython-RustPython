@@ -1,17 +1,17 @@
 use self::types::{PyBaseException, PyBaseExceptionRef};
-use crate::builtins::tuple::IntoPyTuple;
-use crate::common::lock::PyRwLock;
-use crate::common::str::ReprOverflowError;
+use crate::common::{lock::PyRwLock, str::ReprOverflowError};
 use crate::{
     builtins::{
-        traceback::PyTracebackRef, PyNone, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef,
+        traceback::PyTracebackRef, tuple::IntoPyTuple, PyNone, PyStr, PyStrRef, PyTuple,
+        PyTupleRef, PyType, PyTypeRef,
     },
     class::{PyClassImpl, StaticType},
     convert::{ToPyException, ToPyObject},
-    function::{ArgIterable, FuncArgs},
+    function::{ArgIterable, FuncArgs, IntoFuncArgs},
     py_io::{self, Write},
     stdlib::sys,
     suggestion::offer_suggestions,
+    types::Callable,
     AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
@@ -54,7 +54,7 @@ impl VirtualMachine {
         };
         if let Ok(excepthook) = vm.sys_module.get_attr("excepthook", vm) {
             let (exc_type, exc_val, exc_tb) = vm.split_exception(exc.clone());
-            if let Err(eh_exc) = vm.invoke(&excepthook, (exc_type, exc_val, exc_tb)) {
+            if let Err(eh_exc) = excepthook.call((exc_type, exc_val, exc_tb), vm) {
                 write_fallback(&eh_exc, "Error in sys.excepthook:");
                 write_fallback(&exc, "Original exception was:");
             }
@@ -208,7 +208,7 @@ impl VirtualMachine {
         args: Vec<PyObjectRef>,
     ) -> PyResult<PyBaseExceptionRef> {
         // TODO: fast-path built-in exceptions by directly instantiating them? Is that really worth it?
-        let res = self.invoke(&cls, args)?;
+        let res = PyType::call(&cls, args.into_args(self), self)?;
         PyBaseExceptionRef::try_from_object(self, res)
     }
 }
@@ -322,6 +322,7 @@ impl ExceptionCtor {
 #[derive(Debug, Clone)]
 pub struct ExceptionZoo {
     pub base_exception_type: &'static Py<PyType>,
+    pub base_exception_group: &'static Py<PyType>,
     pub system_exit: &'static Py<PyType>,
     pub keyboard_interrupt: &'static Py<PyType>,
     pub generator_exit: &'static Py<PyType>,
@@ -538,6 +539,7 @@ impl ExceptionZoo {
         let base_exception_type = PyBaseException::init_bare_type();
 
         // Sorted By Hierarchy then alphabetized.
+        let base_exception_group = PyBaseExceptionGroup::init_bare_type();
         let system_exit = PySystemExit::init_bare_type();
         let keyboard_interrupt = PyKeyboardInterrupt::init_bare_type();
         let generator_exit = PyGeneratorExit::init_bare_type();
@@ -623,6 +625,7 @@ impl ExceptionZoo {
 
         Self {
             base_exception_type,
+            base_exception_group,
             system_exit,
             keyboard_interrupt,
             generator_exit,
@@ -704,6 +707,10 @@ impl ExceptionZoo {
         PyBaseException::extend_class(ctx, excs.base_exception_type);
 
         // Sorted By Hierarchy then alphabetized.
+        extend_exception!(PyBaseExceptionGroup, ctx, excs.base_exception_group, {
+            "message" => ctx.new_readonly_getset("message", excs.base_exception_group, make_arg_getter(0)),
+            "exceptions" => ctx.new_readonly_getset("exceptions", excs.base_exception_group, make_arg_getter(1)),
+        });
         extend_exception!(PySystemExit, ctx, excs.system_exit, {
             "code" => ctx.new_readonly_getset("code", excs.system_exit, system_exit_code),
         });
@@ -1138,6 +1145,12 @@ pub(super) mod types {
         PyBaseException,
         system_exit,
         "Request to exit from the interpreter."
+    }
+    define_exception! {
+        PyBaseExceptionGroup,
+        PyBaseException,
+        base_exception_group,
+        "A combination of multiple unrelated exceptions."
     }
     define_exception! {
         PyGeneratorExit,

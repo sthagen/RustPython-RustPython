@@ -6,6 +6,7 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let array = module
         .get_attr("array", vm)
         .expect("Expect array has array type.");
+    array.init_builtin_number_slots(&vm.ctx);
 
     let collections_abc = vm
         .import("collections.abc", None, 0)
@@ -17,13 +18,12 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
         .get_attr("MutableSequence", vm)
         .expect("Expect collections.abc has MutableSequence type.");
 
-    vm.invoke(
-        &mutable_sequence
-            .get_attr("register", vm)
-            .expect("Expect collections.abc.MutableSequence has register method."),
-        (array,),
-    )
-    .expect("Expect collections.abc.MutableSequence.register(array.array) not fail.");
+    let register = &mutable_sequence
+        .get_attr("register", vm)
+        .expect("Expect collections.abc.MutableSequence has register method.");
+    register
+        .call((array,), vm)
+        .expect("Expect collections.abc.MutableSequence.register(array.array) not fail.");
 
     module
 }
@@ -47,7 +47,9 @@ mod array {
             },
             class_or_notimplemented,
             convert::{ToPyObject, ToPyResult, TryFromObject},
-            function::{ArgBytesLike, ArgIntoFloat, ArgIterable, OptionalArg, PyComparisonValue},
+            function::{
+                ArgBytesLike, ArgIntoFloat, ArgIterable, KwArgs, OptionalArg, PyComparisonValue,
+            },
             protocol::{
                 BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn,
                 PyMappingMethods, PySequenceMethods,
@@ -645,11 +647,11 @@ mod array {
     }
 
     impl Constructor for PyArray {
-        type Args = ArrayNewArgs;
+        type Args = (ArrayNewArgs, KwArgs);
 
         fn py_new(
             cls: PyTypeRef,
-            Self::Args { spec, init }: Self::Args,
+            (ArrayNewArgs { spec, init }, kwargs): Self::Args,
             vm: &VirtualMachine,
         ) -> PyResult {
             let spec = spec.as_str().chars().exactly_one().map_err(|_| {
@@ -657,6 +659,13 @@ mod array {
                     "array() argument 1 must be a unicode character, not str".to_owned(),
                 )
             })?;
+
+            if cls.is(PyArray::class(vm)) && !kwargs.is_empty() {
+                return Err(
+                    vm.new_type_error("array.array() takes no keyword arguments".to_owned())
+                );
+            }
+
             let mut array =
                 ArrayContentType::from_char(spec).map_err(|err| vm.new_value_error(err))?;
 

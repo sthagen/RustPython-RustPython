@@ -11,16 +11,16 @@ use crate::{
         format::{FormatSpec, FormatString, FromTemplate},
         str::{BorrowedStr, PyStrKind, PyStrKindData},
     },
-    convert::{IntoPyException, ToPyException, ToPyObject},
+    convert::{IntoPyException, ToPyException, ToPyObject, ToPyResult},
     format::{format, format_map},
     function::{ArgIterable, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue},
     intern::PyInterned,
-    protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
+    protocol::{PyIterReturn, PyMappingMethods, PyNumberMethods, PySequenceMethods},
     sequence::SequenceExt,
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
-        AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, IterNextIterable,
-        Iterable, PyComparisonOp, Unconstructible,
+        AsMapping, AsNumber, AsSequence, Comparable, Constructor, Hashable, IterNext,
+        IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
     },
     AsObject, Context, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
     TryFromBorrowedObject, VirtualMachine,
@@ -354,7 +354,15 @@ impl PyStr {
 
 #[pyclass(
     flags(BASETYPE),
-    with(AsMapping, AsSequence, Hashable, Comparable, Iterable, Constructor)
+    with(
+        AsMapping,
+        AsNumber,
+        AsSequence,
+        Hashable,
+        Comparable,
+        Iterable,
+        Constructor
+    )
 )]
 impl PyStr {
     #[pymethod(magic)]
@@ -369,7 +377,7 @@ impl PyStr {
             .to_pyobject(vm))
         } else if let Some(radd) = vm.get_method(other.clone(), identifier!(vm, __radd__)) {
             // hack to get around not distinguishing number add from seq concat
-            vm.invoke(&radd?, (zelf,))
+            radd?.call((zelf,), vm)
         } else {
             Err(vm.new_type_error(format!(
                 "can only concatenate str (not \"{}\") to str",
@@ -745,10 +753,20 @@ impl PyStr {
     }
 
     #[pymethod(name = "__format__")]
-    fn format_str(&self, spec: PyStrRef, vm: &VirtualMachine) -> PyResult<String> {
-        FormatSpec::parse(spec.as_str())
-            .and_then(|format_spec| format_spec.format_string(self.borrow()))
-            .map_err(|err| err.into_pyexception(vm))
+    fn __format__(zelf: PyRef<Self>, spec: PyStrRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+        let spec = spec.as_str();
+        if spec.is_empty() {
+            return if zelf.class().is(vm.ctx.types.str_type) {
+                Ok(zelf)
+            } else {
+                zelf.as_object().str(vm)
+            };
+        }
+
+        let s = FormatSpec::parse(spec)
+            .and_then(|format_spec| format_spec.format_string(zelf.borrow()))
+            .map_err(|err| err.into_pyexception(vm))?;
+        Ok(vm.ctx.new_str(s))
     }
 
     /// Return a titlecased version of the string where words start with an
@@ -1278,6 +1296,22 @@ impl AsMapping for PyStr {
             ..PyMappingMethods::NOT_IMPLEMENTED
         });
         &AS_MAPPING
+    }
+}
+
+impl AsNumber for PyStr {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            remainder: Some(|number, other, vm| {
+                if let Some(number) = number.obj.downcast_ref::<PyStr>() {
+                    number.modulo(other.to_owned(), vm).to_pyresult(vm)
+                } else {
+                    Ok(vm.ctx.not_implemented())
+                }
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
     }
 }
 

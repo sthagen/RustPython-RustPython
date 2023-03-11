@@ -24,7 +24,7 @@ pub(crate) fn init_importlib_base(vm: &mut VirtualMachine) -> PyResult<PyObjectR
         let bootstrap = import_frozen(vm, "_frozen_importlib")?;
         let install = bootstrap.get_attr("_install", vm)?;
         let imp = import_builtin(vm, "_imp")?;
-        vm.invoke(&install, (vm.sys_module.clone(), imp))?;
+        install.call((vm.sys_module.clone(), imp), vm)?;
         Ok(bootstrap)
     })?;
     vm.import_func = importlib.get_attr(identifier!(vm, __import__).to_owned(), vm)?;
@@ -47,7 +47,7 @@ pub(crate) fn init_importlib_package(
         import_builtin(vm, "marshal")?;
 
         let install_external = importlib.get_attr("_install_external_importers", vm)?;
-        vm.invoke(&install_external, ())?;
+        install_external.call((), vm)?;
         // Set pyc magic number to commit hash. Should be changed when bytecode will be more stable.
         let importlib_external = vm.import("_frozen_importlib_external", None, 0)?;
         let mut magic = get_git_revision().into_bytes();
@@ -77,7 +77,7 @@ pub fn make_frozen(vm: &VirtualMachine, name: &str) -> PyResult<PyRef<PyCode>> {
         vm.state.frozen.get(name).ok_or_else(|| {
             vm.new_import_error(format!("No such frozen object named {name}"), name)
         })?;
-    Ok(vm.ctx.new_code(frozen.code.clone()))
+    Ok(vm.ctx.new_code(frozen.code))
 }
 
 pub fn import_frozen(vm: &VirtualMachine, module_name: &str) -> PyResult {

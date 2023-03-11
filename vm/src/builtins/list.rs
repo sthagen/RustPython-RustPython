@@ -13,8 +13,8 @@ use crate::{
     sequence::{MutObjectSequenceOp, OptionalRangeArgs, SequenceExt, SequenceMutExt},
     sliceable::{SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
-        AsMapping, AsSequence, Comparable, Constructor, Hashable, Initializer, IterNext,
-        IterNextIterable, Iterable, PyComparisonOp, Unconstructible, Unhashable,
+        AsMapping, AsSequence, Comparable, Constructor, Initializer, IterNext, IterNextIterable,
+        Iterable, PyComparisonOp, Unconstructible,
     },
     utils::collection_repr,
     vm::VirtualMachine,
@@ -22,7 +22,7 @@ use crate::{
 };
 use std::{fmt, ops::DerefMut};
 
-#[pyclass(module = false, name = "list")]
+#[pyclass(module = false, name = "list", unhashable = true)]
 #[derive(Default)]
 pub struct PyList {
     elements: PyRwLock<Vec<PyObjectRef>>,
@@ -86,15 +86,7 @@ pub(crate) struct SortOptions {
 pub type PyListRef = PyRef<PyList>;
 
 #[pyclass(
-    with(
-        Constructor,
-        Initializer,
-        AsMapping,
-        Iterable,
-        Hashable,
-        Comparable,
-        AsSequence
-    ),
+    with(Constructor, Initializer, AsMapping, Iterable, Comparable, AsSequence),
     flags(BASETYPE)
 )]
 impl PyList {
@@ -492,8 +484,6 @@ impl Comparable for PyList {
     }
 }
 
-impl Unhashable for PyList {}
-
 fn do_sort(
     vm: &VirtualMachine,
     values: &mut Vec<PyObjectRef>,
@@ -510,7 +500,7 @@ fn do_sort(
     if let Some(ref key_func) = key_func {
         let mut items = values
             .iter()
-            .map(|x| Ok((x.clone(), vm.invoke(key_func, (x.clone(),))?)))
+            .map(|x| Ok((x.clone(), key_func.call((x.clone(),), vm)?)))
             .collect::<Result<Vec<_>, _>>()?;
         timsort::try_sort_by_gt(&mut items, |a, b| cmp(&a.1, &b.1))?;
         *values = items.into_iter().map(|(val, _)| val).collect();
