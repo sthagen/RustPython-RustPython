@@ -13,7 +13,7 @@ use crate::{
     },
     convert::{IntoPyException, ToPyException, ToPyObject, ToPyResult},
     format::{format, format_map},
-    function::{ArgIterable, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue},
+    function::{ArgIterable, ArgSize, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue},
     intern::PyInterned,
     protocol::{PyIterReturn, PyMappingMethods, PyNumberMethods, PySequenceMethods},
     sequence::SequenceExt,
@@ -350,6 +350,25 @@ impl PyStr {
     fn borrow(&self) -> &BorrowedStr {
         unsafe { std::mem::transmute(self) }
     }
+
+    fn repeat(zelf: PyRef<Self>, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        if value == 0 && zelf.class().is(vm.ctx.types.str_type) {
+            // Special case: when some `str` is multiplied by `0`,
+            // returns the empty `str`.
+            return Ok(vm.ctx.empty_str.clone());
+        }
+        if (value == 1 || zelf.is_empty()) && zelf.class().is(vm.ctx.types.str_type) {
+            // Special case: when some `str` is multiplied by `1` or is the empty `str`,
+            // nothing really happens, we need to return an object itself
+            // with the same `id()` to be compatible with CPython.
+            // This only works for `str` itself, not its subclasses.
+            return Ok(zelf);
+        }
+        zelf.as_str()
+            .as_bytes()
+            .mul(vm, value)
+            .map(|x| Self::from(unsafe { String::from_utf8_unchecked(x) }).into_ref(vm))
+    }
 }
 
 #[pyclass(
@@ -467,23 +486,8 @@ impl PyStr {
 
     #[pymethod(name = "__rmul__")]
     #[pymethod(magic)]
-    fn mul(zelf: PyRef<Self>, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        if value == 0 && zelf.class().is(vm.ctx.types.str_type) {
-            // Special case: when some `str` is multiplied by `0`,
-            // returns the empty `str`.
-            return Ok(vm.ctx.empty_str.clone());
-        }
-        if (value == 1 || zelf.is_empty()) && zelf.class().is(vm.ctx.types.str_type) {
-            // Special case: when some `str` is multiplied by `1` or is the empty `str`,
-            // nothing really happens, we need to return an object itself
-            // with the same `id()` to be compatible with CPython.
-            // This only works for `str` itself, not its subclasses.
-            return Ok(zelf);
-        }
-        zelf.as_str()
-            .as_bytes()
-            .mul(vm, value)
-            .map(|x| Self::from(unsafe { String::from_utf8_unchecked(x) }).into_ref(vm))
+    fn mul(zelf: PyRef<Self>, value: ArgSize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        Self::repeat(zelf, value.into(), vm)
     }
 
     #[pymethod(magic)]
@@ -689,9 +693,9 @@ impl PyStr {
     /// If the string ends with the suffix string, return string[:len(suffix)]
     /// Otherwise, return a copy of the original string.
     #[pymethod]
-    fn removesuffix(&self, suff: PyStrRef) -> String {
+    fn removesuffix(&self, suffix: PyStrRef) -> String {
         self.as_str()
-            .py_removesuffix(suff.as_str(), suff.byte_len(), |s, p| s.ends_with(p))
+            .py_removesuffix(suffix.as_str(), suffix.byte_len(), |s, p| s.ends_with(p))
             .to_owned()
     }
 
@@ -707,15 +711,15 @@ impl PyStr {
 
     #[pymethod]
     fn isdigit(&self) -> bool {
-        // python's isdigit also checks if exponents are digits, these are the unicodes for exponents
-        let valid_unicodes: [u16; 10] = [
+        // python's isdigit also checks if exponents are digits, these are the unicode codepoints for exponents
+        let valid_codepoints: [u16; 10] = [
             0x2070, 0x00B9, 0x00B2, 0x00B3, 0x2074, 0x2075, 0x2076, 0x2077, 0x2078, 0x2079,
         ];
         let s = self.as_str();
         !s.is_empty()
             && s.chars()
                 .filter(|c| !c.is_ascii_digit())
-                .all(|c| valid_unicodes.contains(&(c as u16)))
+                .all(|c| valid_codepoints.contains(&(c as u16)))
     }
 
     #[pymethod]
@@ -823,12 +827,12 @@ impl PyStr {
     fn replace(&self, old: PyStrRef, new: PyStrRef, count: OptionalArg<isize>) -> String {
         let s = self.as_str();
         match count {
-            OptionalArg::Present(maxcount) if maxcount >= 0 => {
-                if maxcount == 0 || s.is_empty() {
+            OptionalArg::Present(max_count) if max_count >= 0 => {
+                if max_count == 0 || s.is_empty() {
                     // nothing to do; return the original bytes
                     s.into()
                 } else {
-                    s.replacen(old.as_str(), new.as_str(), maxcount as usize)
+                    s.replacen(old.as_str(), new.as_str(), max_count as usize)
                 }
             }
             _ => s.replace(old.as_str(), new.as_str()),
@@ -1325,7 +1329,7 @@ impl AsSequence for PyStr {
             }),
             repeat: atomic_func!(|seq, n, vm| {
                 let zelf = PyStr::sequence_downcast(seq);
-                PyStr::mul(zelf.to_owned(), n, vm).map(|x| x.into())
+                PyStr::repeat(zelf.to_owned(), n, vm).map(|x| x.into())
             }),
             item: atomic_func!(|seq, i, vm| {
                 let zelf = PyStr::sequence_downcast(seq);
@@ -1688,7 +1692,7 @@ impl AnyStr for str {
         F: Fn(&Self) -> PyObjectRef,
     {
         // CPython split_whitespace
-        let mut splited = Vec::new();
+        let mut splits = Vec::new();
         let mut last_offset = 0;
         let mut count = maxsplit;
         for (offset, _) in self.match_indices(|c: char| c.is_ascii_whitespace() || c == '\x0b') {
@@ -1699,14 +1703,14 @@ impl AnyStr for str {
             if count == 0 {
                 break;
             }
-            splited.push(convert(&self[last_offset..offset]));
+            splits.push(convert(&self[last_offset..offset]));
             last_offset = offset + 1;
             count -= 1;
         }
         if last_offset != self.len() {
-            splited.push(convert(&self[last_offset..]));
+            splits.push(convert(&self[last_offset..]));
         }
-        splited
+        splits
     }
 
     fn py_rsplit_whitespace<F>(&self, maxsplit: isize, convert: F) -> Vec<PyObjectRef>
@@ -1714,7 +1718,7 @@ impl AnyStr for str {
         F: Fn(&Self) -> PyObjectRef,
     {
         // CPython rsplit_whitespace
-        let mut splited = Vec::new();
+        let mut splits = Vec::new();
         let mut last_offset = self.len();
         let mut count = maxsplit;
         for (offset, _) in self.rmatch_indices(|c: char| c.is_ascii_whitespace() || c == '\x0b') {
@@ -1725,14 +1729,14 @@ impl AnyStr for str {
             if count == 0 {
                 break;
             }
-            splited.push(convert(&self[offset + 1..last_offset]));
+            splits.push(convert(&self[offset + 1..last_offset]));
             last_offset = offset;
             count -= 1;
         }
         if last_offset != 0 {
-            splited.push(convert(&self[..last_offset]));
+            splits.push(convert(&self[..last_offset]));
         }
-        splited
+        splits
     }
 }
 

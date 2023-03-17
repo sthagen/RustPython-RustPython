@@ -5,7 +5,7 @@ use crate::{
     atomic_func,
     class::PyClassImpl,
     common::hash::PyHash,
-    function::{FuncArgs, OptionalArg, PyComparisonValue},
+    function::{ArgIndex, FuncArgs, OptionalArg, PyComparisonValue},
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, IterNextIterable,
@@ -176,10 +176,10 @@ pub fn init(context: &Context) {
 
 #[pyclass(with(AsMapping, AsSequence, Hashable, Comparable, Iterable))]
 impl PyRange {
-    fn new(cls: PyTypeRef, stop: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+    fn new(cls: PyTypeRef, stop: ArgIndex, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         PyRange {
             start: vm.new_pyref(0),
-            stop: stop.try_index(vm)?,
+            stop: stop.into(),
             step: vm.new_pyref(1),
         }
         .into_ref_with_type(vm, cls)
@@ -189,10 +189,10 @@ impl PyRange {
         cls: PyTypeRef,
         start: PyObjectRef,
         stop: PyObjectRef,
-        step: OptionalArg<PyObjectRef>,
+        step: OptionalArg<ArgIndex>,
         vm: &VirtualMachine,
     ) -> PyResult<PyRef<Self>> {
-        let step = step.unwrap_or_else(|| vm.new_pyobj(1)).try_index(vm)?;
+        let step = step.map_or_else(|| vm.ctx.new_int(1), |step| step.into());
         if step.as_bigint().is_zero() {
             return Err(vm.new_value_error("range() arg 3 must not be zero".to_owned()));
         }
@@ -345,19 +345,19 @@ impl PyRange {
     fn getitem(&self, subscript: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         match RangeIndex::try_from_object(vm, subscript)? {
             RangeIndex::Slice(slice) => {
-                let (mut substart, mut substop, mut substep) =
+                let (mut sub_start, mut sub_stop, mut sub_step) =
                     slice.inner_indices(&self.compute_length(), vm)?;
                 let range_step = &self.step;
                 let range_start = &self.start;
 
-                substep *= range_step.as_bigint();
-                substart = (substart * range_step.as_bigint()) + range_start.as_bigint();
-                substop = (substop * range_step.as_bigint()) + range_start.as_bigint();
+                sub_step *= range_step.as_bigint();
+                sub_start = (sub_start * range_step.as_bigint()) + range_start.as_bigint();
+                sub_stop = (sub_stop * range_step.as_bigint()) + range_start.as_bigint();
 
                 Ok(PyRange {
-                    start: vm.new_pyref(substart),
-                    stop: vm.new_pyref(substop),
-                    step: vm.new_pyref(substep),
+                    start: vm.new_pyref(sub_start),
+                    stop: vm.new_pyref(sub_stop),
+                    step: vm.new_pyref(sub_step),
                 }
                 .into_ref(vm)
                 .into())
@@ -582,8 +582,8 @@ impl IterNext for PyLongRangeIterator {
     }
 }
 
-// When start, stop, step are isizes, we can use a faster more compact representation
-// that only operates using isizes to track values.
+// When start, stop, step are isize, we can use a faster more compact representation
+// that only operates using isize to track values.
 #[pyclass(module = false, name = "range_iterator")]
 #[derive(Debug)]
 pub struct PyRangeIterator {

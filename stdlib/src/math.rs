@@ -4,7 +4,7 @@ pub(crate) use math::make_module;
 mod math {
     use crate::vm::{
         builtins::{try_bigint_to_f64, try_f64_to_bigint, PyFloat, PyInt, PyIntRef, PyStrInterned},
-        function::{ArgIntoFloat, ArgIterable, Either, OptionalArg, PosArgs},
+        function::{ArgIndex, ArgIntoFloat, ArgIterable, Either, OptionalArg, PosArgs},
         identifier, PyObject, PyObjectRef, PyRef, PyResult, VirtualMachine,
     };
     use itertools::Itertools;
@@ -211,6 +211,9 @@ mod math {
     #[pyfunction]
     fn sqrt(value: ArgIntoFloat, vm: &VirtualMachine) -> PyResult<f64> {
         let value = *value;
+        if value.is_nan() {
+            return Ok(value);
+        }
         if value.is_sign_negative() {
             return Err(vm.new_value_error("math domain error".to_owned()));
         }
@@ -218,9 +221,8 @@ mod math {
     }
 
     #[pyfunction]
-    fn isqrt(x: PyObjectRef, vm: &VirtualMachine) -> PyResult<BigInt> {
-        let index = x.try_index(vm)?;
-        let value = index.as_bigint();
+    fn isqrt(x: ArgIndex, vm: &VirtualMachine) -> PyResult<BigInt> {
+        let value = x.as_bigint();
 
         if value.is_negative() {
             return Err(vm.new_value_error("isqrt() argument must be nonnegative".to_owned()));
@@ -575,7 +577,7 @@ mod math {
         }
     }
 
-    fn math_perf_arb_len_int_op<F>(args: PosArgs<PyIntRef>, op: F, default: BigInt) -> BigInt
+    fn math_perf_arb_len_int_op<F>(args: PosArgs<ArgIndex>, op: F, default: BigInt) -> BigInt
     where
         F: Fn(&BigInt, &PyInt) -> BigInt,
     {
@@ -595,13 +597,13 @@ mod math {
     }
 
     #[pyfunction]
-    fn gcd(args: PosArgs<PyIntRef>) -> BigInt {
+    fn gcd(args: PosArgs<ArgIndex>) -> BigInt {
         use num_integer::Integer;
         math_perf_arb_len_int_op(args, |x, y| x.gcd(y.as_bigint()), BigInt::zero())
     }
 
     #[pyfunction]
-    fn lcm(args: PosArgs<PyIntRef>) -> BigInt {
+    fn lcm(args: PosArgs<ArgIndex>) -> BigInt {
         use num_integer::Integer;
         math_perf_arb_len_int_op(args, |x, y| x.lcm(y.as_bigint()), BigInt::one())
     }
@@ -665,7 +667,7 @@ mod math {
         }
         if special_sum != 0.0 {
             return if inf_sum.is_nan() {
-                Err(vm.new_overflow_error("-inf + inf in fsum".to_owned()))
+                Err(vm.new_value_error("-inf + inf in fsum".to_owned()))
             } else {
                 Ok(special_sum)
             };
@@ -733,8 +735,8 @@ mod math {
 
     #[pyfunction]
     fn perm(
-        n: PyIntRef,
-        k: OptionalArg<Option<PyIntRef>>,
+        n: ArgIndex,
+        k: OptionalArg<Option<ArgIndex>>,
         vm: &VirtualMachine,
     ) -> PyResult<BigInt> {
         let n = n.as_bigint();
@@ -764,7 +766,7 @@ mod math {
     }
 
     #[pyfunction]
-    fn comb(n: PyIntRef, k: PyIntRef, vm: &VirtualMachine) -> PyResult<BigInt> {
+    fn comb(n: ArgIndex, k: ArgIndex, vm: &VirtualMachine) -> PyResult<BigInt> {
         let mut k = k.as_bigint();
         let n = n.as_bigint();
         let one = BigInt::one();
