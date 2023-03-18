@@ -1,5 +1,7 @@
 use crate::{
-    builtins::{type_::PointerSlot, PyFloat, PyInt, PyStrInterned, PyStrRef, PyType, PyTypeRef},
+    builtins::{
+        type_::PointerSlot, PyFloat, PyInt, PyStr, PyStrInterned, PyStrRef, PyType, PyTypeRef,
+    },
     bytecode::ComparisonOperator,
     common::{hash::PyHash, lock::PyRwLock},
     convert::{ToPyObject, ToPyResult},
@@ -44,6 +46,7 @@ pub struct PyTypeSlots {
     pub hash: AtomicCell<Option<HashFunc>>,
     pub call: AtomicCell<Option<GenericMethod>>,
     // tp_str
+    pub repr: AtomicCell<Option<StringifyFunc>>,
     pub getattro: AtomicCell<Option<GetattroFunc>>,
     pub setattro: AtomicCell<Option<SetattroFunc>>,
 
@@ -273,6 +276,7 @@ impl Default for PyTypeFlags {
 pub(crate) type GenericMethod = fn(&PyObject, FuncArgs, &VirtualMachine) -> PyResult;
 pub(crate) type HashFunc = fn(&PyObject, &VirtualMachine) -> PyResult<PyHash>;
 // CallFunc = GenericMethod
+pub(crate) type StringifyFunc = fn(&PyObject, &VirtualMachine) -> PyResult<PyStrRef>;
 pub(crate) type GetattroFunc = fn(&PyObject, PyStrRef, &VirtualMachine) -> PyResult;
 pub(crate) type SetattroFunc =
     fn(&PyObject, PyStrRef, PySetterValue, &VirtualMachine) -> PyResult<()>;
@@ -369,12 +373,22 @@ fn setitem_wrapper<K: ToPyObject>(
     .map(drop)
 }
 
+fn repr_wrapper(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+    let ret = vm.call_special_method(zelf.to_owned(), identifier!(vm, __repr__), ())?;
+    ret.downcast::<PyStr>().map_err(|obj| {
+        vm.new_type_error(format!(
+            "__repr__ returned non-string (type {})",
+            obj.class()
+        ))
+    })
+}
+
 fn hash_wrapper(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyHash> {
     let hash_obj = vm.call_special_method(zelf.to_owned(), identifier!(vm, __hash__), ())?;
-    match hash_obj.payload_if_subclass::<PyInt>(vm) {
-        Some(py_int) => Ok(rustpython_common::hash::hash_bigint(py_int.as_bigint())),
-        None => Err(vm.new_type_error("__hash__ method should return an integer".to_owned())),
-    }
+    let py_int = hash_obj
+        .payload_if_subclass::<PyInt>(vm)
+        .ok_or_else(|| vm.new_type_error("__hash__ method should return an integer".to_owned()))?;
+    Ok(rustpython_common::hash::hash_bigint(py_int.as_bigint()))
 }
 
 /// Marks a type as unhashable. Similar to PyObject_HashNotImplemented in CPython
@@ -560,6 +574,9 @@ impl PyType {
                     setitem_wrapper(mapping.obj, key, value, vm)
                 });
                 update_pointer_slot!(as_mapping, mapping_methods);
+            }
+            _ if name == identifier!(ctx, __repr__) => {
+                update_slot!(repr, repr_wrapper);
             }
             _ if name == identifier!(ctx, __hash__) => {
                 let is_unhashable = self
@@ -867,11 +884,10 @@ pub trait Destructor: PyPayload {
     #[inline] // for __del__
     #[pyslot]
     fn slot_del(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
-        if let Some(zelf) = zelf.downcast_ref() {
-            Self::del(zelf, vm)
-        } else {
-            Err(vm.new_type_error("unexpected payload for __del__".to_owned()))
-        }
+        let zelf = zelf
+            .downcast_ref()
+            .ok_or_else(|| vm.new_type_error("unexpected payload for __del__".to_owned()))?;
+        Self::del(zelf, vm)
     }
 
     #[pymethod]
@@ -889,11 +905,10 @@ pub trait Callable: PyPayload {
     #[inline]
     #[pyslot]
     fn slot_call(zelf: &PyObject, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        if let Some(zelf) = zelf.downcast_ref() {
-            Self::call(zelf, args.bind(vm)?, vm)
-        } else {
-            Err(vm.new_type_error("unexpected payload for __call__".to_owned()))
-        }
+        let zelf = zelf
+            .downcast_ref()
+            .ok_or_else(|| vm.new_type_error("unexpected payload for __call__".to_owned()))?;
+        Self::call(zelf, args.bind(vm)?, vm)
     }
 
     #[inline]
@@ -977,11 +992,10 @@ pub trait Hashable: PyPayload {
     #[inline]
     #[pyslot]
     fn slot_hash(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyHash> {
-        if let Some(zelf) = zelf.downcast_ref() {
-            Self::hash(zelf, vm)
-        } else {
-            Err(vm.new_type_error("unexpected payload for __hash__".to_owned()))
-        }
+        let zelf = zelf
+            .downcast_ref()
+            .ok_or_else(|| vm.new_type_error("unexpected payload for __hash__".to_owned()))?;
+        Self::hash(zelf, vm)
     }
 
     #[inline]
@@ -994,6 +1008,32 @@ pub trait Hashable: PyPayload {
 }
 
 #[pyclass]
+pub trait Representable: PyPayload {
+    #[inline]
+    #[pyslot]
+    fn slot_repr(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+        let zelf = zelf
+            .downcast_ref()
+            .ok_or_else(|| vm.new_type_error("unexpected payload for __repr__".to_owned()))?;
+        Self::repr(zelf, vm)
+    }
+
+    #[inline]
+    #[pymethod]
+    fn __repr__(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+        Self::slot_repr(&zelf, vm)
+    }
+
+    #[inline]
+    fn repr(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+        let repr = Self::repr_str(zelf, vm)?;
+        Ok(vm.ctx.new_str(repr))
+    }
+
+    fn repr_str(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<String>;
+}
+
+#[pyclass]
 pub trait Comparable: PyPayload {
     #[inline]
     #[pyslot]
@@ -1003,14 +1043,13 @@ pub trait Comparable: PyPayload {
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<Either<PyObjectRef, PyComparisonValue>> {
-        if let Some(zelf) = zelf.downcast_ref() {
-            Self::cmp(zelf, other, op, vm).map(Either::B)
-        } else {
-            Err(vm.new_type_error(format!(
+        let zelf = zelf.downcast_ref().ok_or_else(|| {
+            vm.new_type_error(format!(
                 "unexpected payload for {}",
                 op.method_name(&vm.ctx).as_str()
-            )))
-        }
+            ))
+        })?;
+        Self::cmp(zelf, other, op, vm).map(Either::B)
     }
 
     fn cmp(
@@ -1169,11 +1208,7 @@ impl PyComparisonOp {
             Self::Ne => false,
             _ => return None,
         };
-        if f() {
-            Some(eq)
-        } else {
-            None
-        }
+        f().then_some(eq)
     }
 }
 
@@ -1181,11 +1216,10 @@ impl PyComparisonOp {
 pub trait GetAttr: PyPayload {
     #[pyslot]
     fn slot_getattro(obj: &PyObject, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        if let Some(zelf) = obj.downcast_ref::<Self>() {
-            Self::getattro(zelf, name, vm)
-        } else {
-            Err(vm.new_type_error("unexpected payload for __getattribute__".to_owned()))
-        }
+        let zelf = obj.downcast_ref().ok_or_else(|| {
+            vm.new_type_error("unexpected payload for __getattribute__".to_owned())
+        })?;
+        Self::getattro(zelf, name, vm)
     }
 
     fn getattro(zelf: &Py<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult;
@@ -1207,11 +1241,10 @@ pub trait SetAttr: PyPayload {
         value: PySetterValue,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        if let Some(zelf) = obj.downcast_ref::<Self>() {
-            Self::setattro(zelf, name, value, vm)
-        } else {
-            Err(vm.new_type_error("unexpected payload for __setattr__".to_owned()))
-        }
+        let zelf = obj
+            .downcast_ref::<Self>()
+            .ok_or_else(|| vm.new_type_error("unexpected payload for __setattr__".to_owned()))?;
+        Self::setattro(zelf, name, value, vm)
     }
 
     fn setattro(
@@ -1380,11 +1413,10 @@ pub trait Iterable: PyPayload {
     #[pyslot]
     #[pymethod(name = "__iter__")]
     fn slot_iter(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        if let Ok(zelf) = zelf.downcast() {
-            Self::iter(zelf, vm)
-        } else {
-            Err(vm.new_type_error("unexpected payload for __iter__".to_owned()))
-        }
+        let zelf = zelf
+            .downcast()
+            .map_err(|_| vm.new_type_error("unexpected payload for __iter__".to_owned()))?;
+        Self::iter(zelf, vm)
     }
 
     fn iter(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult;
@@ -1395,11 +1427,10 @@ pub trait Iterable: PyPayload {
 pub trait IterNext: PyPayload + Iterable {
     #[pyslot]
     fn slot_iternext(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-        if let Some(zelf) = zelf.downcast_ref() {
-            Self::next(zelf, vm)
-        } else {
-            Err(vm.new_type_error("unexpected payload for __next__".to_owned()))
-        }
+        let zelf = zelf
+            .downcast_ref()
+            .ok_or_else(|| vm.new_type_error("unexpected payload for __next__".to_owned()))?;
+        Self::next(zelf, vm)
     }
 
     fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn>;

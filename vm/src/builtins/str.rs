@@ -20,7 +20,7 @@ use crate::{
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
         AsMapping, AsNumber, AsSequence, Comparable, Constructor, Hashable, IterNext,
-        IterNextIterable, Iterable, PyComparisonOp, Unconstructible,
+        IterNextIterable, Iterable, PyComparisonOp, Representable, Unconstructible,
     },
     AsObject, Context, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
     TryFromBorrowedObject, VirtualMachine,
@@ -229,7 +229,7 @@ impl Unconstructible for PyStrIterator {}
 
 impl IterNextIterable for PyStrIterator {}
 impl IterNext for PyStrIterator {
-    fn next(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         let mut internal = zelf.internal.lock();
 
         if let IterStatus::Active(s) = &internal.0.status {
@@ -377,6 +377,7 @@ impl PyStr {
         AsMapping,
         AsNumber,
         AsSequence,
+        Representable,
         Hashable,
         Comparable,
         Iterable,
@@ -495,7 +496,7 @@ impl PyStr {
         zelf
     }
 
-    #[pymethod(magic)]
+    #[inline]
     pub(crate) fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
         rustpython_common::str::repr(self.as_str())
             .to_string_checked()
@@ -893,8 +894,41 @@ impl PyStr {
 
     #[pymethod]
     fn splitlines(&self, args: anystr::SplitLinesArgs, vm: &VirtualMachine) -> Vec<PyObjectRef> {
-        self.as_str()
-            .py_splitlines(args, |s| self.new_substr(s.to_owned()).to_pyobject(vm))
+        let into_wrapper = |s: &str| self.new_substr(s.to_owned()).to_pyobject(vm);
+        let mut elements = Vec::new();
+        let mut last_i = 0;
+        let self_str = self.as_str();
+        let mut enumerated = self_str.char_indices().peekable();
+        while let Some((i, ch)) = enumerated.next() {
+            let end_len = match ch {
+                '\n' => 1,
+                '\r' => {
+                    let is_rn = enumerated.peek().map_or(false, |(_, ch)| *ch == '\n');
+                    if is_rn {
+                        let _ = enumerated.next();
+                        2
+                    } else {
+                        1
+                    }
+                }
+                '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{0085}' | '\u{2028}'
+                | '\u{2029}' => ch.len_utf8(),
+                _ => {
+                    continue;
+                }
+            };
+            let range = if args.keepends {
+                last_i..i + end_len
+            } else {
+                last_i..i
+            };
+            last_i = i + end_len;
+            elements.push(into_wrapper(&self_str[range]));
+        }
+        if last_i != self_str.len() {
+            elements.push(into_wrapper(&self_str[last_i..]));
+        }
+        elements
     }
 
     #[pymethod]
@@ -1259,16 +1293,23 @@ impl PyStrRef {
     }
 }
 
+impl Representable for PyStr {
+    #[inline]
+    fn repr_str(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
+        zelf.repr(vm)
+    }
+}
+
 impl Hashable for PyStr {
     #[inline]
-    fn hash(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<hash::PyHash> {
+    fn hash(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<hash::PyHash> {
         Ok(zelf.hash(vm))
     }
 }
 
 impl Comparable for PyStr {
     fn cmp(
-        zelf: &crate::Py<Self>,
+        zelf: &Py<Self>,
         other: &PyObject,
         op: PyComparisonOp,
         _vm: &VirtualMachine,
