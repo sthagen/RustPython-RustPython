@@ -13,7 +13,7 @@ pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let module = unicodedata::make_module(vm);
 
     let ucd: PyObjectRef = unicodedata::Ucd::new(unic_ucd_age::UNICODE_VERSION)
-        .into_ref(vm)
+        .into_ref(&vm.ctx)
         .into();
 
     for attr in [
@@ -41,8 +41,8 @@ enum NormalizeForm {
     Nfkd,
 }
 
-impl TryFromBorrowedObject for NormalizeForm {
-    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Self> {
+impl<'a> TryFromBorrowedObject<'a> for NormalizeForm {
+    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &'a PyObject) -> PyResult<Self> {
         obj.try_value_with(
             |form: &PyStr| {
                 Ok(match form.as_str() {
@@ -208,7 +208,7 @@ mod unicodedata {
                 micro: 0,
             },
         }
-        .into_ref(vm)
+        .into_ref(&vm.ctx)
     }
 
     #[pyattr]

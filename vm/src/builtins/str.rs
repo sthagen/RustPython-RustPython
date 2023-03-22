@@ -42,8 +42,8 @@ use unic_ucd_category::GeneralCategory;
 use unic_ucd_ident::{is_xid_continue, is_xid_start};
 use unicode_casing::CharExt;
 
-impl TryFromBorrowedObject for String {
-    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Self> {
+impl<'a> TryFromBorrowedObject<'a> for String {
+    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &'a PyObject) -> PyResult<Self> {
         obj.try_value_with(|pystr: &PyStr| Ok(pystr.as_str().to_owned()), vm)
     }
 }
@@ -143,49 +143,39 @@ impl fmt::Display for PyStr {
     }
 }
 
-pub trait IntoPyStrRef {
-    fn into_pystr_ref(self, vm: &VirtualMachine) -> PyStrRef;
+pub trait AsPyStr<'a>
+where
+    Self: 'a,
+{
+    #[allow(clippy::wrong_self_convention)] // to implement on refs
+    fn as_pystr(self, ctx: &Context) -> &'a Py<PyStr>;
 }
 
-impl IntoPyStrRef for PyStrRef {
+impl<'a> AsPyStr<'a> for &'a Py<PyStr> {
     #[inline]
-    fn into_pystr_ref(self, _vm: &VirtualMachine) -> PyRef<PyStr> {
+    fn as_pystr(self, _ctx: &Context) -> &'a Py<PyStr> {
         self
     }
 }
 
-impl IntoPyStrRef for PyStr {
+impl<'a> AsPyStr<'a> for &'a PyStrRef {
     #[inline]
-    fn into_pystr_ref(self, vm: &VirtualMachine) -> PyRef<PyStr> {
-        self.into_ref(vm)
+    fn as_pystr(self, _ctx: &Context) -> &'a Py<PyStr> {
+        self
     }
 }
 
-impl IntoPyStrRef for AsciiString {
+impl AsPyStr<'static> for &'static str {
     #[inline]
-    fn into_pystr_ref(self, vm: &VirtualMachine) -> PyRef<PyStr> {
-        PyStr::from(self).into_ref(vm)
+    fn as_pystr(self, ctx: &Context) -> &'static Py<PyStr> {
+        ctx.intern_str(self)
     }
 }
 
-impl IntoPyStrRef for String {
+impl<'a> AsPyStr<'a> for &'a PyStrInterned {
     #[inline]
-    fn into_pystr_ref(self, vm: &VirtualMachine) -> PyRef<PyStr> {
-        PyStr::from(self).into_ref(vm)
-    }
-}
-
-impl IntoPyStrRef for &str {
-    #[inline]
-    fn into_pystr_ref(self, vm: &VirtualMachine) -> PyRef<PyStr> {
-        PyStr::from(self).into_ref(vm)
-    }
-}
-
-impl IntoPyStrRef for &'static PyStrInterned {
-    #[inline]
-    fn into_pystr_ref(self, _vm: &VirtualMachine) -> PyRef<PyStr> {
-        self.to_owned()
+    fn as_pystr(self, _ctx: &Context) -> &'a Py<PyStr> {
+        self
     }
 }
 
@@ -196,8 +186,8 @@ pub struct PyStrIterator {
 }
 
 impl PyPayload for PyStrIterator {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.str_iterator_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.str_iterator_type
     }
 }
 
@@ -367,7 +357,7 @@ impl PyStr {
         zelf.as_str()
             .as_bytes()
             .mul(vm, value)
-            .map(|x| Self::from(unsafe { String::from_utf8_unchecked(x) }).into_ref(vm))
+            .map(|x| Self::from(unsafe { String::from_utf8_unchecked(x) }).into_ref(&vm.ctx))
     }
 }
 
@@ -432,7 +422,7 @@ impl PyStr {
             SequenceIndex::Int(i) => self.getitem_by_index(vm, i).map(|x| x.to_string()),
             SequenceIndex::Slice(slice) => self.getitem_by_slice(vm, slice),
         }
-        .map(|x| self.new_substr(x).into_ref(vm).into())
+        .map(|x| self.new_substr(x).into_ref(&vm.ctx).into())
     }
 
     #[pymethod(magic)]
@@ -619,7 +609,7 @@ impl PyStr {
         if s == stripped {
             zelf
         } else {
-            stripped.into_pystr_ref(vm)
+            vm.ctx.new_str(stripped)
         }
     }
 
@@ -638,7 +628,7 @@ impl PyStr {
         if s == stripped {
             zelf
         } else {
-            stripped.into_pystr_ref(vm)
+            vm.ctx.new_str(stripped)
         }
     }
 
@@ -949,7 +939,7 @@ impl PyStr {
             }
             Err(iter) => zelf.as_str().py_join(iter)?,
         };
-        Ok(joined.into_pystr_ref(vm))
+        Ok(vm.ctx.new_str(joined))
     }
 
     // FIXME: two traversals of str is expensive
@@ -1289,7 +1279,7 @@ impl PyStrRef {
         let mut s = String::with_capacity(self.byte_len() + other.len());
         s.push_str(self.as_ref());
         s.push_str(other);
-        *self = PyStr::from(s).into_ref(vm);
+        *self = PyStr::from(s).into_ref(&vm.ctx);
     }
 }
 
@@ -1347,9 +1337,9 @@ impl AsMapping for PyStr {
 impl AsNumber for PyStr {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            remainder: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PyStr>() {
-                    number.modulo(other.to_owned(), vm).to_pyresult(vm)
+            remainder: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PyStr>() {
+                    a.modulo(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
@@ -1375,7 +1365,7 @@ impl AsSequence for PyStr {
             item: atomic_func!(|seq, i, vm| {
                 let zelf = PyStr::sequence_downcast(seq);
                 zelf.getitem_by_index(vm, i)
-                    .map(|x| zelf.new_substr(x.to_string()).into_ref(vm).into())
+                    .map(|x| zelf.new_substr(x.to_string()).into_ref(&vm.ctx).into())
             }),
             contains: atomic_func!(
                 |seq, needle, vm| PyStr::sequence_downcast(seq)._contains(needle, vm)
@@ -1407,8 +1397,8 @@ pub(crate) fn encode_string(
 }
 
 impl PyPayload for PyStr {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.str_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.str_type
     }
 }
 
@@ -1587,7 +1577,6 @@ impl AsRef<str> for PyExact<PyStr> {
 mod tests {
     use super::*;
     use crate::Interpreter;
-    use std::ops::Deref;
 
     #[test]
     fn str_title() {
@@ -1653,10 +1642,7 @@ mod tests {
             let translated = text.translate(translated, vm).unwrap();
             assert_eq!(translated, "🎅xda".to_owned());
             let translated = text.translate(vm.ctx.new_int(3).into(), vm);
-            assert_eq!(
-                translated.unwrap_err().class().name().deref(),
-                "TypeError".to_owned()
-            );
+            assert_eq!("TypeError", &*translated.unwrap_err().class().name(),);
         })
     }
 }

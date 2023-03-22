@@ -19,8 +19,8 @@ impl ToPyObject for bool {
     }
 }
 
-impl TryFromBorrowedObject for bool {
-    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &PyObject) -> PyResult<bool> {
+impl<'a> TryFromBorrowedObject<'a> for bool {
+    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &'a PyObject) -> PyResult<bool> {
         if obj.fast_isinstance(vm.ctx.types.int_type) {
             Ok(get_value(obj))
         } else {
@@ -80,8 +80,8 @@ impl PyObjectRef {
 pub struct PyBool;
 
 impl PyPayload for PyBool {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.bool_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.bool_type
     }
 }
 
@@ -164,15 +164,9 @@ impl PyBool {
 impl AsNumber for PyBool {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            and: Some(|number, other, vm| {
-                PyBool::and(number.obj.to_owned(), other.to_owned(), vm).to_pyresult(vm)
-            }),
-            xor: Some(|number, other, vm| {
-                PyBool::xor(number.obj.to_owned(), other.to_owned(), vm).to_pyresult(vm)
-            }),
-            or: Some(|number, other, vm| {
-                PyBool::or(number.obj.to_owned(), other.to_owned(), vm).to_pyresult(vm)
-            }),
+            and: Some(|a, b, vm| PyBool::and(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+            xor: Some(|a, b, vm| PyBool::xor(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+            or: Some(|a, b, vm| PyBool::or(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
             ..PyInt::AS_NUMBER
         };
         &AS_NUMBER

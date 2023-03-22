@@ -17,8 +17,8 @@ pub struct PyCoroutine {
 }
 
 impl PyPayload for PyCoroutine {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.coroutine_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.coroutine_type
     }
 }
 
@@ -45,13 +45,13 @@ impl PyCoroutine {
     }
 
     #[pymethod]
-    fn send(zelf: PyRef<Self>, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+    fn send(zelf: &Py<Self>, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.inner.send(zelf.as_object(), value, vm)
     }
 
     #[pymethod]
     fn throw(
-        zelf: PyRef<Self>,
+        zelf: &Py<Self>,
         exc_type: PyObjectRef,
         exc_val: OptionalArg,
         exc_tb: OptionalArg,
@@ -67,7 +67,7 @@ impl PyCoroutine {
     }
 
     #[pymethod]
-    fn close(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<()> {
+    fn close(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<()> {
         zelf.inner.close(zelf.as_object(), vm)
     }
 
@@ -111,7 +111,7 @@ impl Representable for PyCoroutine {
 impl IterNextIterable for PyCoroutine {}
 impl IterNext for PyCoroutine {
     fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-        Self::send(zelf.to_owned(), vm.ctx.none(), vm)
+        Self::send(zelf, vm.ctx.none(), vm)
     }
 }
 
@@ -123,16 +123,16 @@ pub struct PyCoroutineWrapper {
 }
 
 impl PyPayload for PyCoroutineWrapper {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.coroutine_wrapper_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.coroutine_wrapper_type
     }
 }
 
 #[pyclass(with(IterNext))]
 impl PyCoroutineWrapper {
     #[pymethod]
-    fn send(zelf: PyRef<Self>, val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-        PyCoroutine::send(zelf.coro.clone(), val, vm)
+    fn send(&self, val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+        PyCoroutine::send(&self.coro, val, vm)
     }
 
     #[pymethod]
@@ -143,14 +143,14 @@ impl PyCoroutineWrapper {
         exc_tb: OptionalArg,
         vm: &VirtualMachine,
     ) -> PyResult<PyIterReturn> {
-        PyCoroutine::throw(self.coro.clone(), exc_type, exc_val, exc_tb, vm)
+        PyCoroutine::throw(&self.coro, exc_type, exc_val, exc_tb, vm)
     }
 }
 
 impl IterNextIterable for PyCoroutineWrapper {}
 impl IterNext for PyCoroutineWrapper {
     fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-        Self::send(zelf.to_owned(), vm.ctx.none(), vm)
+        Self::send(zelf, vm.ctx.none(), vm)
     }
 }
 

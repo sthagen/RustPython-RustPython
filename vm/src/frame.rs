@@ -15,7 +15,7 @@ use crate::{
     protocol::{PyIter, PyIterReturn},
     scope::Scope,
     stdlib::builtins,
-    vm::PyMethod,
+    vm::{Context, PyMethod},
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 use indexmap::IndexMap;
@@ -116,8 +116,8 @@ pub struct Frame {
 }
 
 impl PyPayload for Frame {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.frame_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.frame_type
     }
 }
 
@@ -138,7 +138,7 @@ impl Frame {
         closure: &[PyCellRef],
         vm: &VirtualMachine,
     ) -> Frame {
-        let cells_frees = std::iter::repeat_with(|| PyCell::default().into_ref(vm))
+        let cells_frees = std::iter::repeat_with(|| PyCell::default().into_ref(&vm.ctx))
             .take(code.cellvars.len())
             .chain(closure.iter().cloned())
             .collect();
@@ -164,24 +164,20 @@ impl Frame {
             temporary_refs: PyMutex::new(vec![]),
         }
     }
-}
 
-impl FrameRef {
-    #[inline(always)]
-    fn with_exec<R>(&self, f: impl FnOnce(ExecutingFrame) -> R) -> R {
-        let mut state = self.state.lock();
-        let exec = ExecutingFrame {
-            code: &self.code,
-            fastlocals: &self.fastlocals,
-            cells_frees: &self.cells_frees,
-            locals: &self.locals,
-            globals: &self.globals,
-            builtins: &self.builtins,
-            lasti: &self.lasti,
-            object: self,
-            state: &mut state,
-        };
-        f(exec)
+    pub fn current_location(&self) -> bytecode::Location {
+        self.code.locations[self.lasti() as usize - 1]
+    }
+
+    pub fn lasti(&self) -> u32 {
+        #[cfg(feature = "threading")]
+        {
+            self.lasti.load(atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(feature = "threading"))]
+        {
+            self.lasti.get()
+        }
     }
 
     pub fn locals(&self, vm: &VirtualMachine) -> PyResult<ArgMapping> {
@@ -221,6 +217,25 @@ impl FrameRef {
         }
         Ok(locals.clone())
     }
+}
+
+impl Py<Frame> {
+    #[inline(always)]
+    fn with_exec<R>(&self, f: impl FnOnce(ExecutingFrame) -> R) -> R {
+        let mut state = self.state.lock();
+        let exec = ExecutingFrame {
+            code: &self.code,
+            fastlocals: &self.fastlocals,
+            cells_frees: &self.cells_frees,
+            locals: &self.locals,
+            globals: &self.globals,
+            builtins: &self.builtins,
+            lasti: &self.lasti,
+            object: self,
+            state: &mut state,
+        };
+        f(exec)
+    }
 
     // #[cfg_attr(feature = "flame-it", flame("Frame"))]
     pub fn run(&self, vm: &VirtualMachine) -> PyResult<ExecutionResult> {
@@ -250,34 +265,19 @@ impl FrameRef {
         self.with_exec(|mut exec| exec.gen_throw(vm, exc_type, exc_val, exc_tb))
     }
 
-    pub fn current_location(&self) -> bytecode::Location {
-        self.code.locations[self.lasti() as usize - 1]
-    }
-
     pub fn yield_from_target(&self) -> Option<PyObjectRef> {
         self.with_exec(|exec| exec.yield_from_target().map(PyObject::to_owned))
     }
 
-    pub fn lasti(&self) -> u32 {
-        #[cfg(feature = "threading")]
-        {
-            self.lasti.load(atomic::Ordering::Relaxed)
-        }
-        #[cfg(not(feature = "threading"))]
-        {
-            self.lasti.get()
-        }
-    }
-
     pub fn is_internal_frame(&self) -> bool {
-        let code = self.clone().f_code();
+        let code = self.f_code();
         let filename = code.co_filename();
 
         filename.as_str().contains("importlib") && filename.as_str().contains("_bootstrap")
     }
 
     pub fn next_external_frame(&self, vm: &VirtualMachine) -> Option<FrameRef> {
-        self.clone().f_back(vm).map(|mut back| loop {
+        self.f_back(vm).map(|mut back| loop {
             back = if let Some(back) = back.to_owned().f_back(vm) {
                 back
             } else {
@@ -300,7 +300,7 @@ struct ExecutingFrame<'a> {
     locals: &'a ArgMapping,
     globals: &'a PyDictRef,
     builtins: &'a PyDictRef,
-    object: &'a FrameRef,
+    object: &'a Py<Frame>,
     lasti: &'a Lasti,
     state: &'a mut FrameState,
 }
@@ -376,10 +376,14 @@ impl ExecutingFrame<'_> {
 
                         let loc = frame.code.locations[idx];
                         let next = exception.traceback();
-                        let new_traceback =
-                            PyTraceback::new(next, frame.object.clone(), frame.lasti(), loc.row());
+                        let new_traceback = PyTraceback::new(
+                            next,
+                            frame.object.to_owned(),
+                            frame.lasti(),
+                            loc.row(),
+                        );
                         vm_trace!("Adding to traceback: {:?} {:?}", new_traceback, loc.row());
-                        exception.set_traceback(Some(new_traceback.into_ref(vm)));
+                        exception.set_traceback(Some(new_traceback.into_ref(&vm.ctx)));
 
                         vm.contextualize_exception(&exception);
 
@@ -512,7 +516,7 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             bytecode::Instruction::ImportName { idx } => {
-                self.import(vm, Some(self.code.names[idx.get(arg) as usize].to_owned()))?;
+                self.import(vm, Some(self.code.names[idx.get(arg) as usize]))?;
                 Ok(None)
             }
             bytecode::Instruction::ImportNameless => {
@@ -1016,7 +1020,7 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::LoadMethod { idx } => {
                 let obj = self.pop_value();
                 let method_name = self.code.names[idx.get(arg) as usize];
-                let method = PyMethod::get(obj, method_name.to_owned(), vm)?;
+                let method = PyMethod::get(obj, method_name, vm)?;
                 let (target, is_method, func) = match method {
                     PyMethod::Function { target, func } => (target, true, func),
                     PyMethod::Attribute(val) => (vm.ctx.none(), false, val),
@@ -1125,8 +1129,8 @@ impl ExecutingFrame<'_> {
     }
 
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
-    fn import(&mut self, vm: &VirtualMachine, module: Option<PyStrRef>) -> PyResult<()> {
-        let module = module.unwrap_or_else(|| vm.ctx.empty_str.clone());
+    fn import(&mut self, vm: &VirtualMachine, module: Option<&Py<PyStr>>) -> PyResult<()> {
+        let module = module.unwrap_or(&vm.ctx.empty_str);
         let from_list = <Option<PyTupleTyped<PyStrRef>>>::try_from_object(vm, self.pop_value())?;
         let level = usize::try_from_object(vm, self.pop_value())?;
 
@@ -1140,7 +1144,7 @@ impl ExecutingFrame<'_> {
     fn import_from(&mut self, vm: &VirtualMachine, idx: bytecode::NameIdx) -> PyResult {
         let module = self.last_value();
         let name = self.code.names[idx as usize];
-        let err = || vm.new_import_error(format!("cannot import name '{name}'"), name);
+        let err = || vm.new_import_error(format!("cannot import name '{name}'"), name.to_owned());
         // Load attribute, and transform any error into import error.
         if let Some(obj) = vm.get_attribute_opt(module.clone(), name)? {
             return Ok(obj);
@@ -1329,7 +1333,7 @@ impl ExecutingFrame<'_> {
             stop,
             step,
         }
-        .into_ref(vm);
+        .into_ref(&vm.ctx);
         self.push_value(obj.into());
         Ok(None)
     }

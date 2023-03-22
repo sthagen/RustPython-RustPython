@@ -8,7 +8,7 @@ use crate::{
     function::OptionalArg,
     protocol::{PyIter, PyIterReturn},
     types::{Constructor, IterNext, IterNextIterable},
-    AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    AsObject, Context, Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 use num_bigint::BigInt;
 use num_traits::Zero;
@@ -21,8 +21,8 @@ pub struct PyEnumerate {
 }
 
 impl PyPayload for PyEnumerate {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.enumerate_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.enumerate_type
     }
 }
 
@@ -51,17 +51,21 @@ impl Constructor for PyEnumerate {
     }
 }
 
-#[pyclass(with(IterNext, Constructor), flags(BASETYPE))]
+#[pyclass(with(Py, IterNext, Constructor), flags(BASETYPE))]
 impl PyEnumerate {
     #[pyclassmethod(magic)]
     fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
         PyGenericAlias::new(cls, args, vm)
     }
+}
+
+#[pyclass]
+impl Py<PyEnumerate> {
     #[pymethod(magic)]
-    fn reduce(zelf: PyRef<Self>) -> (PyTypeRef, (PyIter, BigInt)) {
+    fn reduce(&self) -> (PyTypeRef, (PyIter, BigInt)) {
         (
-            zelf.class().to_owned(),
-            (zelf.iterator.clone(), zelf.counter.read().clone()),
+            self.class().to_owned(),
+            (self.iterator.clone(), self.counter.read().clone()),
         )
     }
 }
@@ -87,8 +91,8 @@ pub struct PyReverseSequenceIterator {
 }
 
 impl PyPayload for PyReverseSequenceIterator {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.reverse_iter_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.reverse_iter_type
     }
 }
 

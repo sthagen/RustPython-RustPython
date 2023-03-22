@@ -385,7 +385,7 @@ impl Drop for PyWeak {
     }
 }
 
-impl PyRef<PyWeak> {
+impl Py<PyWeak> {
     #[inline(always)]
     pub fn upgrade(&self) -> Option<PyObjectRef> {
         PyWeak::upgrade(self)
@@ -565,7 +565,7 @@ impl PyObjectRef {
         self,
         vm: &VirtualMachine,
     ) -> Result<PyRefExact<T>, Self> {
-        if self.class().is(T::class(vm)) {
+        if self.class().is(T::class(&vm.ctx)) {
             // TODO: is this always true?
             assert!(
                 self.payload_is::<T>(),
@@ -611,14 +611,13 @@ impl PyObject {
             None
         };
         let cls_is_weakref = typ.is(vm.ctx.types.weakref_type);
-        self.weak_ref_list()
-            .map(|wrl| wrl.add(self, typ, cls_is_weakref, callback, dict))
-            .ok_or_else(|| {
-                vm.new_type_error(format!(
-                    "cannot create weak reference to '{}' object",
-                    self.class().name()
-                ))
-            })
+        let wrl = self.weak_ref_list().ok_or_else(|| {
+            vm.new_type_error(format!(
+                "cannot create weak reference to '{}' object",
+                self.class().name()
+            ))
+        })?;
+        Ok(wrl.add(self, typ, cls_is_weakref, callback, dict))
     }
 
     pub fn downgrade(
@@ -664,7 +663,7 @@ impl PyObject {
         &self,
         vm: &VirtualMachine,
     ) -> Option<&T> {
-        if self.class().is(T::class(vm)) {
+        if self.class().is(T::class(&vm.ctx)) {
             self.payload()
         } else {
             None
@@ -695,7 +694,7 @@ impl PyObject {
 
     #[inline(always)]
     pub fn payload_if_subclass<T: crate::PyPayload>(&self, vm: &VirtualMachine) -> Option<&T> {
-        if self.class().fast_issubclass(T::class(vm)) {
+        if self.class().fast_issubclass(T::class(&vm.ctx)) {
             self.payload()
         } else {
             None
@@ -719,7 +718,7 @@ impl PyObject {
         vm: &VirtualMachine,
     ) -> Option<&Py<T>> {
         self.class()
-            .is(T::class(vm))
+            .is(T::class(&vm.ctx))
             .then(|| unsafe { self.downcast_unchecked_ref::<T>() })
     }
 

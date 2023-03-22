@@ -21,12 +21,12 @@ pub struct PyAsyncGen {
 type PyAsyncGenRef = PyRef<PyAsyncGen>;
 
 impl PyPayload for PyAsyncGen {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.async_generator
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.async_generator
     }
 }
 
-#[pyclass(with(Constructor, Representable))]
+#[pyclass(with(PyRef, Constructor, Representable))]
 impl PyAsyncGen {
     pub fn as_coro(&self) -> &Coro {
         &self.inner
@@ -47,59 +47,6 @@ impl PyAsyncGen {
     #[pygetset(magic, setter)]
     fn set_name(&self, name: PyStrRef) {
         self.inner.set_name(name)
-    }
-
-    #[pymethod(magic)]
-    fn aiter(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyRef<Self> {
-        zelf
-    }
-
-    #[pymethod(magic)]
-    fn anext(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyAsyncGenASend {
-        Self::asend(zelf, vm.ctx.none(), vm)
-    }
-
-    #[pymethod]
-    fn asend(zelf: PyRef<Self>, value: PyObjectRef, _vm: &VirtualMachine) -> PyAsyncGenASend {
-        PyAsyncGenASend {
-            ag: zelf,
-            state: AtomicCell::new(AwaitableState::Init),
-            value,
-        }
-    }
-
-    #[pymethod]
-    fn athrow(
-        zelf: PyRef<Self>,
-        exc_type: PyObjectRef,
-        exc_val: OptionalArg,
-        exc_tb: OptionalArg,
-        vm: &VirtualMachine,
-    ) -> PyAsyncGenAThrow {
-        PyAsyncGenAThrow {
-            ag: zelf,
-            aclose: false,
-            state: AtomicCell::new(AwaitableState::Init),
-            value: (
-                exc_type,
-                exc_val.unwrap_or_none(vm),
-                exc_tb.unwrap_or_none(vm),
-            ),
-        }
-    }
-
-    #[pymethod]
-    fn aclose(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyAsyncGenAThrow {
-        PyAsyncGenAThrow {
-            ag: zelf,
-            aclose: true,
-            state: AtomicCell::new(AwaitableState::Init),
-            value: (
-                vm.ctx.exceptions.generator_exit.to_owned().into(),
-                vm.ctx.none(),
-                vm.ctx.none(),
-            ),
-        }
     }
 
     #[pygetset]
@@ -125,6 +72,62 @@ impl PyAsyncGen {
     }
 }
 
+#[pyclass]
+impl PyRef<PyAsyncGen> {
+    #[pymethod(magic)]
+    fn aiter(self, _vm: &VirtualMachine) -> PyRef<PyAsyncGen> {
+        self
+    }
+
+    #[pymethod(magic)]
+    fn anext(self, vm: &VirtualMachine) -> PyAsyncGenASend {
+        Self::asend(self, vm.ctx.none(), vm)
+    }
+
+    #[pymethod]
+    fn asend(self, value: PyObjectRef, _vm: &VirtualMachine) -> PyAsyncGenASend {
+        PyAsyncGenASend {
+            ag: self,
+            state: AtomicCell::new(AwaitableState::Init),
+            value,
+        }
+    }
+
+    #[pymethod]
+    fn athrow(
+        self,
+        exc_type: PyObjectRef,
+        exc_val: OptionalArg,
+        exc_tb: OptionalArg,
+        vm: &VirtualMachine,
+    ) -> PyAsyncGenAThrow {
+        PyAsyncGenAThrow {
+            ag: self,
+            aclose: false,
+            state: AtomicCell::new(AwaitableState::Init),
+            value: (
+                exc_type,
+                exc_val.unwrap_or_none(vm),
+                exc_tb.unwrap_or_none(vm),
+            ),
+        }
+    }
+
+    #[pymethod]
+    fn aclose(self, vm: &VirtualMachine) -> PyAsyncGenAThrow {
+        PyAsyncGenAThrow {
+            ag: self,
+            aclose: true,
+            state: AtomicCell::new(AwaitableState::Init),
+            value: (
+                vm.ctx.exceptions.generator_exit.to_owned().into(),
+                vm.ctx.none(),
+                vm.ctx.none(),
+            ),
+        }
+    }
+}
+
 impl Representable for PyAsyncGen {
     #[inline]
     fn repr_str(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
@@ -138,8 +141,8 @@ impl Unconstructible for PyAsyncGen {}
 #[derive(Debug)]
 pub(crate) struct PyAsyncGenWrappedValue(pub PyObjectRef);
 impl PyPayload for PyAsyncGenWrappedValue {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.async_generator_wrapped_value
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.async_generator_wrapped_value
     }
 }
 
@@ -187,8 +190,8 @@ pub(crate) struct PyAsyncGenASend {
 }
 
 impl PyPayload for PyAsyncGenASend {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.async_generator_asend
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.async_generator_asend
     }
 }
 
@@ -282,8 +285,8 @@ pub(crate) struct PyAsyncGenAThrow {
 }
 
 impl PyPayload for PyAsyncGenAThrow {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.async_generator_athrow
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.async_generator_athrow
     }
 }
 

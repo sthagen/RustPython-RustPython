@@ -230,7 +230,7 @@ mod _ssl {
     /// SSL/TLS connection terminated abruptly.
     #[pyattr(name = "SSLEOFError", once)]
     fn ssl_eof_error(vm: &VirtualMachine) -> PyTypeRef {
-        PyType::new_simple_ref("ssl.SSLEOFError", &ssl_error(vm), &vm.ctx).unwrap()
+        PyType::new_simple_heap("ssl.SSLEOFError", &ssl_error(vm), &vm.ctx).unwrap()
     }
 
     type OpensslVersionInfo = (u8, u8, u8, u8, u8);
@@ -539,12 +539,12 @@ mod _ssl {
 
         #[pygetset]
         fn options(&self) -> libc::c_ulong {
-            self.ctx.read().options().bits()
+            self.ctx.read().options().bits() as _
         }
         #[pygetset(setter)]
         fn set_options(&self, opts: libc::c_ulong) {
             self.builder()
-                .set_options(SslOptions::from_bits_truncate(opts));
+                .set_options(SslOptions::from_bits_truncate(opts as _));
         }
         #[pygetset]
         fn protocol(&self) -> i32 {
@@ -1458,7 +1458,7 @@ mod windows {
                     oids.into_iter().map(|oid| vm.ctx.new_str(oid).into()),
                 )
                 .unwrap()
-                .into_ref(vm)
+                .into_ref(&vm.ctx)
                 .into(),
             };
             Ok(vm.new_tuple((cert, enc_type, usage)).into())

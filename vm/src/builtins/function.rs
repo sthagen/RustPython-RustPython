@@ -312,7 +312,7 @@ impl PyFunction {
             self.closure.as_ref().map_or(&[], |c| c.as_slice()),
             vm,
         )
-        .into_ref(vm);
+        .into_ref(&vm.ctx);
 
         self.fill_locals_from_args(&frame, func_args, vm)?;
 
@@ -334,8 +334,8 @@ impl PyFunction {
 }
 
 impl PyPayload for PyFunction {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.function_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.function_type
     }
 }
 
@@ -501,10 +501,10 @@ impl Comparable for PyBoundMethod {
 }
 
 impl GetAttr for PyBoundMethod {
-    fn getattro(zelf: &Py<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
+    fn getattro(zelf: &Py<Self>, name: &Py<PyStr>, vm: &VirtualMachine) -> PyResult {
         let class_attr = vm
             .ctx
-            .interned_str(&*name)
+            .interned_str(name)
             .and_then(|attr_name| zelf.get_class_attr(attr_name));
         if let Some(obj) = class_attr {
             return vm.call_if_get_descriptor(obj, zelf.to_owned().into());
@@ -623,8 +623,8 @@ impl PyBoundMethod {
 }
 
 impl PyPayload for PyBoundMethod {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.bound_method_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.bound_method_type
     }
 }
 
@@ -636,8 +636,8 @@ pub(crate) struct PyCell {
 pub(crate) type PyCellRef = PyRef<PyCell>;
 
 impl PyPayload for PyCell {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.cell_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.cell_type
     }
 }
 

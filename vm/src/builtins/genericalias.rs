@@ -3,14 +3,14 @@ use once_cell::sync::Lazy;
 use super::type_;
 use crate::{
     atomic_func,
-    builtins::{PyList, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef},
+    builtins::{PyList, PyStr, PyTuple, PyTupleRef, PyType, PyTypeRef},
     class::PyClassImpl,
     common::hash,
     convert::ToPyObject,
     function::{FuncArgs, PyComparisonValue},
-    protocol::PyMappingMethods,
+    protocol::{PyMappingMethods, PyNumberMethods},
     types::{
-        AsMapping, Callable, Comparable, Constructor, GetAttr, Hashable, PyComparisonOp,
+        AsMapping, AsNumber, Callable, Comparable, Constructor, GetAttr, Hashable, PyComparisonOp,
         Representable,
     },
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
@@ -43,8 +43,8 @@ impl fmt::Debug for PyGenericAlias {
 }
 
 impl PyPayload for PyGenericAlias {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.generic_alias_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.generic_alias_type
     }
 }
 
@@ -64,6 +64,7 @@ impl Constructor for PyGenericAlias {
 
 #[pyclass(
     with(
+        AsNumber,
         AsMapping,
         Callable,
         Comparable,
@@ -179,7 +180,7 @@ impl PyGenericAlias {
     }
 
     #[pymethod(magic)]
-    fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> (PyTypeRef, (PyTypeRef, PyTupleRef)) {
+    fn reduce(zelf: &Py<Self>, vm: &VirtualMachine) -> (PyTypeRef, (PyTypeRef, PyTupleRef)) {
         (
             vm.ctx.types.generic_alias_type.to_owned(),
             (zelf.origin.clone(), zelf.args.clone()),
@@ -214,9 +215,9 @@ impl PyGenericAlias {
     }
 }
 
-fn is_typevar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
+pub(crate) fn is_typevar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
     let class = obj.class();
-    class.slot_name() == "TypeVar"
+    "TypeVar" == &*class.slot_name()
         && class
             .get_attr(identifier!(vm, __module__))
             .and_then(|o| o.downcast_ref::<PyStr>().map(|s| s.as_str() == "typing"))
@@ -342,6 +343,16 @@ impl AsMapping for PyGenericAlias {
     }
 }
 
+impl AsNumber for PyGenericAlias {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            or: Some(|a, b, vm| Ok(PyGenericAlias::or(a.to_owned(), b.to_owned(), vm))),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
+    }
+}
+
 impl Callable for PyGenericAlias {
     type Args = FuncArgs;
     fn call(zelf: &Py<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
@@ -390,7 +401,7 @@ impl Hashable for PyGenericAlias {
 }
 
 impl GetAttr for PyGenericAlias {
-    fn getattro(zelf: &Py<Self>, attr: PyStrRef, vm: &VirtualMachine) -> PyResult {
+    fn getattro(zelf: &Py<Self>, attr: &Py<PyStr>, vm: &VirtualMachine) -> PyResult {
         for exc in ATTR_EXCEPTIONS.iter() {
             if *(*exc) == attr.to_string() {
                 return zelf.as_object().generic_getattr(attr, vm);

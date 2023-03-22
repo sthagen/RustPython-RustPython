@@ -8,7 +8,6 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyObjectRef {
     let array = module
         .get_attr("array", vm)
         .expect("Expect array has array type.");
-    array.init_builtin_number_slots(&vm.ctx);
 
     let collections_abc = vm
         .import("collections.abc", None, 0)
@@ -671,7 +670,7 @@ mod array {
                 )
             })?;
 
-            if cls.is(PyArray::class(vm)) && !kwargs.is_empty() {
+            if cls.is(PyArray::class(&vm.ctx)) && !kwargs.is_empty() {
                 return Err(
                     vm.new_type_error("array.array() takes no keyword arguments".to_owned())
                 );
@@ -722,7 +721,7 @@ mod array {
 
     #[pyclass(
         flags(BASETYPE),
-        with(Comparable, AsBuffer, AsMapping, Iterable, Constructor)
+        with(Comparable, AsBuffer, AsMapping, AsSequence, Iterable, Constructor)
     )]
     impl PyArray {
         fn read(&self) -> PyRwLockReadGuard<'_, ArrayContentType> {
@@ -746,7 +745,7 @@ mod array {
         }
 
         #[pymethod]
-        fn append(zelf: PyRef<Self>, x: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        fn append(zelf: &Py<Self>, x: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             zelf.try_resizable(vm)?.push(x, vm)
         }
 
@@ -762,12 +761,12 @@ mod array {
         }
 
         #[pymethod]
-        fn remove(zelf: PyRef<Self>, x: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        fn remove(zelf: &Py<Self>, x: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             zelf.try_resizable(vm)?.remove(x, vm)
         }
 
         #[pymethod]
-        fn extend(zelf: PyRef<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        fn extend(zelf: &Py<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let mut w = zelf.try_resizable(vm)?;
             if zelf.is(&obj) {
                 w.imul(2, vm)
@@ -828,7 +827,7 @@ mod array {
         }
 
         #[pymethod]
-        fn fromunicode(zelf: PyRef<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        fn fromunicode(zelf: &Py<Self>, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let utf8 = PyStrRef::try_from_object(vm, obj.clone()).map_err(|_| {
                 vm.new_type_error(format!(
                     "fromunicode() argument must be str, not {}",
@@ -922,18 +921,13 @@ mod array {
         }
 
         #[pymethod]
-        fn insert(
-            zelf: PyRef<Self>,
-            i: isize,
-            x: PyObjectRef,
-            vm: &VirtualMachine,
-        ) -> PyResult<()> {
+        fn insert(zelf: &Py<Self>, i: isize, x: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let mut w = zelf.try_resizable(vm)?;
             w.insert(i, x, vm)
         }
 
         #[pymethod]
-        fn pop(zelf: PyRef<Self>, i: OptionalArg<isize>, vm: &VirtualMachine) -> PyResult {
+        fn pop(zelf: &Py<Self>, i: OptionalArg<isize>, vm: &VirtualMachine) -> PyResult {
             let mut w = zelf.try_resizable(vm)?;
             if w.len() == 0 {
                 Err(vm.new_index_error("pop from empty array".to_owned()))
@@ -957,7 +951,7 @@ mod array {
             let bytes = bytes.get_bytes();
 
             for b in bytes.chunks(BLOCKSIZE) {
-                let b = PyBytes::from(b.to_vec()).into_ref(vm);
+                let b = PyBytes::from(b.to_vec()).into_ref(&vm.ctx);
                 vm.call_method(&f, "write", (b,))?;
             }
             Ok(())
@@ -982,7 +976,7 @@ mod array {
         }
 
         #[pymethod]
-        fn fromlist(zelf: PyRef<Self>, list: PyListRef, vm: &VirtualMachine) -> PyResult<()> {
+        fn fromlist(zelf: &Py<Self>, list: PyListRef, vm: &VirtualMachine) -> PyResult<()> {
             zelf.try_resizable(vm)?.fromlist(&list, vm)
         }
 
@@ -1014,7 +1008,7 @@ mod array {
         }
 
         fn _setitem(
-            zelf: PyRef<Self>,
+            zelf: &Py<Self>,
             needle: &PyObject,
             value: PyObjectRef,
             vm: &VirtualMachine,
@@ -1052,7 +1046,7 @@ mod array {
 
         #[pymethod(magic)]
         fn setitem(
-            zelf: PyRef<Self>,
+            zelf: &Py<Self>,
             needle: PyObjectRef,
             value: PyObjectRef,
             vm: &VirtualMachine,
@@ -1077,7 +1071,7 @@ mod array {
             if let Some(other) = other.payload::<PyArray>() {
                 self.read()
                     .add(&other.read(), vm)
-                    .map(|array| PyArray::from(array).into_ref(vm))
+                    .map(|array| PyArray::from(array).into_ref(&vm.ctx))
             } else {
                 Err(vm.new_type_error(format!(
                     "can only append array (not \"{}\") to array",
@@ -1110,7 +1104,7 @@ mod array {
         fn mul(&self, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             self.read()
                 .mul(value, vm)
-                .map(|x| Self::from(x).into_ref(vm))
+                .map(|x| Self::from(x).into_ref(&vm.ctx))
         }
 
         #[pymethod(magic)]
@@ -1120,7 +1114,7 @@ mod array {
         }
 
         #[pymethod(magic)]
-        fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
+        fn repr(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
             let class = zelf.class();
             let class_name = class.name();
             if zelf.read().typecode() == 'u' {
@@ -1167,7 +1161,7 @@ mod array {
 
         #[pymethod(magic)]
         fn reduce_ex(
-            zelf: PyRef<Self>,
+            zelf: &Py<Self>,
             proto: usize,
             vm: &VirtualMachine,
         ) -> PyResult<(PyObjectRef, PyTupleRef, Option<PyDictRef>)> {
@@ -1191,7 +1185,7 @@ mod array {
 
         #[pymethod(magic)]
         fn reduce(
-            zelf: PyRef<Self>,
+            zelf: &Py<Self>,
             vm: &VirtualMachine,
         ) -> PyResult<(PyObjectRef, PyTupleRef, Option<PyDictRef>)> {
             let array = zelf.read();
@@ -1325,7 +1319,7 @@ mod array {
                 ass_subscript: atomic_func!(|mapping, needle, value, vm| {
                     let zelf = PyArray::mapping_downcast(mapping);
                     if let Some(value) = value {
-                        PyArray::_setitem(zelf.to_owned(), needle, value, vm)
+                        PyArray::_setitem(zelf, needle, value, vm)
                     } else {
                         zelf._delitem(needle, vm)
                     }
@@ -1570,7 +1564,7 @@ mod array {
     }
 
     fn check_array_type(typ: PyTypeRef, vm: &VirtualMachine) -> PyResult<PyTypeRef> {
-        if !typ.fast_issubclass(PyArray::class(vm)) {
+        if !typ.fast_issubclass(PyArray::class(&vm.ctx)) {
             return Err(
                 vm.new_type_error(format!("{} is not a subtype of array.array", typ.name()))
             );

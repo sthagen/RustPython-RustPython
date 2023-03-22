@@ -47,8 +47,8 @@ impl fmt::Debug for PyDict {
 }
 
 impl PyPayload for PyDict {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.dict_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.dict_type
     }
 }
 
@@ -203,6 +203,8 @@ impl PyDict {
 #[allow(clippy::len_without_is_empty)]
 #[pyclass(
     with(
+        Py,
+        PyRef,
         Constructor,
         Initializer,
         AsMapping,
@@ -270,30 +272,9 @@ impl PyDict {
         self.entries.clear()
     }
 
-    #[pymethod]
-    fn keys(zelf: PyRef<Self>) -> PyDictKeys {
-        PyDictKeys::new(zelf)
-    }
-
-    #[pymethod]
-    fn values(zelf: PyRef<Self>) -> PyDictValues {
-        PyDictValues::new(zelf)
-    }
-
-    #[pymethod]
-    fn items(zelf: PyRef<Self>) -> PyDictItems {
-        PyDictItems::new(zelf)
-    }
-
     #[pymethod(magic)]
     fn setitem(&self, key: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         self.inner_setitem(&*key, value, vm)
-    }
-
-    #[pymethod(magic)]
-    #[cfg_attr(feature = "flame-it", flame("PyDictRef"))]
-    fn getitem(zelf: PyRef<Self>, key: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        zelf.inner_getitem(&*key, vm)
     }
 
     #[pymethod]
@@ -396,14 +377,41 @@ impl PyDict {
         Ok((key, value))
     }
 
-    #[pymethod(magic)]
-    fn reversed(zelf: PyRef<Self>) -> PyDictReverseKeyIterator {
-        PyDictReverseKeyIterator::new(zelf)
-    }
-
     #[pyclassmethod(magic)]
     fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
         PyGenericAlias::new(cls, args, vm)
+    }
+}
+
+#[pyclass]
+impl Py<PyDict> {
+    #[pymethod(magic)]
+    #[cfg_attr(feature = "flame-it", flame("PyDictRef"))]
+    fn getitem(&self, key: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        self.inner_getitem(&*key, vm)
+    }
+}
+
+#[pyclass]
+impl PyRef<PyDict> {
+    #[pymethod]
+    fn keys(self) -> PyDictKeys {
+        PyDictKeys::new(self)
+    }
+
+    #[pymethod]
+    fn values(self) -> PyDictValues {
+        PyDictValues::new(self)
+    }
+
+    #[pymethod]
+    fn items(self) -> PyDictItems {
+        PyDictItems::new(self)
+    }
+
+    #[pymethod(magic)]
+    fn reversed(self) -> PyDictReverseKeyIterator {
+        PyDictReverseKeyIterator::new(self)
     }
 }
 
@@ -464,16 +472,16 @@ impl AsSequence for PyDict {
 impl AsNumber for PyDict {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            or: Some(|num, args, vm| {
-                if let Some(num) = num.obj.downcast_ref::<PyDict>() {
-                    PyDict::or(num, args.to_pyobject(vm), vm)
+            or: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PyDict>() {
+                    PyDict::or(a, b.to_pyobject(vm), vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            inplace_or: Some(|num, args, vm| {
-                if let Some(num) = num.obj.downcast_ref::<PyDict>() {
-                    PyDict::ior(num.to_owned(), args.to_pyobject(vm), vm).map(|d| d.into())
+            inplace_or: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PyDict>() {
+                    PyDict::ior(a.to_owned(), b.to_pyobject(vm), vm).map(|d| d.into())
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
@@ -790,8 +798,8 @@ macro_rules! dict_view {
         }
 
         impl PyPayload for $name {
-            fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-                vm.ctx.types.$class
+            fn class(ctx: &Context) -> &'static Py<PyType> {
+                ctx.types.$class
             }
         }
 
@@ -826,8 +834,8 @@ macro_rules! dict_view {
         }
 
         impl PyPayload for $iter_name {
-            fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-                vm.ctx.types.$iter_class
+            fn class(ctx: &Context) -> &'static Py<PyType> {
+                ctx.types.$iter_class
             }
         }
 
@@ -847,9 +855,9 @@ macro_rules! dict_view {
 
             #[allow(clippy::redundant_closure_call)]
             #[pymethod(magic)]
-            fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyTupleRef {
+            fn reduce(&self, vm: &VirtualMachine) -> PyTupleRef {
                 let iter = builtins_iter(vm).to_owned();
-                let internal = zelf.internal.lock();
+                let internal = self.internal.lock();
                 let entries = match &internal.status {
                     IterStatus::Active(dict) => dict
                         .into_iter()
@@ -899,8 +907,8 @@ macro_rules! dict_view {
         }
 
         impl PyPayload for $reverse_iter_name {
-            fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-                vm.ctx.types.$reverse_iter_class
+            fn class(ctx: &Context) -> &'static Py<PyType> {
+                ctx.types.$reverse_iter_class
             }
         }
 
@@ -917,9 +925,9 @@ macro_rules! dict_view {
 
             #[allow(clippy::redundant_closure_call)]
             #[pymethod(magic)]
-            fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyTupleRef {
+            fn reduce(&self, vm: &VirtualMachine) -> PyTupleRef {
                 let iter = builtins_reversed(vm).to_owned();
-                let internal = zelf.internal.lock();
+                let internal = self.internal.lock();
                 // TODO: entries must be reversed too
                 let entries = match &internal.status {
                     IterStatus::Active(dict) => dict
@@ -1161,51 +1169,10 @@ impl AsSequence for PyDictKeys {
 impl AsNumber for PyDictKeys {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            subtract: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num
-                        .difference(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
-                }
-                .into_pyobject(vm))
-            }),
-            and: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num
-                        .intersection(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
-                }
-                .into_pyobject(vm))
-            }),
-            xor: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num.symmetric_difference(
-                        ArgIterable::try_from_object(vm, args.to_owned())?,
-                        vm,
-                    )?,
-                }
-                .into_pyobject(vm))
-            }),
-            or: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num.union(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
-                }
-                .into_pyobject(vm))
-            }),
+            subtract: Some(set_inner_number_subtract),
+            and: Some(set_inner_number_and),
+            xor: Some(set_inner_number_xor),
+            or: Some(set_inner_number_or),
             ..PyNumberMethods::NOT_IMPLEMENTED
         };
         &AS_NUMBER
@@ -1240,7 +1207,7 @@ impl PyDictItems {
             return Ok(false);
         }
         let value = needle.fast_getitem(1);
-        let found = PyDict::getitem(zelf.dict().clone(), key, vm)?;
+        let found = zelf.dict().getitem(key, vm)?;
         vm.identical_or_equal(&found, &value)
     }
     #[pygetset]
@@ -1280,51 +1247,10 @@ impl AsSequence for PyDictItems {
 impl AsNumber for PyDictItems {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            subtract: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num
-                        .difference(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
-                }
-                .into_pyobject(vm))
-            }),
-            and: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num
-                        .intersection(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
-                }
-                .into_pyobject(vm))
-            }),
-            xor: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num.symmetric_difference(
-                        ArgIterable::try_from_object(vm, args.to_owned())?,
-                        vm,
-                    )?,
-                }
-                .into_pyobject(vm))
-            }),
-            or: Some(|num, args, vm| {
-                let num = PySetInner::from_iter(
-                    ArgIterable::try_from_object(vm, num.obj.to_owned())?.iter(vm)?,
-                    vm,
-                )?;
-                Ok(PySet {
-                    inner: num.union(ArgIterable::try_from_object(vm, args.to_owned())?, vm)?,
-                }
-                .into_pyobject(vm))
-            }),
+            subtract: Some(set_inner_number_subtract),
+            and: Some(set_inner_number_and),
+            xor: Some(set_inner_number_xor),
+            or: Some(set_inner_number_or),
             ..PyNumberMethods::NOT_IMPLEMENTED
         };
         &AS_NUMBER
@@ -1348,6 +1274,34 @@ impl AsSequence for PyDictValues {
         });
         &AS_SEQUENCE
     }
+}
+
+fn set_inner_number_op<F>(a: &PyObject, b: &PyObject, f: F, vm: &VirtualMachine) -> PyResult
+where
+    F: FnOnce(PySetInner, ArgIterable) -> PyResult<PySetInner>,
+{
+    let a = PySetInner::from_iter(
+        ArgIterable::try_from_object(vm, a.to_owned())?.iter(vm)?,
+        vm,
+    )?;
+    let b = ArgIterable::try_from_object(vm, b.to_owned())?;
+    Ok(PySet { inner: f(a, b)? }.into_pyobject(vm))
+}
+
+fn set_inner_number_subtract(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyResult {
+    set_inner_number_op(a, b, |a, b| a.difference(b, vm), vm)
+}
+
+fn set_inner_number_and(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyResult {
+    set_inner_number_op(a, b, |a, b| a.intersection(b, vm), vm)
+}
+
+fn set_inner_number_xor(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyResult {
+    set_inner_number_op(a, b, |a, b| a.symmetric_difference(b, vm), vm)
+}
+
+fn set_inner_number_or(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyResult {
+    set_inner_number_op(a, b, |a, b| a.union(b, vm), vm)
 }
 
 pub(crate) fn init(context: &Context) {

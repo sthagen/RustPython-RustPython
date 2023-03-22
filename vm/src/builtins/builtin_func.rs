@@ -67,8 +67,8 @@ pub struct PyBuiltinFunction {
 }
 
 impl PyPayload for PyBuiltinFunction {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.builtin_function_or_method_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.builtin_function_or_method_type
     }
 }
 
@@ -176,8 +176,8 @@ pub struct PyBuiltinMethod {
 }
 
 impl PyPayload for PyBuiltinMethod {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.method_descriptor_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.method_descriptor_type
     }
 }
 
@@ -259,7 +259,7 @@ impl PyBuiltinMethod {
         vm: &VirtualMachine,
     ) -> (Option<PyObjectRef>, (Option<PyObjectRef>, PyStrRef)) {
         let builtins_getattr = vm.builtins.get_attr("getattr", vm).ok();
-        let classname = vm.builtins.get_attr(self.class.name().to_string(), vm).ok();
+        let classname = vm.builtins.get_attr(&self.class.__name__(vm), vm).ok();
         (builtins_getattr, (classname, self.value.name.clone()))
     }
 }

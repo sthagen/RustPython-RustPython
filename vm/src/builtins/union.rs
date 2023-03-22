@@ -1,7 +1,7 @@
 use super::{genericalias, type_};
 use crate::{
     atomic_func,
-    builtins::{PyFrozenSet, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType},
+    builtins::{PyFrozenSet, PyStr, PyTuple, PyTupleRef, PyType},
     class::PyClassImpl,
     common::hash,
     convert::{ToPyObject, ToPyResult},
@@ -29,8 +29,8 @@ impl fmt::Debug for PyUnion {
 }
 
 impl PyPayload for PyUnion {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.union_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.union_type
     }
 }
 
@@ -139,19 +139,10 @@ pub fn is_unionable(obj: PyObjectRef, vm: &VirtualMachine) -> bool {
         || obj.class().is(vm.ctx.types.union_type)
 }
 
-fn is_typevar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
-    let class = obj.class();
-    class.slot_name() == "TypeVar"
-        && class
-            .get_attr(identifier!(vm, __module__))
-            .and_then(|o| o.downcast_ref::<PyStr>().map(|s| s.as_str() == "typing"))
-            .unwrap_or(false)
-}
-
 fn make_parameters(args: &PyTupleRef, vm: &VirtualMachine) -> PyTupleRef {
     let mut parameters: Vec<PyObjectRef> = Vec::with_capacity(args.len());
     for arg in args {
-        if is_typevar(arg, vm) {
+        if genericalias::is_typevar(arg, vm) {
             if !parameters.iter().any(|param| param.is(arg)) {
                 parameters.push(arg.clone());
             }
@@ -261,9 +252,7 @@ impl AsMapping for PyUnion {
 impl AsNumber for PyUnion {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            or: Some(|num, other, vm| {
-                PyUnion::or(num.obj.to_owned(), other.to_owned(), vm).to_pyresult(vm)
-            }),
+            or: Some(|a, b, vm| PyUnion::or(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
             ..PyNumberMethods::NOT_IMPLEMENTED
         };
         &AS_NUMBER
@@ -296,12 +285,12 @@ impl Hashable for PyUnion {
     #[inline]
     fn hash(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<hash::PyHash> {
         let set = PyFrozenSet::from_iter(vm, zelf.args.into_iter().cloned())?;
-        PyFrozenSet::hash(&set.into_ref(vm), vm)
+        PyFrozenSet::hash(&set.into_ref(&vm.ctx), vm)
     }
 }
 
 impl GetAttr for PyUnion {
-    fn getattro(zelf: &Py<Self>, attr: PyStrRef, vm: &VirtualMachine) -> PyResult {
+    fn getattro(zelf: &Py<Self>, attr: &Py<PyStr>, vm: &VirtualMachine) -> PyResult {
         for &exc in CLS_ATTRS {
             if *exc == attr.to_string() {
                 return zelf.as_object().generic_getattr(attr, vm);

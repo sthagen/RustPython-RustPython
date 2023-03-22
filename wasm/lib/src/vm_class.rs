@@ -30,7 +30,7 @@ fn init_window_module(vm: &VirtualMachine) -> PyObjectRef {
     let module = _window::make_module(vm);
 
     extend_module!(vm, module, {
-        "window" => js_module::PyJsValue::new(wasm_builtins::window()).into_ref(vm),
+        "window" => js_module::PyJsValue::new(wasm_builtins::window()).into_ref(&vm.ctx),
     });
 
     module
@@ -314,7 +314,7 @@ impl WASMVirtualMachine {
                 let (key, value) = entry?;
                 let key = Object::from(key).to_string();
                 extend_module!(vm, py_module, {
-                    String::from(key) => convert::js_to_py(vm, value),
+                    &String::from(key) => convert::js_to_py(vm, value),
                 });
             }
 

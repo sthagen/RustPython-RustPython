@@ -1,13 +1,12 @@
 use crate::{
     builtins::{
-        pystr::IntoPyStrRef,
         tuple::{IntoPyTuple, PyTupleRef},
         PyBaseException, PyBaseExceptionRef, PyDictRef, PyModule, PyStrRef, PyType, PyTypeRef,
     },
     convert::ToPyObject,
     scope::Scope,
     vm::VirtualMachine,
-    AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef,
+    AsObject, Py, PyObject, PyObjectRef, PyRef,
 };
 
 /// Collection of object creation helpers
@@ -15,14 +14,6 @@ impl VirtualMachine {
     /// Create a new python object
     pub fn new_pyobj(&self, value: impl ToPyObject) -> PyObjectRef {
         value.to_pyobject(self)
-    }
-
-    pub fn new_pyref<T, P>(&self, value: T) -> PyRef<P>
-    where
-        T: Into<P>,
-        P: PyPayload,
-    {
-        value.into().into_ref(self)
     }
 
     pub fn new_tuple(&self, value: impl IntoPyTuple) -> PyTupleRef {
@@ -268,12 +259,10 @@ impl VirtualMachine {
         syntax_error
     }
 
-    pub fn new_import_error(&self, msg: String, name: impl IntoPyStrRef) -> PyBaseExceptionRef {
+    pub fn new_import_error(&self, msg: String, name: PyStrRef) -> PyBaseExceptionRef {
         let import_error = self.ctx.exceptions.import_error.to_owned();
         let exc = self.new_exception_msg(import_error, msg);
-        exc.as_object()
-            .set_attr("name", name.into_pystr_ref(self), self)
-            .unwrap();
+        exc.as_object().set_attr("name", name, self).unwrap();
         exc
     }
 

@@ -333,7 +333,7 @@ mod _js {
             } else {
                 Closure::once(Box::new(f))
             };
-            let wrapped = PyJsValue::new(wrap_closure(closure.as_ref())).into_ref(vm);
+            let wrapped = PyJsValue::new(wrap_closure(closure.as_ref())).into_ref(&vm.ctx);
             Ok(JsClosure {
                 closure: Some((closure, wrapped)).into(),
                 destroyed: false.into(),
@@ -619,7 +619,7 @@ mod _js {
     fn js_error(vm: &VirtualMachine) -> PyTypeRef {
         let ctx = &vm.ctx;
         let js_error = PyRef::leak(
-            PyType::new_simple_ref("JSError", &vm.ctx.exceptions.exception_type.to_owned(), ctx)
+            PyType::new_simple_heap("JSError", &vm.ctx.exceptions.exception_type.to_owned(), ctx)
                 .unwrap(),
         );
         extend_class!(ctx, js_error, {

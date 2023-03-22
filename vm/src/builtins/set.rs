@@ -135,14 +135,14 @@ impl fmt::Debug for PyFrozenSet {
 }
 
 impl PyPayload for PySet {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.set_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.set_type
     }
 }
 
 impl PyPayload for PyFrozenSet {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.frozenset_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.frozenset_type
     }
 }
 
@@ -794,78 +794,62 @@ impl Iterable for PySet {
 impl AsNumber for PySet {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            subtract: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    number.sub(other.to_owned(), vm).to_pyresult(vm)
+            subtract: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    a.sub(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            and: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    number.and(other.to_owned(), vm).to_pyresult(vm)
+            and: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    a.and(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            xor: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    number.xor(other.to_owned(), vm).to_pyresult(vm)
+            xor: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    a.xor(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            or: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    number.or(other.to_owned(), vm).to_pyresult(vm)
+            or: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    a.or(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            inplace_subtract: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    PySet::isub(
-                        number.to_owned(),
-                        AnySet::try_from_object(vm, other.to_owned())?,
-                        vm,
-                    )
-                    .to_pyresult(vm)
+            inplace_subtract: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    PySet::isub(a.to_owned(), AnySet::try_from_object(vm, b.to_owned())?, vm)
+                        .to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            inplace_and: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    PySet::iand(
-                        number.to_owned(),
-                        AnySet::try_from_object(vm, other.to_owned())?,
-                        vm,
-                    )
-                    .to_pyresult(vm)
+            inplace_and: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    PySet::iand(a.to_owned(), AnySet::try_from_object(vm, b.to_owned())?, vm)
+                        .to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            inplace_xor: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    PySet::ixor(
-                        number.to_owned(),
-                        AnySet::try_from_object(vm, other.to_owned())?,
-                        vm,
-                    )
-                    .to_pyresult(vm)
+            inplace_xor: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    PySet::ixor(a.to_owned(), AnySet::try_from_object(vm, b.to_owned())?, vm)
+                        .to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            inplace_or: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PySet>() {
-                    PySet::ior(
-                        number.to_owned(),
-                        AnySet::try_from_object(vm, other.to_owned())?,
-                        vm,
-                    )
-                    .to_pyresult(vm)
+            inplace_or: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PySet>() {
+                    PySet::ior(a.to_owned(), AnySet::try_from_object(vm, b.to_owned())?, vm)
+                        .to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
@@ -957,7 +941,7 @@ impl PyFrozenSet {
             Self {
                 inner: zelf.inner.copy(),
             }
-            .into_ref(vm)
+            .into_ref(&vm.ctx)
         }
     }
 
@@ -1133,30 +1117,30 @@ impl Iterable for PyFrozenSet {
 impl AsNumber for PyFrozenSet {
     fn as_number() -> &'static PyNumberMethods {
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
-            subtract: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PyFrozenSet>() {
-                    number.sub(other.to_owned(), vm).to_pyresult(vm)
+            subtract: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PyFrozenSet>() {
+                    a.sub(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            and: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PyFrozenSet>() {
-                    number.and(other.to_owned(), vm).to_pyresult(vm)
+            and: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PyFrozenSet>() {
+                    a.and(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            xor: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PyFrozenSet>() {
-                    number.xor(other.to_owned(), vm).to_pyresult(vm)
+            xor: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PyFrozenSet>() {
+                    a.xor(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
             }),
-            or: Some(|number, other, vm| {
-                if let Some(number) = number.obj.downcast_ref::<PyFrozenSet>() {
-                    number.or(other.to_owned(), vm).to_pyresult(vm)
+            or: Some(|a, b, vm| {
+                if let Some(a) = a.downcast_ref::<PyFrozenSet>() {
+                    a.or(b.to_owned(), vm).to_pyresult(vm)
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
@@ -1236,8 +1220,8 @@ impl fmt::Debug for PySetIterator {
 }
 
 impl PyPayload for PySetIterator {
-    fn class(vm: &VirtualMachine) -> &'static Py<PyType> {
-        vm.ctx.types.set_iterator_type
+    fn class(ctx: &Context) -> &'static Py<PyType> {
+        ctx.types.set_iterator_type
     }
 }
 
