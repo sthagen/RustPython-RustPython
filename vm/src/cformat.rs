@@ -33,8 +33,8 @@ fn spec_format_bytes(
                     Ok(buffer.contiguous_or_collect(|bytes| spec.format_bytes(bytes)))
                 } else {
                     let bytes = vm
-                        .get_special_method(obj, identifier!(vm, __bytes__))?
-                        .map_err(|obj| {
+                        .get_special_method(&obj, identifier!(vm, __bytes__))?
+                        .ok_or_else(|| {
                             vm.new_type_error(format!(
                                 "%b requires a bytes-like object, or an object that \
                                     implements __bytes__, not '{}'",
@@ -293,7 +293,10 @@ pub(crate) fn cformat_bytes(
                     CFormatPart::Literal(literal) => result.append(literal),
                     CFormatPart::Spec(spec) => {
                         let value = match &spec.mapping_key {
-                            Some(key) => values_obj.get_item(key.as_str(), vm)?,
+                            Some(key) => {
+                                let k = vm.ctx.new_bytes(key.as_str().as_bytes().to_vec());
+                                values_obj.get_item(k.as_object(), vm)?
+                            }
                             None => unreachable!(),
                         };
                         let mut part_result = spec_format_bytes(vm, spec, value)?;
