@@ -146,7 +146,7 @@ mod _io {
     }
 
     fn ensure_unclosed(file: &PyObject, msg: &str, vm: &VirtualMachine) -> PyResult<()> {
-        if file.to_owned().get_attr("closed", vm)?.try_to_bool(vm)? {
+        if file.get_attr("closed", vm)?.try_to_bool(vm)? {
             Err(vm.new_value_error(msg.to_owned()))
         } else {
             Ok(())
@@ -324,7 +324,7 @@ mod _io {
     }
 
     fn file_closed(file: &PyObject, vm: &VirtualMachine) -> PyResult<bool> {
-        file.to_owned().get_attr("closed", vm)?.try_to_bool(vm)
+        file.get_attr("closed", vm)?.try_to_bool(vm)
     }
     fn check_closed(file: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
         if file_closed(file, vm)? {
@@ -1346,7 +1346,7 @@ mod _io {
     }
 
     pub fn repr_fileobj_name(obj: &PyObject, vm: &VirtualMachine) -> PyResult<Option<PyStrRef>> {
-        let name = match obj.to_owned().get_attr("name", vm) {
+        let name = match obj.get_attr("name", vm) {
             Ok(name) => Some(name),
             Err(e)
                 if e.fast_isinstance(vm.ctx.exceptions.attribute_error)
@@ -1506,24 +1506,15 @@ mod _io {
         }
         #[pygetset]
         fn closed(&self, vm: &VirtualMachine) -> PyResult {
-            self.lock(vm)?
-                .check_init(vm)?
-                .to_owned()
-                .get_attr("closed", vm)
+            self.lock(vm)?.check_init(vm)?.get_attr("closed", vm)
         }
         #[pygetset]
         fn name(&self, vm: &VirtualMachine) -> PyResult {
-            self.lock(vm)?
-                .check_init(vm)?
-                .to_owned()
-                .get_attr("name", vm)
+            self.lock(vm)?.check_init(vm)?.get_attr("name", vm)
         }
         #[pygetset]
         fn mode(&self, vm: &VirtualMachine) -> PyResult {
-            self.lock(vm)?
-                .check_init(vm)?
-                .to_owned()
-                .get_attr("mode", vm)
+            self.lock(vm)?.check_init(vm)?.get_attr("mode", vm)
         }
         #[pymethod]
         fn fileno(&self, vm: &VirtualMachine) -> PyResult {
@@ -2202,10 +2193,14 @@ mod _io {
             *data = None;
 
             let encoding = match args.encoding {
-                Some(enc) => enc,
-                None => {
-                    // TODO: try os.device_encoding(fileno) and then locale.getpreferredencoding()
-                    PyStr::from(crate::codecs::DEFAULT_ENCODING).into_ref(&vm.ctx)
+                None if vm.state.settings.utf8_mode > 0 => PyStr::from("utf-8").into_ref(&vm.ctx),
+                Some(enc) if enc.as_str() != "locale" => enc,
+                _ => {
+                    // None without utf8_mode or "locale" encoding
+                    vm.import("locale", None, 0)?
+                        .get_attr("getencoding", vm)?
+                        .call((), vm)?
+                        .try_into_value(vm)?
                 }
             };
 
@@ -3550,7 +3545,7 @@ mod _io {
 
         // check file descriptor validity
         #[cfg(unix)]
-        if let Ok(crate::stdlib::os::PathOrFd::Fd(fd)) = file.clone().try_into_value(vm) {
+        if let Ok(crate::stdlib::os::OsPathOrFd::Fd(fd)) = file.clone().try_into_value(vm) {
             nix::fcntl::fcntl(fd, nix::fcntl::F_GETFD)
                 .map_err(|_| crate::stdlib::os::errno_err(vm))?;
         }
@@ -3879,7 +3874,7 @@ mod fileio {
             } else if let Some(i) = name.payload::<crate::builtins::PyInt>() {
                 i.try_to_primitive(vm)?
             } else {
-                let path = os::PyPathLike::try_from_object(vm, name.clone())?;
+                let path = os::OsPath::try_from_object(vm, name.clone())?;
                 if !args.closefd {
                     return Err(
                         vm.new_value_error("Cannot use closefd=False with file name".to_owned())

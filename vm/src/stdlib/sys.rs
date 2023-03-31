@@ -728,7 +728,7 @@ mod sys {
                 hash_randomization: settings.hash_seed.is_none() as u8,
                 isolated: settings.isolated as u8,
                 dev_mode: settings.dev_mode,
-                utf8_mode: 1,
+                utf8_mode: settings.utf8_mode,
                 int_max_str_digits: -1,
                 safe_path: false,
                 warn_default_encoding: settings.warn_default_encoding as u8,
@@ -953,19 +953,16 @@ impl PyStderr<'_> {
 
 pub fn get_stdin(vm: &VirtualMachine) -> PyResult {
     vm.sys_module
-        .clone()
         .get_attr("stdin", vm)
         .map_err(|_| vm.new_runtime_error("lost sys.stdin".to_owned()))
 }
 pub fn get_stdout(vm: &VirtualMachine) -> PyResult {
     vm.sys_module
-        .clone()
         .get_attr("stdout", vm)
         .map_err(|_| vm.new_runtime_error("lost sys.stdout".to_owned()))
 }
 pub fn get_stderr(vm: &VirtualMachine) -> PyResult {
     vm.sys_module
-        .clone()
         .get_attr("stderr", vm)
         .map_err(|_| vm.new_runtime_error("lost sys.stderr".to_owned()))
 }

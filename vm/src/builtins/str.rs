@@ -371,6 +371,7 @@ impl PyStr {
 #[pyclass(
     flags(BASETYPE),
     with(
+        PyRef,
         AsMapping,
         AsNumber,
         AsSequence,
@@ -486,11 +487,6 @@ impl PyStr {
     #[pymethod(magic)]
     fn mul(zelf: PyRef<Self>, value: ArgSize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         Self::repeat(zelf, value.into(), vm)
-    }
-
-    #[pymethod(magic)]
-    fn str(zelf: PyRef<Self>) -> PyStrRef {
-        zelf
     }
 
     #[inline]
@@ -647,10 +643,10 @@ impl PyStr {
                 None => return Ok(false),
             };
         substr.py_startsendswith(
-            affix,
+            &affix,
             "endswith",
             "str",
-            |s, x: &PyStrRef| s.ends_with(x.as_str()),
+            |s, x: &Py<PyStr>| s.ends_with(x.as_str()),
             vm,
         )
     }
@@ -667,10 +663,10 @@ impl PyStr {
                 None => return Ok(false),
             };
         substr.py_startsendswith(
-            affix,
+            &affix,
             "startswith",
             "str",
-            |s, x: &PyStrRef| s.starts_with(x.as_str()),
+            |s, x: &Py<PyStr>| s.starts_with(x.as_str()),
             vm,
         )
     }
@@ -826,9 +822,11 @@ impl PyStr {
         let s = self.as_str();
         match count {
             OptionalArg::Present(max_count) if max_count >= 0 => {
-                if max_count == 0 || s.is_empty() {
+                if max_count == 0 || (s.is_empty() && !old.is_empty()) {
                     // nothing to do; return the original bytes
-                    s.into()
+                    s.to_owned()
+                } else if s.is_empty() && old.is_empty() {
+                    new.as_str().to_owned()
                 } else {
                     s.replacen(old.as_str(), new.as_str(), max_count as usize)
                 }
@@ -1274,6 +1272,17 @@ impl PyStr {
     #[pymethod(magic)]
     fn getnewargs(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyObjectRef {
         (zelf.as_str(),).to_pyobject(vm)
+    }
+}
+
+#[pyclass]
+impl PyRef<PyStr> {
+    #[pymethod(magic)]
+    fn str(self, vm: &VirtualMachine) -> PyRefExact<PyStr> {
+        self.into_exact_or(&vm.ctx, |zelf| unsafe {
+            // Creating a copy with same kind is safe
+            PyStr::new_str_unchecked(zelf.bytes.to_vec(), zelf.kind.kind()).into_exact_ref(&vm.ctx)
+        })
     }
 }
 
