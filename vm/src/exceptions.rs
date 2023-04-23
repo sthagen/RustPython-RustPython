@@ -1,5 +1,6 @@
 use self::types::{PyBaseException, PyBaseExceptionRef};
 use crate::common::{lock::PyRwLock, str::ReprOverflowError};
+use crate::object::{Traverse, TraverseFn};
 use crate::{
     builtins::{
         traceback::PyTracebackRef, tuple::IntoPyTuple, PyNone, PyStr, PyStrRef, PyTuple,
@@ -11,7 +12,7 @@ use crate::{
     py_io::{self, Write},
     stdlib::sys,
     suggestion::offer_suggestions,
-    types::{Callable, Constructor, Initializer},
+    types::{Callable, Constructor, Initializer, Representable},
     AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
 };
 use crossbeam_utils::atomic::AtomicCell;
@@ -20,6 +21,15 @@ use std::{
     collections::HashSet,
     io::{self, BufRead, BufReader},
 };
+
+unsafe impl Traverse for PyBaseException {
+    fn traverse(&self, tracer_fn: &mut TraverseFn) {
+        self.traceback.traverse(tracer_fn);
+        self.cause.traverse(tracer_fn);
+        self.context.traverse(tracer_fn);
+        self.args.traverse(tracer_fn);
+    }
+}
 
 impl std::fmt::Debug for PyBaseException {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -430,7 +440,10 @@ impl PyBaseException {
     }
 }
 
-#[pyclass(with(Constructor, Initializer), flags(BASETYPE, HAS_DICT))]
+#[pyclass(
+    with(Constructor, Initializer, Representable),
+    flags(BASETYPE, HAS_DICT)
+)]
 impl PyBaseException {
     #[pygetset]
     pub fn args(&self) -> PyTupleRef {
@@ -496,17 +509,10 @@ impl PyBaseException {
     pub(super) fn str(&self, vm: &VirtualMachine) -> PyStrRef {
         let str_args = vm.exception_args_as_string(self.args(), true);
         match str_args.into_iter().exactly_one() {
-            Err(i) if i.len() == 0 => vm.ctx.empty_str.clone(),
+            Err(i) if i.len() == 0 => vm.ctx.empty_str.to_owned(),
             Ok(s) => s,
             Err(i) => PyStr::from(format!("({})", i.format(", "))).into_ref(&vm.ctx),
         }
-    }
-
-    #[pymethod(magic)]
-    fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> String {
-        let repr_args = vm.exception_args_as_string(zelf.args(), false);
-        let cls = zelf.class();
-        format!("{}({})", cls.name(), repr_args.iter().format(", "))
     }
 
     #[pymethod(magic)]
@@ -535,6 +541,15 @@ impl Initializer for PyBaseException {
     fn init(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
         *zelf.args.write() = PyTuple::new_ref(args.args, &vm.ctx);
         Ok(())
+    }
+}
+
+impl Representable for PyBaseException {
+    #[inline]
+    fn repr_str(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
+        let repr_args = vm.exception_args_as_string(zelf.args(), false);
+        let cls = zelf.class();
+        Ok(format!("{}({})", cls.name(), repr_args.iter().format(", ")))
     }
 }
 
@@ -1138,7 +1153,7 @@ pub(super) mod types {
 
     // Sorted By Hierarchy then alphabetized.
 
-    #[pyclass(module = false, name = "BaseException")]
+    #[pyclass(module = false, name = "BaseException", traverse = "manual")]
     pub struct PyBaseException {
         pub(super) traceback: PyRwLock<Option<PyTracebackRef>>,
         pub(super) cause: PyRwLock<Option<PyRef<Self>>>,

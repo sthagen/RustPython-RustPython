@@ -1130,7 +1130,7 @@ impl ExecutingFrame<'_> {
 
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
     fn import(&mut self, vm: &VirtualMachine, module: Option<&Py<PyStr>>) -> PyResult<()> {
-        let module = module.unwrap_or(&vm.ctx.empty_str);
+        let module = module.unwrap_or(vm.ctx.empty_str);
         let from_list = <Option<PyTupleTyped<PyStrRef>>>::try_from_object(vm, self.pop_value())?;
         let level = usize::try_from_object(vm, self.pop_value())?;
 
@@ -1654,7 +1654,7 @@ impl ExecutingFrame<'_> {
             bytecode::BinaryOperator::Add => vm._add(a_ref, b_ref),
             bytecode::BinaryOperator::Multiply => vm._mul(a_ref, b_ref),
             bytecode::BinaryOperator::MatrixMultiply => vm._matmul(a_ref, b_ref),
-            bytecode::BinaryOperator::Power => vm._pow(a_ref, b_ref),
+            bytecode::BinaryOperator::Power => vm._pow(a_ref, b_ref, vm.ctx.none.as_object()),
             bytecode::BinaryOperator::Divide => vm._truediv(a_ref, b_ref),
             bytecode::BinaryOperator::FloorDivide => vm._floordiv(a_ref, b_ref),
             bytecode::BinaryOperator::Modulo => vm._mod(a_ref, b_ref),
@@ -1680,7 +1680,7 @@ impl ExecutingFrame<'_> {
             bytecode::BinaryOperator::Add => vm._iadd(a_ref, b_ref),
             bytecode::BinaryOperator::Multiply => vm._imul(a_ref, b_ref),
             bytecode::BinaryOperator::MatrixMultiply => vm._imatmul(a_ref, b_ref),
-            bytecode::BinaryOperator::Power => vm._ipow(a_ref, b_ref),
+            bytecode::BinaryOperator::Power => vm._ipow(a_ref, b_ref, vm.ctx.none.as_object()),
             bytecode::BinaryOperator::Divide => vm._itruediv(a_ref, b_ref),
             bytecode::BinaryOperator::FloorDivide => vm._ifloordiv(a_ref, b_ref),
             bytecode::BinaryOperator::Modulo => vm._imod(a_ref, b_ref),
