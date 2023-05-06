@@ -31,7 +31,7 @@ use crate::{
     sliceable::{SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
         AsBuffer, AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, Initializer,
-        IterNext, IterNextIterable, Iterable, PyComparisonOp, Representable, Unconstructible,
+        IterNext, Iterable, PyComparisonOp, Representable, SelfIter, Unconstructible,
     },
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
     VirtualMachine,
@@ -871,7 +871,7 @@ impl Representable for PyByteArray {
     fn repr_str(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
         let class = zelf.class();
         let class_name = class.name();
-        zelf.inner().repr(Some(&class_name), vm)
+        zelf.inner().repr_with_name(&class_name, vm)
     }
 }
 
@@ -891,7 +891,7 @@ impl PyPayload for PyByteArrayIterator {
     }
 }
 
-#[pyclass(with(Constructor, IterNext))]
+#[pyclass(with(Constructor, IterNext, Iterable))]
 impl PyByteArrayIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {
@@ -914,7 +914,7 @@ impl PyByteArrayIterator {
 
 impl Unconstructible for PyByteArrayIterator {}
 
-impl IterNextIterable for PyByteArrayIterator {}
+impl SelfIter for PyByteArrayIterator {}
 impl IterNext for PyByteArrayIterator {
     fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         zelf.internal.lock().next(|bytearray, pos| {

@@ -61,8 +61,8 @@ mod array {
                 SliceableSequenceOp,
             },
             types::{
-                AsBuffer, AsMapping, AsSequence, Comparable, Constructor, IterNext,
-                IterNextIterable, Iterable, PyComparisonOp, Representable,
+                AsBuffer, AsMapping, AsSequence, Comparable, Constructor, IterNext, Iterable,
+                PyComparisonOp, Representable, SelfIter,
             },
             AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
         },
@@ -1292,11 +1292,9 @@ mod array {
                 if zelf.len() == 0 {
                     return Ok(format!("{class_name}('u')"));
                 }
-                return Ok(format!(
-                    "{}('u', {})",
-                    class_name,
-                    crate::common::str::repr(&zelf.tounicode(vm)?)
-                ));
+                let to_unicode = zelf.tounicode(vm)?;
+                let escape = crate::vm::literal::escape::UnicodeEscape::new_repr(&to_unicode);
+                return Ok(format!("{}('u', {})", class_name, escape.str_repr()));
             }
             zelf.read().repr(&class_name, vm)
         }
@@ -1405,7 +1403,7 @@ mod array {
         internal: PyMutex<PositionIterInternal<PyArrayRef>>,
     }
 
-    #[pyclass(with(IterNext), flags(HAS_DICT))]
+    #[pyclass(with(IterNext, Iterable), flags(HAS_DICT))]
     impl PyArrayIter {
         #[pymethod(magic)]
         fn setstate(&self, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
@@ -1422,7 +1420,7 @@ mod array {
         }
     }
 
-    impl IterNextIterable for PyArrayIter {}
+    impl SelfIter for PyArrayIter {}
     impl IterNext for PyArrayIter {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
             zelf.internal.lock().next(|array, pos| {

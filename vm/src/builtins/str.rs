@@ -20,8 +20,8 @@ use crate::{
     sequence::SequenceExt,
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
-        AsMapping, AsNumber, AsSequence, Comparable, Constructor, Hashable, IterNext,
-        IterNextIterable, Iterable, PyComparisonOp, Representable, Unconstructible,
+        AsMapping, AsNumber, AsSequence, Comparable, Constructor, Hashable, IterNext, Iterable,
+        PyComparisonOp, Representable, SelfIter, Unconstructible,
     },
     AsObject, Context, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
     TryFromBorrowedObject, VirtualMachine,
@@ -206,7 +206,7 @@ impl PyPayload for PyStrIterator {
     }
 }
 
-#[pyclass(with(Constructor, IterNext))]
+#[pyclass(with(Constructor, IterNext, Iterable))]
 impl PyStrIterator {
     #[pymethod(magic)]
     fn length_hint(&self) -> usize {
@@ -232,7 +232,7 @@ impl PyStrIterator {
 }
 impl Unconstructible for PyStrIterator {}
 
-impl IterNextIterable for PyStrIterator {}
+impl SelfIter for PyStrIterator {}
 impl IterNext for PyStrIterator {
     fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
         let mut internal = zelf.internal.lock();
@@ -500,9 +500,12 @@ impl PyStr {
 
     #[inline]
     pub(crate) fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
-        rustpython_common::str::repr(self.as_str())
-            .to_string_checked()
-            .map_err(|err| vm.new_overflow_error(err.to_string()))
+        use crate::literal::escape::UnicodeEscape;
+        let escape = UnicodeEscape::new_repr(self.as_str());
+        escape
+            .str_repr()
+            .to_string()
+            .ok_or_else(|| vm.new_overflow_error("string is too long to generate repr".to_owned()))
     }
 
     #[pymethod]
@@ -861,7 +864,7 @@ impl PyStr {
     ///   * Zs (Separator, Space) other than ASCII space('\x20').
     #[pymethod]
     fn isprintable(&self) -> bool {
-        self.char_all(|c| c == '\u{0020}' || rustpython_common::char::is_printable(c))
+        self.char_all(|c| c == '\u{0020}' || rustpython_literal::char::is_printable(c))
     }
 
     #[pymethod]

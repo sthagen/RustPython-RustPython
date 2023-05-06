@@ -1,8 +1,8 @@
-use crate::{float_ops, str::BorrowedStr};
-use float_ops::Case;
+use crate::str::BorrowedStr;
 use itertools::{Itertools, PeekingNext};
 use num_bigint::{BigInt, Sign};
 use num_traits::{cast::ToPrimitive, Signed};
+use rustpython_literal::{float, format::Case};
 use std::{cmp, str::FromStr};
 
 trait FormatParse {
@@ -416,12 +416,25 @@ impl FormatSpec {
         }
     }
 
+    pub fn format_bool(&self, input: bool) -> Result<String, FormatSpecError> {
+        let x = u8::from(input);
+        let result: Result<String, FormatSpecError> = match &self.format_type {
+            Some(FormatType::Decimal) => Ok(x.to_string()),
+            None => {
+                let first_letter = (input.to_string().as_bytes()[0] as char).to_uppercase();
+                Ok(first_letter.collect::<String>() + &input.to_string()[1..])
+            }
+            _ => Err(FormatSpecError::InvalidFormatSpecifier),
+        };
+        result
+    }
+
     pub fn format_float(&self, num: f64) -> Result<String, FormatSpecError> {
         self.validate_format(FormatType::FixedPoint(Case::Lower))?;
         let precision = self.precision.unwrap_or(6);
         let magnitude = num.abs();
         let raw_magnitude_str: Result<String, FormatSpecError> = match &self.format_type {
-            Some(FormatType::FixedPoint(case)) => Ok(float_ops::format_fixed(
+            Some(FormatType::FixedPoint(case)) => Ok(float::format_fixed(
                 precision,
                 magnitude,
                 *case,
@@ -439,7 +452,7 @@ impl FormatSpec {
             }
             Some(FormatType::GeneralFormat(case)) | Some(FormatType::Number(case)) => {
                 let precision = if precision == 0 { 1 } else { precision };
-                Ok(float_ops::format_general(
+                Ok(float::format_general(
                     precision,
                     magnitude,
                     *case,
@@ -447,7 +460,7 @@ impl FormatSpec {
                     false,
                 ))
             }
-            Some(FormatType::Exponent(case)) => Ok(float_ops::format_exponent(
+            Some(FormatType::Exponent(case)) => Ok(float::format_exponent(
                 precision,
                 magnitude,
                 *case,
@@ -458,7 +471,7 @@ impl FormatSpec {
                 magnitude if magnitude.is_infinite() => Ok("inf%".to_owned()),
                 _ => {
                     let result = format!("{:.*}", precision, magnitude * 100.0);
-                    let point = float_ops::decimal_point_or_empty(precision, self.alternate_form);
+                    let point = float::decimal_point_or_empty(precision, self.alternate_form);
                     Ok(format!("{result}{point}%"))
                 }
             },
@@ -466,17 +479,14 @@ impl FormatSpec {
                 magnitude if magnitude.is_nan() => Ok("nan".to_owned()),
                 magnitude if magnitude.is_infinite() => Ok("inf".to_owned()),
                 _ => match self.precision {
-                    Some(_) => {
-                        let precision = self.precision.unwrap_or(magnitude.to_string().len() - 1);
-                        Ok(float_ops::format_general(
-                            precision,
-                            magnitude,
-                            float_ops::Case::Lower,
-                            self.alternate_form,
-                            true,
-                        ))
-                    }
-                    None => Ok(float_ops::to_string(magnitude)),
+                    Some(precision) => Ok(float::format_general(
+                        precision,
+                        magnitude,
+                        Case::Lower,
+                        self.alternate_form,
+                        true,
+                    )),
+                    None => Ok(float::to_string(magnitude)),
                 },
             },
         };
