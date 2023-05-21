@@ -3,7 +3,7 @@
 //! Implements the list of [builtin Python functions](https://docs.python.org/3/library/builtins.html).
 use crate::{builtins::PyModule, class::PyClassImpl, Py, VirtualMachine};
 pub(crate) use builtins::{__module_def, DOC};
-pub use builtins::{ascii, print};
+pub use builtins::{ascii, print, reversed};
 
 #[pymodule]
 mod builtins {
@@ -124,7 +124,7 @@ mod builtins {
 
             if args
                 .source
-                .fast_isinstance(&ast::AstNode::make_class(&vm.ctx))
+                .fast_isinstance(&ast::NodeAst::make_class(&vm.ctx))
             {
                 #[cfg(not(feature = "rustpython-codegen"))]
                 {
@@ -686,7 +686,7 @@ mod builtins {
     }
 
     #[pyfunction]
-    fn reversed(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+    pub fn reversed(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         if let Some(reversed_method) = vm.get_method(obj.clone(), identifier!(vm, __reversed__)) {
             reversed_method?.call((), vm)
         } else {
