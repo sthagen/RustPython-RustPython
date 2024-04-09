@@ -517,6 +517,7 @@ impl VirtualMachine {
     /// Roughly equivalent to `import module_name` or `import top.submodule`.
     ///
     /// See also [`import_from`] for more advanced import.
+    /// See also [`rustpython_vm::import::import_source`] and other primitive import functions.
     #[inline]
     pub fn import<'a>(&self, module_name: impl AsPyStr<'a>, level: usize) -> PyResult {
         let module_name = module_name.as_pystr(&self.ctx);
@@ -830,7 +831,7 @@ impl VirtualMachine {
                     );
                     let result = unsafe { sigaction(SIGINT, &action) };
                     if result.is_ok() {
-                        interpreter::flush_std(self);
+                        self.flush_std();
                         kill(getpid(), SIGINT).expect("Expect to be killed.");
                     }
 
