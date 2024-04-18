@@ -2063,6 +2063,7 @@ dependencies = [
  "siphasher",
  "volatile",
  "widestring",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2242,6 +2243,7 @@ dependencies = [
  "gethostname",
  "hex",
  "itertools 0.11.0",
+ "junction",
  "libc",
  "libsqlite3-sys",
  "libz-sys",
