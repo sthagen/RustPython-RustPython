@@ -318,8 +318,6 @@ class TestRmTree(BaseTest, unittest.TestCase):
         self.assertTrue(os.path.exists(dir3))
         self.assertTrue(os.path.exists(file1))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_rmtree_errors_onerror(self):
         # filename is guaranteed not to exist
         filename = tempfile.mktemp(dir=self.mkdtemp())
@@ -352,8 +350,6 @@ class TestRmTree(BaseTest, unittest.TestCase):
         self.assertIsInstance(errors[1][2][1], NotADirectoryError)
         self.assertEqual(errors[1][2][1].filename, filename)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_rmtree_errors_onexc(self):
         # filename is guaranteed not to exist
         filename = tempfile.mktemp(dir=self.mkdtemp())
@@ -1412,13 +1408,9 @@ class TestCopy(BaseTest, unittest.TestCase):
             rv = fn(src, os.path.join(dst_dir, 'bar'))
             self.assertEqual(rv, os.path.join(dst_dir, 'bar'))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_copy_dir(self):
         self._test_copy_dir(shutil.copy)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_copy2_dir(self):
         self._test_copy_dir(shutil.copy2)
 
@@ -1550,8 +1542,6 @@ class TestCopy(BaseTest, unittest.TestCase):
         write_file(src_file, 'foo')
         self.assertRaises(FileNotFoundError, shutil.copyfile, src_file, dst)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_copyfile_copy_dir(self):
         # Issue 45234
         # test copy() and copyfile() raising proper exceptions when src and/or

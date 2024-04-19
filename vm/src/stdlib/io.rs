@@ -3395,6 +3395,7 @@ mod _io {
     }
 
     #[repr(u8)]
+    #[derive(Debug)]
     enum FileMode {
         Read = b'r',
         Write = b'w',
@@ -3402,10 +3403,12 @@ mod _io {
         Append = b'a',
     }
     #[repr(u8)]
+    #[derive(Debug)]
     enum EncodeMode {
         Text = b't',
         Bytes = b'b',
     }
+    #[derive(Debug)]
     struct Mode {
         file: FileMode,
         encode: EncodeMode,
@@ -3570,7 +3573,7 @@ mod _io {
 
         // check file descriptor validity
         #[cfg(unix)]
-        if let Ok(crate::stdlib::os::OsPathOrFd::Fd(fd)) = file.clone().try_into_value(vm) {
+        if let Ok(crate::ospath::OsPathOrFd::Fd(fd)) = file.clone().try_into_value(vm) {
             nix::fcntl::fcntl(fd, nix::fcntl::F_GETFD)
                 .map_err(|_| crate::stdlib::os::errno_err(vm))?;
         }
@@ -3730,10 +3733,11 @@ mod _io {
 mod fileio {
     use super::{Offset, _io::*};
     use crate::{
-        builtins::{PyStr, PyStrRef},
+        builtins::{PyBaseExceptionRef, PyStr, PyStrRef},
         common::crt_fd::Fd,
         convert::ToPyException,
         function::{ArgBytesLike, ArgMemoryBuffer, OptionalArg, OptionalOption},
+        ospath::{IOErrorBuilder, OsPath, OsPathOrFd},
         stdlib::os,
         types::{DefaultConstructor, Initializer, Representable},
         AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
@@ -3867,7 +3871,7 @@ mod fileio {
         fn default() -> Self {
             Self {
                 fd: AtomicCell::new(-1),
-                closefd: AtomicCell::new(false),
+                closefd: AtomicCell::new(true),
                 mode: AtomicCell::new(Mode::empty()),
                 seekable: AtomicCell::new(None),
             }
@@ -3880,45 +3884,100 @@ mod fileio {
         type Args = FileIOArgs;
 
         fn init(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
+            // TODO: let atomic_flag_works
+            let name = args.name;
+            let arg_fd = if let Some(i) = name.payload::<crate::builtins::PyInt>() {
+                let fd = i.try_to_primitive(vm)?;
+                if fd < 0 {
+                    return Err(vm.new_value_error("negative file descriptor".to_owned()));
+                }
+                Some(fd)
+            } else {
+                None
+            };
+
             let mode_obj = args
                 .mode
                 .unwrap_or_else(|| PyStr::from("rb").into_ref(&vm.ctx));
             let mode_str = mode_obj.as_str();
-            let name = args.name;
             let (mode, flags) =
                 compute_mode(mode_str).map_err(|e| vm.new_value_error(e.error_msg(mode_str)))?;
             zelf.mode.store(mode);
-            let fd = if let Some(opener) = args.opener {
-                let fd = opener.call((name.clone(), flags), vm)?;
-                if !fd.fast_isinstance(vm.ctx.types.int_type) {
-                    return Err(vm.new_type_error("expected integer from opener".to_owned()));
-                }
-                let fd = i32::try_from_object(vm, fd)?;
-                if fd < 0 {
-                    return Err(vm.new_value_error(format!("opener returned {fd}")));
-                }
-                fd
-            } else if let Some(i) = name.payload::<crate::builtins::PyInt>() {
-                i.try_to_primitive(vm)?
+
+            let (fd, filename) = if let Some(fd) = arg_fd {
+                zelf.closefd.store(args.closefd);
+                (fd, OsPathOrFd::Fd(fd))
             } else {
-                let path = os::OsPath::try_from_object(vm, name.clone())?;
+                zelf.closefd.store(true);
                 if !args.closefd {
                     return Err(
                         vm.new_value_error("Cannot use closefd=False with file name".to_owned())
                     );
                 }
-                os::open(path, flags as _, None, Default::default(), vm)?
+
+                if let Some(opener) = args.opener {
+                    let fd = opener.call((name.clone(), flags), vm)?;
+                    if !fd.fast_isinstance(vm.ctx.types.int_type) {
+                        return Err(vm.new_type_error("expected integer from opener".to_owned()));
+                    }
+                    let fd = i32::try_from_object(vm, fd)?;
+                    if fd < 0 {
+                        return Err(vm.new_value_error(format!("opener returned {fd}")));
+                    }
+                    (
+                        fd,
+                        OsPathOrFd::try_from_object(vm, name.clone()).unwrap_or(OsPathOrFd::Fd(fd)),
+                    )
+                } else {
+                    let path = OsPath::try_from_object(vm, name.clone())?;
+                    #[cfg(any(unix, target_os = "wasi"))]
+                    let fd = Fd::open(&path.clone().into_cstring(vm)?, flags, 0o666);
+                    #[cfg(windows)]
+                    let fd = Fd::wopen(&path.to_widecstring(vm)?, flags, 0o666);
+                    let filename = OsPathOrFd::Path(path);
+                    match fd {
+                        Ok(fd) => (fd.0, filename),
+                        Err(e) => return Err(IOErrorBuilder::with_filename(&e, filename, vm)),
+                    }
+                }
             };
+            zelf.fd.store(fd);
+
+            // TODO: _Py_set_inheritable
+
+            let fd_fstat = crate::fileutils::fstat(fd);
+
+            #[cfg(windows)]
+            {
+                if let Err(err) = fd_fstat {
+                    return Err(IOErrorBuilder::with_filename(&err, filename, vm));
+                }
+            }
+            #[cfg(any(unix, target_os = "wasi"))]
+            {
+                match fd_fstat {
+                    Ok(status) => {
+                        if (status.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                            let err = std::io::Error::from_raw_os_error(libc::EISDIR);
+                            return Err(IOErrorBuilder::with_filename(&err, filename, vm));
+                        }
+                    }
+                    Err(err) => {
+                        if err.raw_os_error() == Some(libc::EBADF) {
+                            return Err(IOErrorBuilder::with_filename(&err, filename, vm));
+                        }
+                    }
+                }
+            }
+
+            #[cfg(windows)]
+            crate::stdlib::msvcrt::setmode_binary(fd);
+            zelf.as_object().set_attr("name", name, vm)?;
 
             if mode.contains(Mode::APPENDING) {
                 let _ = os::lseek(fd as _, 0, libc::SEEK_END, vm);
             }
 
-            zelf.fd.store(fd);
-            zelf.closefd.store(args.closefd);
-            #[cfg(windows)]
-            crate::stdlib::msvcrt::setmode_binary(fd);
-            zelf.as_object().set_attr("name", name, vm)?;
             Ok(())
         }
     }
@@ -3947,6 +4006,20 @@ mod fileio {
         flags(BASETYPE, HAS_DICT)
     )]
     impl FileIO {
+        fn io_error(
+            zelf: &Py<Self>,
+            error: std::io::Error,
+            vm: &VirtualMachine,
+        ) -> PyBaseExceptionRef {
+            let exc = error.to_pyexception(vm);
+            if let Ok(name) = zelf.as_object().get_attr("name", vm) {
+                exc.as_object()
+                    .set_attr("filename", name, vm)
+                    .expect("OSError.filename set must success");
+            }
+            exc
+        }
+
         #[pygetset]
         fn closed(&self) -> bool {
             self.fd.load() < 0
@@ -4006,26 +4079,30 @@ mod fileio {
         }
 
         #[pymethod]
-        fn read(&self, read_byte: OptionalSize, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
-            if !self.mode.load().contains(Mode::READABLE) {
+        fn read(
+            zelf: &Py<Self>,
+            read_byte: OptionalSize,
+            vm: &VirtualMachine,
+        ) -> PyResult<Vec<u8>> {
+            if !zelf.mode.load().contains(Mode::READABLE) {
                 return Err(new_unsupported_operation(
                     vm,
                     "File or stream is not readable".to_owned(),
                 ));
             }
-            let mut handle = self.get_fd(vm)?;
+            let mut handle = zelf.get_fd(vm)?;
             let bytes = if let Some(read_byte) = read_byte.to_usize() {
                 let mut bytes = vec![0; read_byte];
                 let n = handle
                     .read(&mut bytes)
-                    .map_err(|err| err.to_pyexception(vm))?;
+                    .map_err(|err| Self::io_error(zelf, err, vm))?;
                 bytes.truncate(n);
                 bytes
             } else {
                 let mut bytes = vec![];
                 handle
                     .read_to_end(&mut bytes)
-                    .map_err(|err| err.to_pyexception(vm))?;
+                    .map_err(|err| Self::io_error(zelf, err, vm))?;
                 bytes
             };
 
@@ -4033,44 +4110,46 @@ mod fileio {
         }
 
         #[pymethod]
-        fn readinto(&self, obj: ArgMemoryBuffer, vm: &VirtualMachine) -> PyResult<usize> {
-            if !self.mode.load().contains(Mode::READABLE) {
+        fn readinto(zelf: &Py<Self>, obj: ArgMemoryBuffer, vm: &VirtualMachine) -> PyResult<usize> {
+            if !zelf.mode.load().contains(Mode::READABLE) {
                 return Err(new_unsupported_operation(
                     vm,
                     "File or stream is not readable".to_owned(),
                 ));
             }
 
-            let handle = self.get_fd(vm)?;
+            let handle = zelf.get_fd(vm)?;
 
             let mut buf = obj.borrow_buf_mut();
             let mut f = handle.take(buf.len() as _);
-            let ret = f.read(&mut buf).map_err(|e| e.to_pyexception(vm))?;
+            let ret = f
+                .read(&mut buf)
+                .map_err(|err| Self::io_error(zelf, err, vm))?;
 
             Ok(ret)
         }
 
         #[pymethod]
-        fn write(&self, obj: ArgBytesLike, vm: &VirtualMachine) -> PyResult<usize> {
-            if !self.mode.load().contains(Mode::WRITABLE) {
+        fn write(zelf: &Py<Self>, obj: ArgBytesLike, vm: &VirtualMachine) -> PyResult<usize> {
+            if !zelf.mode.load().contains(Mode::WRITABLE) {
                 return Err(new_unsupported_operation(
                     vm,
                     "File or stream is not writable".to_owned(),
                 ));
             }
 
-            let mut handle = self.get_fd(vm)?;
+            let mut handle = zelf.get_fd(vm)?;
 
             let len = obj
                 .with_ref(|b| handle.write(b))
-                .map_err(|err| err.to_pyexception(vm))?;
+                .map_err(|err| Self::io_error(zelf, err, vm))?;
 
             //return number of bytes written
             Ok(len)
         }
 
         #[pymethod]
-        fn close(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<()> {
+        fn close(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<()> {
             let res = iobase_close(zelf.as_object(), vm);
             if !zelf.closefd.load() {
                 zelf.fd.store(-1);
@@ -4078,7 +4157,9 @@ mod fileio {
             }
             let fd = zelf.fd.swap(-1);
             if fd >= 0 {
-                Fd(fd).close().map_err(|e| e.to_pyexception(vm))?;
+                Fd(fd)
+                    .close()
+                    .map_err(|err| Self::io_error(zelf, err, vm))?;
             }
             res
         }
