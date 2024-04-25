@@ -349,7 +349,7 @@ impl Compiler {
         let size_before = self.code_stack.len();
         self.symbol_table_stack.push(symbol_table);
 
-        let (doc, statements) = split_doc(body);
+        let (doc, statements) = split_doc(body, &self.opts);
         if let Some(value) = doc {
             self.emit_constant(ConstantData::Str { value });
             let doc = self.name("__doc__");
@@ -1187,7 +1187,7 @@ impl Compiler {
         let qualified_name = self.qualified_path.join(".");
         self.push_qualified_path("<locals>");
 
-        let (doc_str, body) = split_doc(body);
+        let (doc_str, body) = split_doc(body, &self.opts);
 
         self.current_code_info()
             .constants
@@ -1383,7 +1383,7 @@ impl Compiler {
 
         self.push_output(bytecode::CodeFlags::empty(), 0, 0, 0, name.to_owned());
 
-        let (doc_str, body) = split_doc(body);
+        let (doc_str, body) = split_doc(body, &self.opts);
 
         let dunder_name = self.name("__name__");
         emit!(self, Instruction::LoadGlobal(dunder_name));
@@ -2629,24 +2629,30 @@ impl Compiler {
         compile_element: &dyn Fn(&mut Self) -> CompileResult<()>,
     ) -> CompileResult<()> {
         let prev_ctx = self.ctx;
+        let is_async = generators.iter().any(|g| g.is_async);
 
         self.ctx = CompileContext {
             loop_data: None,
             in_class: prev_ctx.in_class,
-            func: FunctionContext::Function,
+            func: if is_async {
+                FunctionContext::AsyncFunction
+            } else {
+                FunctionContext::Function
+            },
         };
 
         // We must have at least one generator:
         assert!(!generators.is_empty());
 
+        let flags = bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED;
+        let flags = if is_async {
+            flags | bytecode::CodeFlags::IS_COROUTINE
+        } else {
+            flags
+        };
+
         // Create magnificent function <listcomp>:
-        self.push_output(
-            bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED,
-            1,
-            1,
-            0,
-            name.to_owned(),
-        );
+        self.push_output(flags, 1, 1, 0, name.to_owned());
         let arg0 = self.varname(".0")?;
 
         let return_none = init_collection.is_none();
@@ -2657,12 +2663,10 @@ impl Compiler {
 
         let mut loop_labels = vec![];
         for generator in generators {
-            if generator.is_async {
-                unimplemented!("async for comprehensions");
-            }
-
             let loop_block = self.new_block();
             let after_block = self.new_block();
+
+            // emit!(self, Instruction::SetupLoop);
 
             if loop_labels.is_empty() {
                 // Load iterator onto stack (passed as first argument):
@@ -2672,20 +2676,36 @@ impl Compiler {
                 self.compile_expression(&generator.iter)?;
 
                 // Get iterator / turn item into an iterator
-                emit!(self, Instruction::GetIter);
+                if generator.is_async {
+                    emit!(self, Instruction::GetAIter);
+                } else {
+                    emit!(self, Instruction::GetIter);
+                }
             }
 
             loop_labels.push((loop_block, after_block));
-
             self.switch_to_block(loop_block);
-            emit!(
-                self,
-                Instruction::ForIter {
-                    target: after_block,
-                }
-            );
-
-            self.compile_store(&generator.target)?;
+            if generator.is_async {
+                emit!(
+                    self,
+                    Instruction::SetupExcept {
+                        handler: after_block,
+                    }
+                );
+                emit!(self, Instruction::GetANext);
+                self.emit_constant(ConstantData::None);
+                emit!(self, Instruction::YieldFrom);
+                self.compile_store(&generator.target)?;
+                emit!(self, Instruction::PopBlock);
+            } else {
+                emit!(
+                    self,
+                    Instruction::ForIter {
+                        target: after_block,
+                    }
+                );
+                self.compile_store(&generator.target)?;
+            }
 
             // Now evaluate the ifs:
             for if_condition in &generator.ifs {
@@ -2701,6 +2721,9 @@ impl Compiler {
 
             // End of for loop:
             self.switch_to_block(after_block);
+            if is_async {
+                emit!(self, Instruction::EndAsyncFor);
+            }
         }
 
         if return_none {
@@ -2737,10 +2760,19 @@ impl Compiler {
         self.compile_expression(&generators[0].iter)?;
 
         // Get iterator / turn item into an iterator
-        emit!(self, Instruction::GetIter);
+        if is_async {
+            emit!(self, Instruction::GetAIter);
+        } else {
+            emit!(self, Instruction::GetIter);
+        };
 
         // Call just created <listcomp> function:
         emit!(self, Instruction::CallFunctionPositional { nargs: 1 });
+        if is_async {
+            emit!(self, Instruction::GetAwaitable);
+            self.emit_constant(ConstantData::None);
+            emit!(self, Instruction::YieldFrom);
+        }
         Ok(())
     }
 
@@ -2875,10 +2907,17 @@ impl EmitArg<bytecode::Label> for ir::BlockIdx {
     }
 }
 
-fn split_doc(body: &[located_ast::Stmt]) -> (Option<String>, &[located_ast::Stmt]) {
+fn split_doc<'a>(
+    body: &'a [located_ast::Stmt],
+    opts: &CompileOpts,
+) -> (Option<String>, &'a [located_ast::Stmt]) {
     if let Some((located_ast::Stmt::Expr(expr), body_rest)) = body.split_first() {
         if let Some(doc) = try_get_constant_string(std::slice::from_ref(&expr.value)) {
-            return (Some(doc), body_rest);
+            if opts.optimize < 2 {
+                return (Some(doc), body_rest);
+            } else {
+                return (None, body_rest);
+            }
         }
     }
     (None, body)
