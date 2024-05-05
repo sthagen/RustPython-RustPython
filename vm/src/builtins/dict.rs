@@ -12,15 +12,13 @@ use crate::{
     class::{PyClassDef, PyClassImpl},
     common::ascii,
     dictdatatype::{self, DictKey},
-    function::{
-        ArgIterable, FuncArgs, KwArgs, OptionalArg, PyArithmeticValue::*, PyComparisonValue,
-    },
+    function::{ArgIterable, KwArgs, OptionalArg, PyArithmeticValue::*, PyComparisonValue},
     iter::PyExactSizeIterator,
     protocol::{PyIterIter, PyIterReturn, PyMappingMethods, PyNumberMethods, PySequenceMethods},
     recursion::ReprGuard,
     types::{
-        AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, Initializer, IterNext,
-        Iterable, PyComparisonOp, Representable, SelfIter, Unconstructible,
+        AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, DefaultConstructor,
+        Initializer, IterNext, Iterable, PyComparisonOp, Representable, SelfIter, Unconstructible,
     },
     vm::VirtualMachine,
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
@@ -109,43 +107,6 @@ impl PyDict {
             return Err(vm.new_runtime_error("dict mutated during update".to_owned()));
         }
         Ok(())
-    }
-
-    fn inner_cmp(
-        zelf: &Py<Self>,
-        other: &Py<PyDict>,
-        op: PyComparisonOp,
-        item: bool,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyComparisonValue> {
-        if op == PyComparisonOp::Ne {
-            return Self::inner_cmp(zelf, other, PyComparisonOp::Eq, item, vm)
-                .map(|x| x.map(|eq| !eq));
-        }
-        if !op.eval_ord(zelf.len().cmp(&other.len())) {
-            return Ok(Implemented(false));
-        }
-        let (superset, subset) = if zelf.len() < other.len() {
-            (other, zelf)
-        } else {
-            (zelf, other)
-        };
-        for (k, v1) in subset {
-            match superset.get_item_opt(&*k, vm)? {
-                Some(v2) => {
-                    if v1.is(&v2) {
-                        continue;
-                    }
-                    if item && !vm.bool_eq(&v1, &v2)? {
-                        return Ok(Implemented(false));
-                    }
-                }
-                None => {
-                    return Ok(Implemented(false));
-                }
-            }
-        }
-        Ok(Implemented(true))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -320,23 +281,6 @@ impl PyDict {
     }
 
     #[pymethod(magic)]
-    fn ior(zelf: PyRef<Self>, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        zelf.merge_object(other, vm)?;
-        Ok(zelf)
-    }
-
-    #[pymethod(magic)]
-    fn ror(zelf: PyRef<Self>, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-        let dicted: Result<PyDictRef, _> = other.downcast();
-        if let Ok(other) = dicted {
-            let other_cp = other.copy();
-            other_cp.merge_dict(zelf, vm)?;
-            return Ok(other_cp.into_pyobject(vm));
-        }
-        Ok(vm.ctx.not_implemented())
-    }
-
-    #[pymethod(magic)]
     fn or(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         let dicted: Result<PyDictRef, _> = other.downcast();
         if let Ok(other) = dicted {
@@ -380,6 +324,43 @@ impl PyDict {
 
 #[pyclass]
 impl Py<PyDict> {
+    fn inner_cmp(
+        &self,
+        other: &Py<PyDict>,
+        op: PyComparisonOp,
+        item: bool,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyComparisonValue> {
+        if op == PyComparisonOp::Ne {
+            return Self::inner_cmp(self, other, PyComparisonOp::Eq, item, vm)
+                .map(|x| x.map(|eq| !eq));
+        }
+        if !op.eval_ord(self.len().cmp(&other.len())) {
+            return Ok(Implemented(false));
+        }
+        let (superset, subset) = if self.len() < other.len() {
+            (other, self)
+        } else {
+            (self, other)
+        };
+        for (k, v1) in subset {
+            match superset.get_item_opt(&*k, vm)? {
+                Some(v2) => {
+                    if v1.is(&v2) {
+                        continue;
+                    }
+                    if item && !vm.bool_eq(&v1, &v2)? {
+                        return Ok(Implemented(false));
+                    }
+                }
+                None => {
+                    return Ok(Implemented(false));
+                }
+            }
+        }
+        Ok(Implemented(true))
+    }
+
     #[pymethod(magic)]
     #[cfg_attr(feature = "flame-it", flame("PyDictRef"))]
     fn getitem(&self, key: PyObjectRef, vm: &VirtualMachine) -> PyResult {
@@ -408,17 +389,26 @@ impl PyRef<PyDict> {
     fn reversed(self) -> PyDictReverseKeyIterator {
         PyDictReverseKeyIterator::new(self)
     }
-}
 
-impl Constructor for PyDict {
-    type Args = FuncArgs;
+    #[pymethod(magic)]
+    fn ior(self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
+        self.merge_object(other, vm)?;
+        Ok(self)
+    }
 
-    fn py_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        PyDict::default()
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+    #[pymethod(magic)]
+    fn ror(self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        let dicted: Result<PyDictRef, _> = other.downcast();
+        if let Ok(other) = dicted {
+            let other_cp = other.copy();
+            other_cp.merge_dict(self, vm)?;
+            return Ok(other_cp.into_pyobject(vm));
+        }
+        Ok(vm.ctx.not_implemented())
     }
 }
+
+impl DefaultConstructor for PyDict {}
 
 impl Initializer for PyDict {
     type Args = (OptionalArg<PyObjectRef>, KwArgs);
@@ -476,7 +466,7 @@ impl AsNumber for PyDict {
             }),
             inplace_or: Some(|a, b, vm| {
                 if let Some(a) = a.downcast_ref::<PyDict>() {
-                    PyDict::ior(a.to_owned(), b.to_pyobject(vm), vm).map(|d| d.into())
+                    a.to_owned().ior(b.to_pyobject(vm), vm).map(|d| d.into())
                 } else {
                     Ok(vm.ctx.not_implemented())
                 }
@@ -496,7 +486,7 @@ impl Comparable for PyDict {
     ) -> PyResult<PyComparisonValue> {
         op.eq_only(|| {
             let other = class_or_notimplemented!(Self, other);
-            Self::inner_cmp(zelf, other, PyComparisonOp::Eq, true, vm)
+            zelf.inner_cmp(other, PyComparisonOp::Eq, true, vm)
         })
     }
 }
@@ -835,7 +825,7 @@ macro_rules! dict_view {
             }
         }
 
-        #[pyclass(with(Constructor, IterNext, Iterable))]
+        #[pyclass(with(Unconstructible, IterNext, Iterable))]
         impl $iter_name {
             fn new(dict: PyDictRef) -> Self {
                 $iter_name {
@@ -908,7 +898,7 @@ macro_rules! dict_view {
             }
         }
 
-        #[pyclass(with(Constructor, IterNext, Iterable))]
+        #[pyclass(with(Unconstructible, IterNext, Iterable))]
         impl $reverse_iter_name {
             fn new(dict: PyDictRef) -> Self {
                 let size = dict.size();
@@ -1076,8 +1066,7 @@ trait ViewSetOps: DictView {
     ) -> PyResult<PyComparisonValue> {
         match_class!(match other {
             ref dictview @ Self => {
-                return PyDict::inner_cmp(
-                    zelf.dict(),
+                return zelf.dict().inner_cmp(
                     dictview.dict(),
                     op,
                     !zelf.class().is(vm.ctx.types.dict_keys_type),
@@ -1114,7 +1103,7 @@ trait ViewSetOps: DictView {
 impl ViewSetOps for PyDictKeys {}
 #[pyclass(with(
     DictView,
-    Constructor,
+    Unconstructible,
     Comparable,
     Iterable,
     ViewSetOps,
@@ -1178,7 +1167,7 @@ impl AsNumber for PyDictKeys {
 impl ViewSetOps for PyDictItems {}
 #[pyclass(with(
     DictView,
-    Constructor,
+    Unconstructible,
     Comparable,
     Iterable,
     ViewSetOps,
@@ -1253,7 +1242,7 @@ impl AsNumber for PyDictItems {
     }
 }
 
-#[pyclass(with(DictView, Constructor, Iterable, AsSequence, Representable))]
+#[pyclass(with(DictView, Unconstructible, Iterable, AsSequence, Representable))]
 impl PyDictValues {
     #[pygetset]
     fn mapping(zelf: PyRef<Self>) -> PyMappingProxy {
