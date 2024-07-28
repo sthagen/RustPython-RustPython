@@ -244,11 +244,8 @@ mod _io {
 
         fn write(&mut self, data: &[u8]) -> Option<u64> {
             let length = data.len();
-
-            match self.cursor.write_all(data) {
-                Ok(_) => Some(length as u64),
-                Err(_) => None,
-            }
+            self.cursor.write_all(data).ok()?;
+            Some(length as u64)
         }
 
         //return the entire contents of the underlying
@@ -891,7 +888,8 @@ mod _io {
         }
 
         fn raw_tell(&mut self, vm: &VirtualMachine) -> PyResult<Offset> {
-            let ret = vm.call_method(self.check_init(vm)?, "tell", ())?;
+            let raw = self.check_init(vm)?;
+            let ret = vm.call_method(raw, "tell", ())?;
             let offset = get_offset(ret, vm)?;
             if offset < 0 {
                 return Err(
@@ -1474,7 +1472,14 @@ mod _io {
         #[pymethod]
         fn tell(&self, vm: &VirtualMachine) -> PyResult<Offset> {
             let mut data = self.lock(vm)?;
-            Ok(data.raw_tell(vm)? - data.raw_offset())
+            let raw_tell = data.raw_tell(vm)?;
+            let raw_offset = data.raw_offset();
+            let mut pos = raw_tell - raw_offset;
+            // GH-95782
+            if pos < 0 {
+                pos = 0;
+            }
+            Ok(pos)
         }
         #[pymethod]
         fn truncate(
@@ -1868,17 +1873,16 @@ mod _io {
 
     #[derive(FromArgs)]
     struct TextIOWrapperArgs {
-        buffer: PyObjectRef,
         #[pyarg(any, default)]
         encoding: Option<PyStrRef>,
         #[pyarg(any, default)]
         errors: Option<PyStrRef>,
         #[pyarg(any, default)]
-        newline: Newlines,
-        #[pyarg(any, default = "false")]
-        line_buffering: bool,
-        #[pyarg(any, default = "false")]
-        write_through: bool,
+        newline: Option<Newlines>,
+        #[pyarg(any, default)]
+        line_buffering: Option<bool>,
+        #[pyarg(any, default)]
+        write_through: Option<bool>,
     }
 
     #[derive(Debug, Copy, Clone, Default)]
@@ -2196,9 +2200,13 @@ mod _io {
     impl DefaultConstructor for TextIOWrapper {}
 
     impl Initializer for TextIOWrapper {
-        type Args = TextIOWrapperArgs;
+        type Args = (PyObjectRef, TextIOWrapperArgs);
 
-        fn init(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
+        fn init(
+            zelf: PyRef<Self>,
+            (buffer, args): Self::Args,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
             let mut data = zelf.lock_opt(vm)?;
             *data = None;
 
@@ -2218,37 +2226,10 @@ mod _io {
                 .errors
                 .unwrap_or_else(|| PyStr::from("strict").into_ref(&vm.ctx));
 
-            let buffer = args.buffer;
-
             let has_read1 = vm.get_attribute_opt(buffer.clone(), "read1")?.is_some();
             let seekable = vm.call_method(&buffer, "seekable", ())?.try_to_bool(vm)?;
 
-            let codec = vm.state.codec_registry.lookup(encoding.as_str(), vm)?;
-
-            let encoder = if vm.call_method(&buffer, "writable", ())?.try_to_bool(vm)? {
-                let incremental_encoder =
-                    codec.get_incremental_encoder(Some(errors.clone()), vm)?;
-                let encoding_name = vm.get_attribute_opt(incremental_encoder.clone(), "name")?;
-                let encodefunc = encoding_name.and_then(|name| {
-                    let name = name.payload::<PyStr>()?;
-                    match name.as_str() {
-                        "utf-8" => Some(textio_encode_utf8 as EncodeFunc),
-                        _ => None,
-                    }
-                });
-                Some((incremental_encoder, encodefunc))
-            } else {
-                None
-            };
-
-            let decoder = if vm.call_method(&buffer, "readable", ())?.try_to_bool(vm)? {
-                let incremental_decoder =
-                    codec.get_incremental_decoder(Some(errors.clone()), vm)?;
-                // TODO: wrap in IncrementalNewlineDecoder if newlines == Universal | Passthrough
-                Some(incremental_decoder)
-            } else {
-                None
-            };
+            let (encoder, decoder) = Self::find_coder(&buffer, encoding.as_str(), &errors, vm)?;
 
             *data = Some(TextIOData {
                 buffer,
@@ -2256,9 +2237,9 @@ mod _io {
                 decoder,
                 encoding,
                 errors,
-                newline: args.newline,
-                line_buffering: args.line_buffering,
-                write_through: args.write_through,
+                newline: args.newline.unwrap_or_default(),
+                line_buffering: args.line_buffering.unwrap_or_default(),
+                write_through: args.write_through.unwrap_or_default(),
                 chunk_size: 8192,
                 seekable,
                 has_read1,
@@ -2290,10 +2271,75 @@ mod _io {
             PyThreadMutexGuard::try_map(lock, |x| x.as_mut())
                 .map_err(|_| vm.new_value_error("I/O operation on uninitialized object".to_owned()))
         }
+
+        #[allow(clippy::type_complexity)]
+        fn find_coder(
+            buffer: &PyObject,
+            encoding: &str,
+            errors: &Py<PyStr>,
+            vm: &VirtualMachine,
+        ) -> PyResult<(
+            Option<(PyObjectRef, Option<EncodeFunc>)>,
+            Option<PyObjectRef>,
+        )> {
+            let codec = vm.state.codec_registry.lookup(encoding, vm)?;
+
+            let encoder = if vm.call_method(buffer, "writable", ())?.try_to_bool(vm)? {
+                let incremental_encoder =
+                    codec.get_incremental_encoder(Some(errors.to_owned()), vm)?;
+                let encoding_name = vm.get_attribute_opt(incremental_encoder.clone(), "name")?;
+                let encodefunc = encoding_name.and_then(|name| {
+                    let name = name.payload::<PyStr>()?;
+                    match name.as_str() {
+                        "utf-8" => Some(textio_encode_utf8 as EncodeFunc),
+                        _ => None,
+                    }
+                });
+                Some((incremental_encoder, encodefunc))
+            } else {
+                None
+            };
+
+            let decoder = if vm.call_method(buffer, "readable", ())?.try_to_bool(vm)? {
+                let incremental_decoder =
+                    codec.get_incremental_decoder(Some(errors.to_owned()), vm)?;
+                // TODO: wrap in IncrementalNewlineDecoder if newlines == Universal | Passthrough
+                Some(incremental_decoder)
+            } else {
+                None
+            };
+            Ok((encoder, decoder))
+        }
     }
 
     #[pyclass(with(Constructor, Initializer), flags(BASETYPE))]
     impl TextIOWrapper {
+        #[pymethod]
+        fn reconfigure(&self, args: TextIOWrapperArgs, vm: &VirtualMachine) -> PyResult<()> {
+            let mut data = self.data.lock().unwrap();
+            if let Some(data) = data.as_mut() {
+                if let Some(encoding) = args.encoding {
+                    let (encoder, decoder) =
+                        Self::find_coder(&data.buffer, encoding.as_str(), &data.errors, vm)?;
+                    data.encoding = encoding;
+                    data.encoder = encoder;
+                    data.decoder = decoder;
+                }
+                if let Some(errors) = args.errors {
+                    data.errors = errors;
+                }
+                if let Some(newline) = args.newline {
+                    data.newline = newline;
+                }
+                if let Some(line_buffering) = args.line_buffering {
+                    data.line_buffering = line_buffering;
+                }
+                if let Some(write_through) = args.write_through {
+                    data.write_through = write_through;
+                }
+            }
+            Ok(())
+        }
         #[pymethod]
         fn seekable(&self, vm: &VirtualMachine) -> PyResult {
             let textio = self.lock(vm)?;
