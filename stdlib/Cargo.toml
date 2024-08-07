@@ -1,6 +1,6 @@
 [package]
 name = "rustpython-stdlib"
-version = "0.3.1"
+version = "0.4.0"
 description = "RustPython standard libraries in Rust."
 authors = ["RustPython Team"]
 repository = "https://github.com/RustPython/RustPython"
@@ -10,6 +10,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
+default = ["compiler"]
+compiler = ["rustpython-vm/compiler"]
 threading = ["rustpython-common/threading", "rustpython-vm/threading"]
 zlib = ["libz-sys", "flate2/zlib"]
 bz2 = ["bzip2"]
