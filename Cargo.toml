@@ -102,7 +102,7 @@ members = [
 [workspace.package]
 version = "0.4.0"
 authors = ["RustPython Team"]
-edition = "2021"
+edition = "2024"
 rust-version = "1.85.0"
 repository = "https://github.com/RustPython/RustPython"
 license = "MIT"
@@ -189,13 +189,6 @@ wasm-bindgen = "0.2.100"
 [workspace.lints.rust]
 unsafe_code = "allow"
 unsafe_op_in_unsafe_fn = "deny"
-
-# rust_2024_compatibility
-missing_unsafe_on_extern = "deny"
-unsafe_attr_outside_unsafe = "deny"
-deprecated_safe_2024 = "deny"
-rust_2024_incompatible_pat = "deny"
-keyword_idents_2024 = "deny"
 
 [workspace.lints.clippy]
 perf = "warn"
