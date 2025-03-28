@@ -57,6 +57,13 @@ impl<'a> TryFromBorrowedObject<'a> for &'a str {
     }
 }
 
+impl<'a> TryFromBorrowedObject<'a> for &'a Wtf8 {
+    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &'a PyObject) -> PyResult<Self> {
+        let pystr: &Py<PyStr> = TryFromBorrowedObject::try_from_borrowed_object(vm, obj)?;
+        Ok(pystr.as_wtf8())
+    }
+}
+
 #[pyclass(module = false, name = "str")]
 pub struct PyStr {
     data: StrData,
@@ -424,6 +431,23 @@ impl PyStr {
         self.data.as_str()
     }
 
+    pub fn try_to_str(&self, vm: &VirtualMachine) -> PyResult<&str> {
+        self.to_str().ok_or_else(|| {
+            let start = self
+                .as_wtf8()
+                .code_points()
+                .position(|c| c.to_char().is_none())
+                .unwrap();
+            vm.new_unicode_encode_error_real(
+                identifier!(vm, utf_8).to_owned(),
+                vm.ctx.new_str(self.data.clone()),
+                start,
+                start + 1,
+                vm.ctx.new_str("surrogates not allowed"),
+            )
+        })
+    }
+
     pub fn to_string_lossy(&self) -> Cow<'_, str> {
         self.to_str()
             .map(Cow::Borrowed)
@@ -590,11 +614,7 @@ impl PyStr {
     #[inline]
     pub(crate) fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
         use crate::literal::escape::UnicodeEscape;
-        if !self.kind().is_utf8() {
-            return Ok(format!("{:?}", self.as_wtf8()));
-        }
-        let escape = UnicodeEscape::new_repr(self.as_str());
-        escape
+        UnicodeEscape::new_repr(self.as_wtf8())
             .str_repr()
             .to_string()
             .ok_or_else(|| vm.new_overflow_error("string is too long to generate repr".to_owned()))
@@ -850,9 +870,9 @@ impl PyStr {
     /// If the string starts with the prefix string, return string[len(prefix):]
     /// Otherwise, return a copy of the original string.
     #[pymethod]
-    fn removeprefix(&self, pref: PyStrRef) -> String {
-        self.as_str()
-            .py_removeprefix(pref.as_str(), pref.byte_len(), |s, p| s.starts_with(p))
+    fn removeprefix(&self, pref: PyStrRef) -> Wtf8Buf {
+        self.as_wtf8()
+            .py_removeprefix(pref.as_wtf8(), pref.byte_len(), |s, p| s.starts_with(p))
             .to_owned()
     }
 
@@ -861,9 +881,9 @@ impl PyStr {
     /// If the string ends with the suffix string, return string[:len(suffix)]
     /// Otherwise, return a copy of the original string.
     #[pymethod]
-    fn removesuffix(&self, suffix: PyStrRef) -> String {
-        self.as_str()
-            .py_removesuffix(suffix.as_str(), suffix.byte_len(), |s, p| s.ends_with(p))
+    fn removesuffix(&self, suffix: PyStrRef) -> Wtf8Buf {
+        self.as_wtf8()
+            .py_removesuffix(suffix.as_wtf8(), suffix.byte_len(), |s, p| s.ends_with(p))
             .to_owned()
     }
 
@@ -1294,7 +1314,8 @@ impl PyStr {
 
     #[pymethod]
     fn isidentifier(&self) -> bool {
-        let mut chars = self.as_str().chars();
+        let Some(s) = self.to_str() else { return false };
+        let mut chars = s.chars();
         let is_identifier_start = chars.next().is_some_and(|c| c == '_' || is_xid_start(c));
         // a string is not an identifier if it has whitespace or starts with a number
         is_identifier_start && chars.all(is_xid_continue)
@@ -1812,6 +1833,18 @@ impl AsRef<str> for PyRefExact<PyStr> {
 impl AsRef<str> for PyExact<PyStr> {
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl AsRef<Wtf8> for PyRefExact<PyStr> {
+    fn as_ref(&self) -> &Wtf8 {
+        self.as_wtf8()
+    }
+}
+
+impl AsRef<Wtf8> for PyExact<PyStr> {
+    fn as_ref(&self) -> &Wtf8 {
+        self.as_wtf8()
     }
 }
 
