@@ -1,3 +1,5 @@
+// cspell:disable
+
 //! An implementation of [WTF-8], a utf8-compatible encoding that allows for
 //! unpaired surrogate codepoints. This implementation additionally allows for
 //! paired surrogates that are nonetheless treated as two separate codepoints.
@@ -757,7 +759,7 @@ impl Wtf8 {
 
     /// Create a WTF-8 slice from a WTF-8 byte slice.
     //
-    // whooops! using WTF-8 for interchange!
+    // whoops! using WTF-8 for interchange!
     #[inline]
     pub fn from_bytes(b: &[u8]) -> Option<&Self> {
         let mut rest = b;
