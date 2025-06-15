@@ -152,7 +152,8 @@ pub fn run_shell(vm: &VirtualMachine, scope: Scope) -> PyResult<()> {
         continuing_line = false;
         let result = match repl.readline(prompt) {
             ReadlineResult::Line(line) => {
-                debug!("You entered {:?}", line);
+                #[cfg(debug_assertions)]
+                debug!("You entered {line:?}");
 
                 repl.add_history_entry(line.trim_end()).unwrap();
 
