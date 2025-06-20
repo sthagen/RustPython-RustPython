@@ -425,8 +425,6 @@ class ExceptionTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, 'Windows Error 0x%x' % code):
             ctypes.pythonapi.PyErr_SetFromWindowsErr(code)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def testAttributes(self):
         # test that exception attributes are happy
 
@@ -2351,8 +2349,6 @@ class AttributeErrorTests(unittest.TestCase):
 
 
 class ImportErrorTests(unittest.TestCase):
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_attributes(self):
         # Setting 'name' and 'path' should not be a problem.
         exc = ImportError('test')
@@ -2387,8 +2383,6 @@ class ImportErrorTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, msg):
             ImportError('test', invalid='keyword', another=True)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_reset_attributes(self):
         exc = ImportError('test', name='name', path='path')
         self.assertEqual(exc.args, ('test',))
@@ -2567,8 +2561,6 @@ class SyntaxErrorTests(unittest.TestCase):
         finally:
             unlink(TESTFN)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_attributes_new_constructor(self):
         args = ("bad.py", 1, 2, "abcdefg", 1, 100)
         the_exception = SyntaxError("bad bad", args)
@@ -2581,8 +2573,6 @@ class SyntaxErrorTests(unittest.TestCase):
         self.assertEqual(error, the_exception.text)
         self.assertEqual("bad bad", the_exception.msg)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_attributes_old_constructor(self):
         args = ("bad.py", 1, 2, "abcdefg")
         the_exception = SyntaxError("bad bad", args)

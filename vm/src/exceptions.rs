@@ -1308,17 +1308,21 @@ pub(super) mod types {
             args: ::rustpython_vm::function::FuncArgs,
             vm: &::rustpython_vm::VirtualMachine,
         ) -> ::rustpython_vm::PyResult<()> {
-            zelf.set_attr(
-                "name",
-                vm.unwrap_or_none(args.kwargs.get("name").cloned()),
-                vm,
-            )?;
-            zelf.set_attr(
-                "path",
-                vm.unwrap_or_none(args.kwargs.get("path").cloned()),
-                vm,
-            )?;
-            Ok(())
+            let mut kwargs = args.kwargs.clone();
+            let name = kwargs.swap_remove("name");
+            let path = kwargs.swap_remove("path");
+
+            // Check for any remaining invalid keyword arguments
+            if let Some(invalid_key) = kwargs.keys().next() {
+                return Err(vm.new_type_error(format!(
+                    "'{}' is an invalid keyword argument for ImportError",
+                    invalid_key
+                )));
+            }
+
+            zelf.set_attr("name", vm.unwrap_or_none(name), vm)?;
+            zelf.set_attr("path", vm.unwrap_or_none(path), vm)?;
+            PyBaseException::slot_init(zelf, args, vm)
         }
         #[pymethod(magic)]
         fn reduce(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyTupleRef {
@@ -1602,6 +1606,44 @@ pub(super) mod types {
 
     #[pyexception]
     impl PySyntaxError {
+        #[pyslot]
+        #[pymethod(name = "__init__")]
+        fn slot_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+            let len = args.args.len();
+            let new_args = args;
+
+            zelf.set_attr("print_file_and_line", vm.ctx.none(), vm)?;
+
+            if len == 2 {
+                if let Ok(location_tuple) = new_args.args[1]
+                    .clone()
+                    .downcast::<crate::builtins::PyTuple>()
+                {
+                    #[allow(clippy::len_zero)]
+                    if location_tuple.len() >= 1 {
+                        zelf.set_attr("filename", location_tuple.fast_getitem(0).clone(), vm)?;
+                    }
+                    if location_tuple.len() >= 2 {
+                        zelf.set_attr("lineno", location_tuple.fast_getitem(1).clone(), vm)?;
+                    }
+                    if location_tuple.len() >= 3 {
+                        zelf.set_attr("offset", location_tuple.fast_getitem(2).clone(), vm)?;
+                    }
+                    if location_tuple.len() >= 4 {
+                        zelf.set_attr("text", location_tuple.fast_getitem(3).clone(), vm)?;
+                    }
+                    if location_tuple.len() >= 5 {
+                        zelf.set_attr("end_lineno", location_tuple.fast_getitem(4).clone(), vm)?;
+                    }
+                    if location_tuple.len() >= 6 {
+                        zelf.set_attr("end_offset", location_tuple.fast_getitem(5).clone(), vm)?;
+                    }
+                }
+            }
+
+            PyBaseException::slot_init(zelf, new_args, vm)
+        }
+
         #[pymethod(magic)]
         fn str(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyStrRef {
             fn basename(filename: &str) -> &str {
@@ -1712,7 +1754,8 @@ pub(super) mod types {
             type Args = (PyStrRef, ArgBytesLike, isize, isize, PyStrRef);
             let (encoding, object, start, end, reason): Args = args.bind(vm)?;
             zelf.set_attr("encoding", encoding, vm)?;
-            zelf.set_attr("object", object, vm)?;
+            let object_as_bytes = vm.ctx.new_bytes(object.borrow_buf().to_vec());
+            zelf.set_attr("object", object_as_bytes, vm)?;
             zelf.set_attr("start", vm.ctx.new_int(start), vm)?;
             zelf.set_attr("end", vm.ctx.new_int(end), vm)?;
             zelf.set_attr("reason", reason, vm)?;
