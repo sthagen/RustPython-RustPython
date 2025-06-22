@@ -718,8 +718,6 @@ class StructTest(unittest.TestCase):
                     cls.x = 1
 
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_issue35714(self):
         # Embedded null characters should not be allowed in format strings.
         for s in '\0', '2\0i', b'\0':
@@ -790,8 +788,6 @@ class StructTest(unittest.TestCase):
         my_struct = MyStruct()
         self.assertEqual(my_struct.pack(12345), b'\x30\x39')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_repr(self):
         s = struct.Struct('=i2H')
         self.assertEqual(repr(s), f'Struct({s.format!r})')
@@ -822,8 +818,6 @@ class UnpackIteratorTest(unittest.TestCase):
         with self.assertRaises(struct.error):
             s.iter_unpack(b"12")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_uninstantiable(self):
         iter_unpack_type = type(struct.Struct(">ibcp").iter_unpack(b""))
         self.assertRaises(TypeError, iter_unpack_type)
