@@ -6,11 +6,12 @@ pub(crate) use _hashlib::make_module;
 pub mod _hashlib {
     use crate::common::lock::PyRwLock;
     use crate::vm::{
-        PyObjectRef, PyPayload, PyResult, VirtualMachine,
+        Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
         builtins::{PyBytes, PyStrRef, PyTypeRef},
         convert::ToPyObject,
         function::{ArgBytesLike, ArgStrOrBytesLike, FuncArgs, OptionalArg},
         protocol::PyBuffer,
+        types::Representable,
     };
     use blake2::{Blake2b512, Blake2s256};
     use digest::{DynDigest, core_api::BlockSizeUser};
@@ -96,7 +97,7 @@ pub mod _hashlib {
         }
     }
 
-    #[pyclass]
+    #[pyclass(with(Representable))]
     impl PyHasher {
         fn new(name: &str, d: HashWrapper) -> Self {
             PyHasher {
@@ -107,7 +108,7 @@ pub mod _hashlib {
 
         #[pyslot]
         fn slot_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            Err(vm.new_type_error("cannot create '_hashlib.HASH' instances".into()))
+            Err(vm.new_type_error("cannot create '_hashlib.HASH' instances"))
         }
 
         #[pygetset]
@@ -146,6 +147,15 @@ pub mod _hashlib {
         }
     }
 
+    impl Representable for PyHasher {
+        fn repr_str(zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<String> {
+            Ok(format!(
+                "<{} _hashlib.HASH object @ {:#x}>",
+                zelf.name, zelf as *const _ as usize
+            ))
+        }
+    }
+
     #[pyattr]
     #[pyclass(module = "_hashlib", name = "HASHXOF")]
     #[derive(PyPayload)]
@@ -171,7 +181,7 @@ pub mod _hashlib {
 
         #[pyslot]
         fn slot_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            Err(vm.new_type_error("cannot create '_hashlib.HASHXOF' instances".into()))
+            Err(vm.new_type_error("cannot create '_hashlib.HASHXOF' instances"))
         }
 
         #[pygetset]
@@ -337,7 +347,7 @@ pub mod _hashlib {
 
     #[pyfunction]
     fn hmac_new(_args: NewHMACHashArgs, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        Err(vm.new_type_error("cannot create 'hmac' instances".into())) // TODO: RUSTPYTHON support hmac
+        Err(vm.new_type_error("cannot create 'hmac' instances")) // TODO: RUSTPYTHON support hmac
     }
 
     pub trait ThreadSafeDynDigest: DynClone + DynDigest + Sync + Send {}
