@@ -14,6 +14,7 @@ pub struct PyFilter {
 }
 
 impl PyPayload for PyFilter {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.filter_type
     }
@@ -34,8 +35,8 @@ impl Constructor for PyFilter {
 
 #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
 impl PyFilter {
-    #[pymethod(magic)]
-    fn reduce(&self, vm: &VirtualMachine) -> (PyTypeRef, (PyObjectRef, PyIter)) {
+    #[pymethod]
+    fn __reduce__(&self, vm: &VirtualMachine) -> (PyTypeRef, (PyObjectRef, PyIter)) {
         (
             vm.ctx.types.filter_type.to_owned(),
             (self.predicate.clone(), self.iterator.clone()),

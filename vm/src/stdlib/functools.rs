@@ -100,8 +100,8 @@ mod _functools {
                 .into())
         }
 
-        #[pymethod(magic)]
-        fn setstate(zelf: &Py<Self>, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        #[pymethod]
+        fn __setstate__(zelf: &Py<Self>, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             let state_tuple = state
                 .downcast::<PyTuple>()
                 .map_err(|_| vm.new_type_error("argument to __setstate__ must be a tuple"))?;
@@ -286,11 +286,14 @@ mod _functools {
                         key.str(vm)?.as_str().to_owned()
                     };
                     let value_str = value.repr(vm)?;
-                    parts.push(format!("{}={}", key_part, value_str.as_str()));
+                    parts.push(format!(
+                        "{key_part}={value_str}",
+                        value_str = value_str.as_str()
+                    ));
                 }
 
                 let class_name = zelf.class().name();
-                let module = zelf.class().module(vm);
+                let module = zelf.class().__module__(vm);
 
                 let qualified_name = if zelf.class().is(PyPartial::class(&vm.ctx)) {
                     // For the base partial class, always use functools.partial
@@ -306,14 +309,17 @@ mod _functools {
                                     // For test modules, just use the class name without module prefix
                                     class_name.to_owned()
                                 }
-                                _ => format!("{}.{}", module_name, class_name),
+                                _ => format!("{module_name}.{class_name}"),
                             }
                         }
                         Err(_) => class_name.to_owned(),
                     }
                 };
 
-                Ok(format!("{}({})", qualified_name, parts.join(", ")))
+                Ok(format!(
+                    "{qualified_name}({parts})",
+                    parts = parts.join(", ")
+                ))
             } else {
                 Ok("...".to_owned())
             }

@@ -118,6 +118,7 @@ pub struct Frame {
 }
 
 impl PyPayload for Frame {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.frame_type
     }
@@ -349,7 +350,10 @@ impl ExecutingFrame<'_> {
     }
 
     fn run(&mut self, vm: &VirtualMachine) -> PyResult<ExecutionResult> {
-        flame_guard!(format!("Frame::run({})", self.code.obj_name));
+        flame_guard!(format!(
+            "Frame::run({obj_name})",
+            obj_name = self.code.obj_name
+        ));
         // Execute until return or exception:
         let instructions = &self.code.instructions;
         let mut arg_state = bytecode::OpArgState::default();
@@ -383,7 +387,7 @@ impl ExecutingFrame<'_> {
                         // 3. Unwind block stack till appropriate handler is found.
 
                         let loc = frame.code.locations[idx].clone();
-                        let next = exception.traceback();
+                        let next = exception.__traceback__();
                         let new_traceback =
                             PyTraceback::new(next, frame.object.to_owned(), frame.lasti(), loc.row);
                         vm_trace!("Adding to traceback: {:?} {:?}", new_traceback, loc.row);
@@ -941,7 +945,7 @@ impl ExecutingFrame<'_> {
                     .get_attr(identifier!(vm, __exit__), vm)
                     .map_err(|_exc| {
                         vm.new_type_error({
-                            format!("'{} (missed __exit__ method)", error_string())
+                            format!("{} (missed __exit__ method)", error_string())
                         })
                     })?;
                 self.push_value(exit);
@@ -968,7 +972,7 @@ impl ExecutingFrame<'_> {
                     .get_attr(identifier!(vm, __aexit__), vm)
                     .map_err(|_exc| {
                         vm.new_type_error({
-                            format!("'{} (missed __aexit__ method)", error_string())
+                            format!("{} (missed __aexit__ method)", error_string())
                         })
                     })?;
                 self.push_value(aexit);
@@ -1638,7 +1642,7 @@ impl ExecutingFrame<'_> {
         F: FnMut(PyObjectRef) -> PyResult<()>,
     {
         let Some(keys_method) = vm.get_method(mapping.clone(), vm.ctx.intern_str("keys")) else {
-            return Err(vm.new_type_error(format!("{} must be a mapping", error_prefix)));
+            return Err(vm.new_type_error(format!("{error_prefix} must be a mapping")));
         };
 
         let keys = keys_method?.call((), vm)?.get_iter(vm)?;
@@ -1708,7 +1712,7 @@ impl ExecutingFrame<'_> {
         #[cfg(debug_assertions)]
         debug!("Exception raised: {exception:?} with cause: {cause:?}");
         if let Some(cause) = cause {
-            exception.set_cause(cause);
+            exception.set___cause__(cause);
         }
         Err(exception)
     }

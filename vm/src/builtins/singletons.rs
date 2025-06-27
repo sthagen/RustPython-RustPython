@@ -12,6 +12,7 @@ use crate::{
 pub struct PyNone;
 
 impl PyPayload for PyNone {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.none_type
     }
@@ -44,8 +45,8 @@ impl Constructor for PyNone {
 
 #[pyclass(with(Constructor, AsNumber, Representable))]
 impl PyNone {
-    #[pymethod(magic)]
-    fn bool(&self) -> bool {
+    #[pymethod]
+    fn __bool__(&self) -> bool {
         false
     }
 }
@@ -77,6 +78,7 @@ impl AsNumber for PyNone {
 pub struct PyNotImplemented;
 
 impl PyPayload for PyNotImplemented {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.not_implemented_type
     }
@@ -95,13 +97,13 @@ impl PyNotImplemented {
     // TODO: As per https://bugs.python.org/issue35712, using NotImplemented
     // in boolean contexts will need to raise a DeprecationWarning in 3.9
     // and, eventually, a TypeError.
-    #[pymethod(magic)]
-    fn bool(&self) -> bool {
+    #[pymethod]
+    fn __bool__(&self) -> bool {
         true
     }
 
-    #[pymethod(magic)]
-    fn reduce(&self, vm: &VirtualMachine) -> PyStrRef {
+    #[pymethod]
+    fn __reduce__(&self, vm: &VirtualMachine) -> PyStrRef {
         vm.ctx.names.NotImplemented.to_owned()
     }
 }

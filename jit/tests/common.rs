@@ -77,9 +77,9 @@ impl StackMachine {
     }
 
     pub fn run(&mut self, code: CodeObject) {
-        let mut oparg_state = OpArgState::default();
+        let mut op_arg_state = OpArgState::default();
         let _ = code.instructions.iter().try_for_each(|&word| {
-            let (instruction, arg) = oparg_state.get(word);
+            let (instruction, arg) = op_arg_state.get(word);
             self.process_instruction(instruction, arg, &code.constants, &code.names)
         });
     }
@@ -172,7 +172,7 @@ impl StackMachine {
         if let Some(StackValue::Function(function)) = self.locals.get(name) {
             function.clone()
         } else {
-            panic!("There was no function named {}", name)
+            panic!("There was no function named {name}")
         }
     }
 }

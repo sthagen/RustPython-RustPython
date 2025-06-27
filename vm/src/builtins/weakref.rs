@@ -21,6 +21,7 @@ pub struct WeakNewArgs {
 }
 
 impl PyPayload for PyWeak {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.weakref_type
     }
@@ -52,8 +53,8 @@ impl Constructor for PyWeak {
     flags(BASETYPE)
 )]
 impl PyWeak {
-    #[pyclassmethod(magic)]
-    fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
+    #[pyclassmethod]
+    fn __class_getitem__(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
         PyGenericAlias::new(cls, args, vm)
     }
 }

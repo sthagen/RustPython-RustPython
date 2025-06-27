@@ -1,7 +1,7 @@
 /*! Python `attribute` descriptor class. (PyGetSet)
 
 */
-use super::{PyType, PyTypeRef};
+use super::PyType;
 use crate::{
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
     class::PyClassImpl,
@@ -39,6 +39,7 @@ impl std::fmt::Debug for PyGetSet {
 }
 
 impl PyPayload for PyGetSet {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.getset_type
     }
@@ -130,19 +131,20 @@ impl PyGetSet {
         Self::descr_set(&zelf, obj, PySetterValue::Delete, vm)
     }
 
-    #[pygetset(magic)]
-    fn name(&self) -> String {
+    #[pygetset]
+    fn __name__(&self) -> String {
         self.name.clone()
     }
 
-    #[pygetset(magic)]
-    fn qualname(&self) -> String {
+    #[pygetset]
+    fn __qualname__(&self) -> String {
         format!("{}.{}", self.class.slot_name(), self.name.clone())
     }
 
-    #[pygetset(magic)]
-    fn objclass(&self) -> PyTypeRef {
-        self.class.to_owned()
+    #[pymember]
+    fn __objclass__(vm: &VirtualMachine, zelf: PyObjectRef) -> PyResult {
+        let zelf: &Py<Self> = zelf.try_to_value(vm)?;
+        Ok(zelf.class.to_owned().into())
     }
 }
 impl Unconstructible for PyGetSet {}

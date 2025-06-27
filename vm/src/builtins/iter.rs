@@ -184,6 +184,7 @@ pub struct PySequenceIterator {
 }
 
 impl PyPayload for PySequenceIterator {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.iter_type
     }
@@ -199,8 +200,8 @@ impl PySequenceIterator {
         })
     }
 
-    #[pymethod(magic)]
-    fn length_hint(&self, vm: &VirtualMachine) -> PyObjectRef {
+    #[pymethod]
+    fn __length_hint__(&self, vm: &VirtualMachine) -> PyObjectRef {
         let internal = self.internal.lock();
         if let IterStatus::Active(obj) = &internal.status {
             let seq = PySequence {
@@ -215,13 +216,13 @@ impl PySequenceIterator {
         }
     }
 
-    #[pymethod(magic)]
-    fn reduce(&self, vm: &VirtualMachine) -> PyTupleRef {
+    #[pymethod]
+    fn __reduce__(&self, vm: &VirtualMachine) -> PyTupleRef {
         self.internal.lock().builtins_iter_reduce(|x| x.clone(), vm)
     }
 
-    #[pymethod(magic)]
-    fn setstate(&self, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+    #[pymethod]
+    fn __setstate__(&self, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         self.internal.lock().set_state(state, |_, pos| pos, vm)
     }
 }
@@ -247,6 +248,7 @@ pub struct PyCallableIterator {
 }
 
 impl PyPayload for PyCallableIterator {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.callable_iterator
     }

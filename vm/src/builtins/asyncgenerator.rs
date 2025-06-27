@@ -21,6 +21,7 @@ pub struct PyAsyncGen {
 type PyAsyncGenRef = PyRef<PyAsyncGen>;
 
 impl PyPayload for PyAsyncGen {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.async_generator
     }
@@ -39,13 +40,13 @@ impl PyAsyncGen {
         }
     }
 
-    #[pygetset(magic)]
-    fn name(&self) -> PyStrRef {
+    #[pygetset]
+    fn __name__(&self) -> PyStrRef {
         self.inner.name()
     }
 
-    #[pygetset(magic, setter)]
-    fn set_name(&self, name: PyStrRef) {
+    #[pygetset(setter)]
+    fn set___name__(&self, name: PyStrRef) {
         self.inner.set_name(name)
     }
 
@@ -66,21 +67,21 @@ impl PyAsyncGen {
         self.inner.frame().code.clone()
     }
 
-    #[pyclassmethod(magic)]
-    fn class_getitem(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
+    #[pyclassmethod]
+    fn __class_getitem__(cls: PyTypeRef, args: PyObjectRef, vm: &VirtualMachine) -> PyGenericAlias {
         PyGenericAlias::new(cls, args, vm)
     }
 }
 
 #[pyclass]
 impl PyRef<PyAsyncGen> {
-    #[pymethod(magic)]
-    fn aiter(self, _vm: &VirtualMachine) -> PyRef<PyAsyncGen> {
+    #[pymethod]
+    fn __aiter__(self, _vm: &VirtualMachine) -> PyRef<PyAsyncGen> {
         self
     }
 
-    #[pymethod(magic)]
-    fn anext(self, vm: &VirtualMachine) -> PyAsyncGenASend {
+    #[pymethod]
+    fn __anext__(self, vm: &VirtualMachine) -> PyAsyncGenASend {
         Self::asend(self, vm.ctx.none(), vm)
     }
 
@@ -141,6 +142,7 @@ impl Unconstructible for PyAsyncGen {}
 #[derive(Debug)]
 pub(crate) struct PyAsyncGenWrappedValue(pub PyObjectRef);
 impl PyPayload for PyAsyncGenWrappedValue {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.async_generator_wrapped_value
     }
@@ -190,6 +192,7 @@ pub(crate) struct PyAsyncGenASend {
 }
 
 impl PyPayload for PyAsyncGenASend {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.async_generator_asend
     }
@@ -283,6 +286,7 @@ pub(crate) struct PyAsyncGenAThrow {
 }
 
 impl PyPayload for PyAsyncGenAThrow {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.async_generator_athrow
     }

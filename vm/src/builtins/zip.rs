@@ -18,6 +18,7 @@ pub struct PyZip {
 }
 
 impl PyPayload for PyZip {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.zip_type
     }
@@ -43,8 +44,8 @@ impl Constructor for PyZip {
 
 #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
 impl PyZip {
-    #[pymethod(magic)]
-    fn reduce(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+    #[pymethod]
+    fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
         let cls = zelf.class().to_owned();
         let iterators = zelf
             .iterators
@@ -59,8 +60,8 @@ impl PyZip {
         })
     }
 
-    #[pymethod(magic)]
-    fn setstate(zelf: PyRef<Self>, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+    #[pymethod]
+    fn __setstate__(zelf: PyRef<Self>, state: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         if let Ok(obj) = ArgIntoBool::try_from_object(vm, state) {
             zelf.strict.store(obj.into(), atomic::Ordering::Release);
         }

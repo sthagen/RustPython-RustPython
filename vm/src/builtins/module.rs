@@ -17,9 +17,9 @@ pub struct PyModuleDef {
     // pub size: isize,
     pub methods: &'static [PyMethodDef],
     pub slots: PyModuleSlots,
-    // traverse: traverseproc
+    // traverse: traverse_proc
     // clear: inquiry
-    // free: freefunc
+    // free: free_func
 }
 
 pub type ModuleCreate =
@@ -54,6 +54,7 @@ pub struct PyModule {
 }
 
 impl PyPayload for PyModule {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.module_type
     }
@@ -168,8 +169,8 @@ impl PyModule {
         PyModule::new().into_ref_with_type(vm, cls).map(Into::into)
     }
 
-    #[pymethod(magic)]
-    fn dir(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
+    #[pymethod]
+    fn __dir__(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
         // First check if __dict__ attribute exists and is actually a dictionary
         let dict_attr = zelf.as_object().get_attr(identifier!(vm, __dict__), vm)?;
         let dict = dict_attr

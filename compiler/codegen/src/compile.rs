@@ -230,6 +230,7 @@ fn eprint_location(zelf: &Compiler<'_>) {
 }
 
 /// Better traceback for internal error
+#[track_caller]
 fn unwrap_internal<T>(zelf: &Compiler<'_>, r: InternalResult<T>) -> T {
     if let Err(ref r_err) = r {
         eprintln!("=== CODEGEN PANIC INFO ===");
@@ -489,6 +490,10 @@ impl Compiler<'_> {
         symbol_table: SymbolTable,
     ) -> CompileResult<()> {
         self.symbol_table_stack.push(symbol_table);
+
+        if Self::find_ann(body) {
+            emit!(self, Instruction::SetupAnnotation);
+        }
 
         if let Some((last, body)) = body.split_last() {
             for statement in body {
@@ -1705,11 +1710,6 @@ impl Compiler<'_> {
             func_flags |= bytecode::MakeFunctionFlags::CLOSURE;
         }
 
-        // Pop the special type params symbol table
-        if type_params.is_some() {
-            self.pop_symbol_table();
-        }
-
         self.emit_load_const(ConstantData::Code {
             code: Box::new(code),
         });
@@ -1727,6 +1727,11 @@ impl Compiler<'_> {
             CallType::Positional { nargs: 2 }
         };
         self.compile_normal_call(call);
+
+        // Pop the special type params symbol table
+        if type_params.is_some() {
+            self.pop_symbol_table();
+        }
 
         self.apply_decorators(decorator_list);
 
@@ -2361,7 +2366,7 @@ impl Compiler<'_> {
     //         self.jump_to_fail_pop(pc, JumpOp::PopJumpIfFalse)?;
     //     }
 
-    //     // Check that the number of subpatterns is not absurd.
+    //     // Check that the number of sub-patterns is not absurd.
     //     if size.saturating_sub(1) > (i32::MAX as usize) {
     //         panic!("too many sub-patterns in mapping pattern");
     //         // return self.compiler_error("too many sub-patterns in mapping pattern");
@@ -2469,27 +2474,27 @@ impl Compiler<'_> {
             emit!(self, Instruction::CopyItem { index: 1_u32 });
             self.compile_pattern(alt, pc)?;
 
-            let nstores = pc.stores.len();
+            let n_stores = pc.stores.len();
             if i == 0 {
                 // Save the captured names from the first alternative.
                 control = Some(pc.stores.clone());
             } else {
                 let control_vec = control.as_ref().unwrap();
-                if nstores != control_vec.len() {
+                if n_stores != control_vec.len() {
                     return Err(self.error(CodegenErrorType::ConflictingNameBindPattern));
-                } else if nstores > 0 {
+                } else if n_stores > 0 {
                     // Check that the names occur in the same order.
-                    for icontrol in (0..nstores).rev() {
-                        let name = &control_vec[icontrol];
+                    for i_control in (0..n_stores).rev() {
+                        let name = &control_vec[i_control];
                         // Find the index of `name` in the current stores.
-                        let istores =
+                        let i_stores =
                             pc.stores.iter().position(|n| n == name).ok_or_else(|| {
                                 self.error(CodegenErrorType::ConflictingNameBindPattern)
                             })?;
-                        if icontrol != istores {
+                        if i_control != i_stores {
                             // The orders differ; we must reorder.
-                            assert!(istores < icontrol, "expected istores < icontrol");
-                            let rotations = istores + 1;
+                            assert!(i_stores < i_control, "expected i_stores < i_control");
+                            let rotations = i_stores + 1;
                             // Rotate pc.stores: take a slice of the first `rotations` items...
                             let rotated = pc.stores[0..rotations].to_vec();
                             // Remove those elements.
@@ -2497,13 +2502,13 @@ impl Compiler<'_> {
                                 pc.stores.remove(0);
                             }
                             // Insert the rotated slice at the appropriate index.
-                            let insert_pos = icontrol - istores;
+                            let insert_pos = i_control - i_stores;
                             for (j, elem) in rotated.into_iter().enumerate() {
                                 pc.stores.insert(insert_pos + j, elem);
                             }
                             // Also perform the same rotation on the evaluation stack.
-                            for _ in 0..(istores + 1) {
-                                self.pattern_helper_rotate(icontrol + 1)?;
+                            for _ in 0..(i_stores + 1) {
+                                self.pattern_helper_rotate(i_control + 1)?;
                             }
                         }
                     }

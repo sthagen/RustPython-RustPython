@@ -58,8 +58,10 @@ unsafe impl crate::object::Traverse for PyType {
     }
 }
 
+// PyHeapTypeObject in CPython
 pub struct HeapTypeExt {
     pub name: PyRwLock<PyStrRef>,
+    pub qualname: PyRwLock<PyStrRef>,
     pub slots: Option<PyTupleTyped<PyStrRef>>,
     pub sequence_methods: PySequenceMethods,
     pub mapping_methods: PyMappingMethods,
@@ -137,8 +139,19 @@ impl fmt::Debug for PyType {
 }
 
 impl PyPayload for PyType {
+    #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.type_type
+    }
+}
+
+fn downcast_qualname(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<PyStr>> {
+    match value.downcast::<PyStr>() {
+        Ok(value) => Ok(value),
+        Err(value) => Err(vm.new_type_error(format!(
+            "can only assign string to __qualname__, not '{}'",
+            value.class().name()
+        ))),
     }
 }
 
@@ -170,7 +183,8 @@ impl PyType {
 
         let name = ctx.new_str(name);
         let heaptype_ext = HeapTypeExt {
-            name: PyRwLock::new(name),
+            name: PyRwLock::new(name.clone()),
+            qualname: PyRwLock::new(name),
             slots: None,
             sequence_methods: PySequenceMethods::default(),
             mapping_methods: PyMappingMethods::default(),
@@ -476,8 +490,8 @@ impl Py<PyType> {
     flags(BASETYPE)
 )]
 impl PyType {
-    #[pygetset(magic)]
-    fn bases(&self, vm: &VirtualMachine) -> PyTupleRef {
+    #[pygetset]
+    fn __bases__(&self, vm: &VirtualMachine) -> PyTupleRef {
         vm.ctx.new_tuple(
             self.bases
                 .read()
@@ -541,18 +555,18 @@ impl PyType {
         Ok(())
     }
 
-    #[pygetset(magic)]
-    fn base(&self) -> Option<PyTypeRef> {
+    #[pygetset]
+    fn __base__(&self) -> Option<PyTypeRef> {
         self.base.clone()
     }
 
-    #[pygetset(magic)]
-    fn flags(&self) -> u64 {
+    #[pygetset]
+    fn __flags__(&self) -> u64 {
         self.slots.flags.bits()
     }
 
-    #[pygetset(magic)]
-    fn basicsize(&self) -> usize {
+    #[pygetset]
+    fn __basicsize__(&self) -> usize {
         self.slots.basicsize
     }
 
@@ -574,25 +588,18 @@ impl PyType {
         )
     }
 
-    #[pygetset(magic)]
-    pub fn qualname(&self, vm: &VirtualMachine) -> PyObjectRef {
-        self.attributes
-            .read()
-            .get(identifier!(vm, __qualname__))
-            .cloned()
-            // We need to exclude this method from going into recursion:
-            .and_then(|found| {
-                if found.fast_isinstance(vm.ctx.types.getset_type) {
-                    None
-                } else {
-                    Some(found)
-                }
-            })
-            .unwrap_or_else(|| vm.ctx.new_str(self.name().deref()).into())
+    #[pygetset]
+    pub fn __qualname__(&self, vm: &VirtualMachine) -> PyObjectRef {
+        if let Some(ref heap_type) = self.heaptype_ext {
+            heap_type.qualname.read().clone().into()
+        } else {
+            // For static types, return the name
+            vm.ctx.new_str(self.name().deref()).into()
+        }
     }
 
-    #[pygetset(magic, setter)]
-    fn set_qualname(&self, value: PySetterValue, vm: &VirtualMachine) -> PyResult<()> {
+    #[pygetset(setter)]
+    fn set___qualname__(&self, value: PySetterValue, vm: &VirtualMachine) -> PyResult<()> {
         // TODO: we should replace heaptype flag check to immutable flag check
         if !self.slots.flags.has_feature(PyTypeFlags::HEAPTYPE) {
             return Err(vm.new_type_error(format!(
@@ -606,21 +613,19 @@ impl PyType {
                 self.name()
             ))
         })?;
-        if !value.class().fast_issubclass(vm.ctx.types.str_type) {
-            return Err(vm.new_type_error(format!(
-                "can only assign string to {}.__qualname__, not '{}'",
-                self.name(),
-                value.class().name()
-            )));
-        }
-        self.attributes
-            .write()
-            .insert(identifier!(vm, __qualname__), value);
+
+        let str_value = downcast_qualname(value, vm)?;
+
+        let heap_type = self
+            .heaptype_ext
+            .as_ref()
+            .expect("HEAPTYPE should have heaptype_ext");
+        *heap_type.qualname.write() = str_value;
         Ok(())
     }
 
-    #[pygetset(magic)]
-    fn annotations(&self, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+    #[pygetset]
+    fn __annotations__(&self, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         if !self.slots.flags.has_feature(PyTypeFlags::HEAPTYPE) {
             return Err(vm.new_attribute_error(format!(
                 "type object '{}' has no attribute '__annotations__'",
@@ -645,8 +650,8 @@ impl PyType {
         Ok(annotations)
     }
 
-    #[pygetset(magic, setter)]
-    fn set_annotations(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) -> PyResult<()> {
+    #[pygetset(setter)]
+    fn set___annotations__(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) -> PyResult<()> {
         if self.slots.flags.has_feature(PyTypeFlags::IMMUTABLETYPE) {
             return Err(vm.new_type_error(format!(
                 "cannot set '__annotations__' attribute of immutable type '{}'",
@@ -673,8 +678,8 @@ impl PyType {
         Ok(())
     }
 
-    #[pygetset(magic)]
-    pub fn module(&self, vm: &VirtualMachine) -> PyObjectRef {
+    #[pygetset]
+    pub fn __module__(&self, vm: &VirtualMachine) -> PyObjectRef {
         self.attributes
             .read()
             .get(identifier!(vm, __module__))
@@ -690,15 +695,15 @@ impl PyType {
             .unwrap_or_else(|| vm.ctx.new_str(ascii!("builtins")).into())
     }
 
-    #[pygetset(magic, setter)]
-    fn set_module(&self, value: PyObjectRef, vm: &VirtualMachine) {
+    #[pygetset(setter)]
+    fn set___module__(&self, value: PyObjectRef, vm: &VirtualMachine) {
         self.attributes
             .write()
             .insert(identifier!(vm, __module__), value);
     }
 
-    #[pyclassmethod(magic)]
-    fn prepare(
+    #[pyclassmethod]
+    fn __prepare__(
         _cls: PyTypeRef,
         _name: OptionalArg<PyObjectRef>,
         _bases: OptionalArg<PyObjectRef>,
@@ -708,8 +713,8 @@ impl PyType {
         vm.ctx.new_dict()
     }
 
-    #[pymethod(magic)]
-    fn subclasses(&self) -> PyList {
+    #[pymethod]
+    fn __subclasses__(&self) -> PyList {
         let mut subclasses = self.subclasses.write();
         subclasses.retain(|x| x.upgrade().is_some());
         PyList::from(
@@ -720,23 +725,23 @@ impl PyType {
         )
     }
 
-    #[pymethod(magic)]
-    pub fn ror(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
+    #[pymethod]
+    pub fn __ror__(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
         or_(other, zelf, vm)
     }
 
-    #[pymethod(magic)]
-    pub fn or(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
+    #[pymethod]
+    pub fn __or__(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
         or_(zelf, other, vm)
     }
 
-    #[pygetset(magic)]
-    fn dict(zelf: PyRef<Self>) -> PyMappingProxy {
+    #[pygetset]
+    fn __dict__(zelf: PyRef<Self>) -> PyMappingProxy {
         PyMappingProxy::from(zelf)
     }
 
-    #[pygetset(magic, setter)]
-    fn set_dict(&self, _value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+    #[pygetset(setter)]
+    fn set___dict__(&self, _value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         Err(vm.new_not_implemented_error(
             "Setting __dict__ attribute on a type isn't yet implemented",
         ))
@@ -758,8 +763,8 @@ impl PyType {
         Ok(())
     }
 
-    #[pygetset(magic, setter)]
-    fn set_name(&self, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+    #[pygetset(setter)]
+    fn set___name__(&self, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         self.check_set_special_type_attr(&value, identifier!(vm, __name__), vm)?;
         let name = value.downcast::<PyStr>().map_err(|value| {
             vm.new_type_error(format!(
@@ -777,8 +782,8 @@ impl PyType {
         Ok(())
     }
 
-    #[pygetset(magic)]
-    fn text_signature(&self) -> Option<String> {
+    #[pygetset]
+    fn __text_signature__(&self) -> Option<String> {
         self.slots
             .doc
             .and_then(|doc| get_text_signature_from_internal_doc(&self.name(), doc))
@@ -855,6 +860,14 @@ impl Constructor for PyType {
             (metatype, base.to_owned(), bases)
         };
 
+        let qualname = dict
+            .pop_item(identifier!(vm, __qualname__).as_object(), vm)?
+            .map(|obj| downcast_qualname(obj, vm))
+            .transpose()?
+            .unwrap_or_else(|| {
+                // If __qualname__ is not provided, we can use the name as default
+                name.clone()
+            });
         let mut attributes = dict.to_attributes(vm);
 
         if let Some(f) = attributes.get_mut(identifier!(vm, __init_subclass__)) {
@@ -881,10 +894,6 @@ impl Constructor for PyType {
             }
         }
 
-        attributes
-            .entry(identifier!(vm, __qualname__))
-            .or_insert_with(|| name.clone().into());
-
         if attributes.get(identifier!(vm, __eq__)).is_some()
             && attributes.get(identifier!(vm, __hash__)).is_none()
         {
@@ -901,7 +910,7 @@ impl Constructor for PyType {
             vm.ctx
                 .new_getset(
                     "__dict__",
-                    vm.ctx.types.object_type,
+                    vm.ctx.types.type_type,
                     subtype_get_dict,
                     subtype_set_dict,
                 )
@@ -951,6 +960,7 @@ impl Constructor for PyType {
             };
             let heaptype_ext = HeapTypeExt {
                 name: PyRwLock::new(name),
+                qualname: PyRwLock::new(qualname),
                 slots: heaptype_slots.to_owned(),
                 sequence_methods: PySequenceMethods::default(),
                 mapping_methods: PyMappingMethods::default(),
@@ -1026,7 +1036,7 @@ impl Constructor for PyType {
                     name,
                     typ.name()
                 ));
-                err.set_cause(Some(e));
+                err.set___cause__(Some(e));
                 err
             })?;
         }
@@ -1137,8 +1147,8 @@ impl Py<PyType> {
         PyTuple::new_unchecked(elements.into_boxed_slice())
     }
 
-    #[pygetset(magic)]
-    fn doc(&self, vm: &VirtualMachine) -> PyResult {
+    #[pygetset]
+    fn __doc__(&self, vm: &VirtualMachine) -> PyResult {
         // Similar to CPython's type_get_doc
         // For non-heap types (static types), check if there's an internal doc
         if !self.slots.flags.has_feature(PyTypeFlags::HEAPTYPE) {
@@ -1165,8 +1175,8 @@ impl Py<PyType> {
         }
     }
 
-    #[pygetset(magic, setter)]
-    fn set_doc(&self, value: PySetterValue, vm: &VirtualMachine) -> PyResult<()> {
+    #[pygetset(setter)]
+    fn set___doc__(&self, value: PySetterValue, vm: &VirtualMachine) -> PyResult<()> {
         // Similar to CPython's type_set_doc
         let value = value.ok_or_else(|| {
             vm.new_type_error(format!(
@@ -1186,8 +1196,8 @@ impl Py<PyType> {
         Ok(())
     }
 
-    #[pymethod(magic)]
-    fn dir(&self) -> PyList {
+    #[pymethod]
+    fn __dir__(&self) -> PyList {
         let attributes: Vec<PyObjectRef> = self
             .get_attributes()
             .into_iter()
@@ -1196,18 +1206,18 @@ impl Py<PyType> {
         PyList::from(attributes)
     }
 
-    #[pymethod(magic)]
-    fn instancecheck(&self, obj: PyObjectRef) -> bool {
+    #[pymethod]
+    fn __instancecheck__(&self, obj: PyObjectRef) -> bool {
         obj.fast_isinstance(self)
     }
 
-    #[pymethod(magic)]
-    fn subclasscheck(&self, subclass: PyTypeRef) -> bool {
+    #[pymethod]
+    fn __subclasscheck__(&self, subclass: PyTypeRef) -> bool {
         subclass.fast_issubclass(self)
     }
 
-    #[pyclassmethod(magic)]
-    fn subclasshook(_args: FuncArgs, vm: &VirtualMachine) -> PyObjectRef {
+    #[pyclassmethod]
+    fn __subclasshook__(_args: FuncArgs, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.not_implemented()
     }
 
@@ -1289,7 +1299,7 @@ impl AsNumber for PyType {
 impl Representable for PyType {
     #[inline]
     fn repr_str(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
-        let module = zelf.module(vm);
+        let module = zelf.__module__(vm);
         let module = module.downcast_ref::<PyStr>().map(|m| m.as_str());
 
         let repr = match module {
@@ -1298,7 +1308,7 @@ impl Representable for PyType {
                 format!(
                     "<class '{}.{}'>",
                     module,
-                    zelf.qualname(vm)
+                    zelf.__qualname__(vm)
                         .downcast_ref::<PyStr>()
                         .map(|n| n.as_str())
                         .unwrap_or_else(|| &name)
@@ -1476,7 +1486,7 @@ fn solid_base<'a>(typ: &'a Py<PyType>, vm: &VirtualMachine) -> &'a Py<PyType> {
     };
 
     // TODO: requires itemsize comparison too
-    if typ.basicsize() != base.basicsize() {
+    if typ.__basicsize__() != base.__basicsize__() {
         typ
     } else {
         base
