@@ -97,6 +97,7 @@ type Lasti = std::cell::Cell<u32>;
 #[pyclass(module = false, name = "frame")]
 pub struct Frame {
     pub code: PyRef<PyCode>,
+    pub func_obj: Option<PyObjectRef>,
 
     pub fastlocals: PyMutex<Box<[Option<PyObjectRef>]>>,
     pub(crate) cells_frees: Box<[PyCellRef]>,
@@ -139,6 +140,7 @@ impl Frame {
         scope: Scope,
         builtins: PyDictRef,
         closure: &[PyCellRef],
+        func_obj: Option<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> Frame {
         let cells_frees = std::iter::repeat_with(|| PyCell::default().into_ref(&vm.ctx))
@@ -160,6 +162,7 @@ impl Frame {
             globals: scope.globals,
             builtins,
             code,
+            func_obj,
             lasti: Lasti::new(0),
             state: PyMutex::new(state),
             trace: PyMutex::new(vm.ctx.none()),
@@ -1238,7 +1241,7 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::TypeVar => {
                 let type_name = self.pop_value();
                 let type_var: PyObjectRef =
-                    typing::make_typevar(vm, type_name.clone(), vm.ctx.none(), vm.ctx.none())
+                    typing::TypeVar::new(vm, type_name.clone(), vm.ctx.none(), vm.ctx.none())
                         .into_ref(&vm.ctx)
                         .into();
                 self.push_value(type_var);
@@ -1248,7 +1251,7 @@ impl ExecutingFrame<'_> {
                 let type_name = self.pop_value();
                 let bound = self.pop_value();
                 let type_var: PyObjectRef =
-                    typing::make_typevar(vm, type_name.clone(), bound, vm.ctx.none())
+                    typing::TypeVar::new(vm, type_name.clone(), bound, vm.ctx.none())
                         .into_ref(&vm.ctx)
                         .into();
                 self.push_value(type_var);
@@ -1258,7 +1261,7 @@ impl ExecutingFrame<'_> {
                 let type_name = self.pop_value();
                 let constraint = self.pop_value();
                 let type_var: PyObjectRef =
-                    typing::make_typevar(vm, type_name.clone(), vm.ctx.none(), constraint)
+                    typing::TypeVar::new(vm, type_name.clone(), vm.ctx.none(), constraint)
                         .into_ref(&vm.ctx)
                         .into();
                 self.push_value(type_var);
@@ -1285,7 +1288,7 @@ impl ExecutingFrame<'_> {
             }
             bytecode::Instruction::ParamSpec => {
                 let param_spec_name = self.pop_value();
-                let param_spec: PyObjectRef = typing::make_paramspec(param_spec_name.clone())
+                let param_spec: PyObjectRef = typing::ParamSpec::new(param_spec_name.clone())
                     .into_ref(&vm.ctx)
                     .into();
                 self.push_value(param_spec);
@@ -1294,7 +1297,7 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::TypeVarTuple => {
                 let type_var_tuple_name = self.pop_value();
                 let type_var_tuple: PyObjectRef =
-                    typing::make_typevartuple(type_var_tuple_name.clone(), vm)
+                    typing::TypeVarTuple::new(type_var_tuple_name.clone(), vm)
                         .into_ref(&vm.ctx)
                         .into();
                 self.push_value(type_var_tuple);
