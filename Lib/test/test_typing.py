@@ -922,8 +922,6 @@ class GenericAliasSubstitutionTests(BaseTestCase):
     https://github.com/python/cpython/issues/91162.
     """
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_one_parameter(self):
         T = TypeVar('T')
         Ts = TypeVarTuple('Ts')
@@ -1226,15 +1224,15 @@ class UnpackTests(BaseTestCase):
 
         PartOld = Old[int, *Ts]
         self.assertEqual(PartOld[str].__args__, (int, str))
-        # self.assertEqual(PartOld[*tuple[str]].__args__, (int, str))
-        # self.assertEqual(PartOld[*Tuple[str]].__args__, (int, str))
+        self.assertEqual(PartOld[*tuple[str]].__args__, (int, str))
+        self.assertEqual(PartOld[*Tuple[str]].__args__, (int, str))
         self.assertEqual(PartOld[Unpack[tuple[str]]].__args__, (int, str))
         self.assertEqual(PartOld[Unpack[Tuple[str]]].__args__, (int, str))
 
         PartNew = New[int, *Ts]
         self.assertEqual(PartNew[str].__args__, (int, str))
-        # self.assertEqual(PartNew[*tuple[str]].__args__, (int, str))
-        # self.assertEqual(PartNew[*Tuple[str]].__args__, (int, str))
+        self.assertEqual(PartNew[*tuple[str]].__args__, (int, str))
+        self.assertEqual(PartNew[*Tuple[str]].__args__, (int, str))
         self.assertEqual(PartNew[Unpack[tuple[str]]].__args__, (int, str))
         self.assertEqual(PartNew[Unpack[Tuple[str]]].__args__, (int, str))
 
@@ -1243,7 +1241,7 @@ class UnpackTests(BaseTestCase):
     def test_unpack_wrong_type(self):
         Ts = TypeVarTuple("Ts")
         class Gen[*Ts]: ...
-        # PartGen = Gen[int, *Ts]
+        PartGen = Gen[int, *Ts]
 
         bad_unpack_param = re.escape("Unpack[...] must be used with a tuple type")
         with self.assertRaisesRegex(TypeError, bad_unpack_param):
@@ -1293,7 +1291,7 @@ class TypeVarTupleTests(BaseTestCase):
 
     def test_parameterised_tuple_is_equal_to_itself(self):
         Ts = TypeVarTuple('Ts')
-        # self.assertEqual(tuple[*Ts], tuple[*Ts])
+        self.assertEqual(tuple[*Ts], tuple[*Ts])
         self.assertEqual(Tuple[Unpack[Ts]], Tuple[Unpack[Ts]])
 
     def tests_tuple_arg_ordering_matters(self):
@@ -1308,28 +1306,24 @@ class TypeVarTupleTests(BaseTestCase):
             Tuple[Unpack[Ts2], Unpack[Ts1]],
         )
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_tuple_args_and_parameters_are_correct(self):
         Ts = TypeVarTuple('Ts')
-        # t1 = tuple[*Ts]
+        t1 = tuple[*Ts]
         self.assertEqual(t1.__args__, (*Ts,))
         self.assertEqual(t1.__parameters__, (Ts,))
         t2 = Tuple[Unpack[Ts]]
         self.assertEqual(t2.__args__, (Unpack[Ts],))
         self.assertEqual(t2.__parameters__, (Ts,))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_var_substitution(self):
         Ts = TypeVarTuple('Ts')
         T = TypeVar('T')
         T2 = TypeVar('T2')
-        # class G1(Generic[*Ts]): pass
+        class G1(Generic[*Ts]): pass
         class G2(Generic[Unpack[Ts]]): pass
 
         for A in G1, G2, Tuple, tuple:
-            # B = A[*Ts]
+            B = A[*Ts]
             self.assertEqual(B[()], A[()])
             self.assertEqual(B[float], A[float])
             self.assertEqual(B[float, str], A[float, str])
@@ -1339,7 +1333,7 @@ class TypeVarTupleTests(BaseTestCase):
             self.assertEqual(C[float], A[float])
             self.assertEqual(C[float, str], A[float, str])
 
-            # D = list[A[*Ts]]
+            D = list[A[*Ts]]
             self.assertEqual(D[()], list[A[()]])
             self.assertEqual(D[float], list[A[float]])
             self.assertEqual(D[float, str], list[A[float, str]])
@@ -1367,7 +1361,7 @@ class TypeVarTupleTests(BaseTestCase):
             self.assertEqual(G[float, str, int], A[float, str, int])
             self.assertEqual(G[float, str, int, bytes], A[float, str, int, bytes])
 
-            # H = tuple[list[T], A[*Ts], list[T2]]
+            H = tuple[list[T], A[*Ts], list[T2]]
             with self.assertRaises(TypeError):
                 H[()]
             with self.assertRaises(TypeError):
@@ -1393,13 +1387,11 @@ class TypeVarTupleTests(BaseTestCase):
             self.assertEqual(I[float, str, int, bytes],
                              Tuple[List[float], A[str, int], List[bytes]])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_bad_var_substitution(self):
         Ts = TypeVarTuple('Ts')
         T = TypeVar('T')
         T2 = TypeVar('T2')
-        # class G1(Generic[*Ts]): pass
+        class G1(Generic[*Ts]): pass
         class G2(Generic[Unpack[Ts]]): pass
 
         for A in G1, G2, Tuple, tuple:
@@ -1409,8 +1401,7 @@ class TypeVarTupleTests(BaseTestCase):
 
             C = A[T, T2]
             with self.assertRaises(TypeError):
-                # C[*Ts]
-                pass
+                C[*Ts]
             with self.assertRaises(TypeError):
                 C[Unpack[Ts]]
 
@@ -1429,7 +1420,7 @@ class TypeVarTupleTests(BaseTestCase):
     def test_repr_is_correct(self):
         Ts = TypeVarTuple('Ts')
 
-        # class G1(Generic[*Ts]): pass
+        class G1(Generic[*Ts]): pass
         class G2(Generic[Unpack[Ts]]): pass
 
         self.assertEqual(repr(Ts), 'Ts')
@@ -1437,17 +1428,15 @@ class TypeVarTupleTests(BaseTestCase):
         self.assertEqual(repr((*Ts,)[0]), 'typing.Unpack[Ts]')
         self.assertEqual(repr(Unpack[Ts]), 'typing.Unpack[Ts]')
 
-        # self.assertEqual(repr(tuple[*Ts]), 'tuple[typing.Unpack[Ts]]')
+        self.assertEqual(repr(tuple[*Ts]), 'tuple[typing.Unpack[Ts]]')
         self.assertEqual(repr(Tuple[Unpack[Ts]]), 'typing.Tuple[typing.Unpack[Ts]]')
 
-        # self.assertEqual(repr(*tuple[*Ts]), '*tuple[typing.Unpack[Ts]]')
+        self.assertEqual(repr(*tuple[*Ts]), '*tuple[typing.Unpack[Ts]]')
         self.assertEqual(repr(Unpack[Tuple[Unpack[Ts]]]), 'typing.Unpack[typing.Tuple[typing.Unpack[Ts]]]')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_variadic_class_repr_is_correct(self):
         Ts = TypeVarTuple('Ts')
-        # class A(Generic[*Ts]): pass
+        class A(Generic[*Ts]): pass
         class B(Generic[Unpack[Ts]]): pass
 
         self.assertEndsWith(repr(A[()]), 'A[()]')
@@ -1457,8 +1446,8 @@ class TypeVarTupleTests(BaseTestCase):
         self.assertEndsWith(repr(A[float, str]), 'A[float, str]')
         self.assertEndsWith(repr(B[float, str]), 'B[float, str]')
 
-        # self.assertEndsWith(repr(A[*tuple[int, ...]]),
-                            # 'A[*tuple[int, ...]]')
+        self.assertEndsWith(repr(A[*tuple[int, ...]]),
+                            'A[*tuple[int, ...]]')
         self.assertEndsWith(repr(B[Unpack[Tuple[int, ...]]]),
                             'B[typing.Unpack[typing.Tuple[int, ...]]]')
 
@@ -1477,17 +1466,15 @@ class TypeVarTupleTests(BaseTestCase):
         self.assertEndsWith(repr(B[float, Unpack[Tuple[int, ...]], str]),
                             'B[float, typing.Unpack[typing.Tuple[int, ...]], str]')
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_variadic_class_alias_repr_is_correct(self):
         Ts = TypeVarTuple('Ts')
         class A(Generic[Unpack[Ts]]): pass
 
-        # B = A[*Ts]
-        # self.assertEndsWith(repr(B), 'A[typing.Unpack[Ts]]')
-        # self.assertEndsWith(repr(B[()]), 'A[()]')
-        # self.assertEndsWith(repr(B[float]), 'A[float]')
-        # self.assertEndsWith(repr(B[float, str]), 'A[float, str]')
+        B = A[*Ts]
+        self.assertEndsWith(repr(B), 'A[typing.Unpack[Ts]]')
+        self.assertEndsWith(repr(B[()]), 'A[()]')
+        self.assertEndsWith(repr(B[float]), 'A[float]')
+        self.assertEndsWith(repr(B[float, str]), 'A[float, str]')
 
         C = A[Unpack[Ts]]
         self.assertEndsWith(repr(C), 'A[typing.Unpack[Ts]]')
@@ -1564,12 +1551,10 @@ class TypeVarTupleTests(BaseTestCase):
         with self.assertRaisesRegex(TypeError, r'Cannot subclass typing.Unpack\[Ts\]'):
             class J(Unpack[Ts]): pass
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_variadic_class_args_are_correct(self):
         T = TypeVar('T')
         Ts = TypeVarTuple('Ts')
-        # class A(Generic[*Ts]): pass
+        class A(Generic[*Ts]): pass
         class B(Generic[Unpack[Ts]]): pass
 
         C = A[()]
@@ -1592,10 +1577,10 @@ class TypeVarTupleTests(BaseTestCase):
         self.assertEqual(I.__args__, (T,))
         self.assertEqual(J.__args__, (T,))
 
-        # K = A[*Ts]
-        # L = B[Unpack[Ts]]
-        # self.assertEqual(K.__args__, (*Ts,))
-        # self.assertEqual(L.__args__, (Unpack[Ts],))
+        K = A[*Ts]
+        L = B[Unpack[Ts]]
+        self.assertEqual(K.__args__, (*Ts,))
+        self.assertEqual(L.__args__, (Unpack[Ts],))
 
         M = A[T, *Ts]
         N = B[T, Unpack[Ts]]
@@ -1623,19 +1608,17 @@ class TypeVarTupleTests(BaseTestCase):
     def test_get_type_hints_on_unpack_args(self):
         Ts = TypeVarTuple('Ts')
 
-        # def func1(*args: *Ts): pass
-        # self.assertEqual(gth(func1), {'args': Unpack[Ts]})
+        def func1(*args: *Ts): pass
+        self.assertEqual(gth(func1), {'args': Unpack[Ts]})
 
-        # def func2(*args: *tuple[int, str]): pass
-        # self.assertEqual(gth(func2), {'args': Unpack[tuple[int, str]]})
+        def func2(*args: *tuple[int, str]): pass
+        self.assertEqual(gth(func2), {'args': Unpack[tuple[int, str]]})
 
-        # class CustomVariadic(Generic[*Ts]): pass
+        class CustomVariadic(Generic[*Ts]): pass
 
-        # def func3(*args: *CustomVariadic[int, str]): pass
-        # self.assertEqual(gth(func3), {'args': Unpack[CustomVariadic[int, str]]})
+        def func3(*args: *CustomVariadic[int, str]): pass
+        self.assertEqual(gth(func3), {'args': Unpack[CustomVariadic[int, str]]})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_get_type_hints_on_unpack_args_string(self):
         Ts = TypeVarTuple('Ts')
 
@@ -1646,17 +1629,17 @@ class TypeVarTupleTests(BaseTestCase):
         def func2(*args: '*tuple[int, str]'): pass
         self.assertEqual(gth(func2), {'args': Unpack[tuple[int, str]]})
 
-        # class CustomVariadic(Generic[*Ts]): pass
+        class CustomVariadic(Generic[*Ts]): pass
 
-        # def func3(*args: '*CustomVariadic[int, str]'): pass
-        # self.assertEqual(gth(func3, localns={'CustomVariadic': CustomVariadic}),
-        #                  {'args': Unpack[CustomVariadic[int, str]]})
+        def func3(*args: '*CustomVariadic[int, str]'): pass
+        self.assertEqual(gth(func3, localns={'CustomVariadic': CustomVariadic}),
+                         {'args': Unpack[CustomVariadic[int, str]]})
 
 
     def test_tuple_args_are_correct(self):
         Ts = TypeVarTuple('Ts')
 
-        # self.assertEqual(tuple[*Ts].__args__, (*Ts,))
+        self.assertEqual(tuple[*Ts].__args__, (*Ts,))
         self.assertEqual(Tuple[Unpack[Ts]].__args__, (Unpack[Ts],))
 
         self.assertEqual(tuple[*Ts, int].__args__, (*Ts, int))
@@ -1824,20 +1807,19 @@ class TypeVarTupleTests(BaseTestCase):
         F[int, str, float]
         F[int, str, float, bool]
 
-
     def test_variadic_args_annotations_are_correct(self):
         Ts = TypeVarTuple('Ts')
 
         def f(*args: Unpack[Ts]): pass
-        # def g(*args: *Ts): pass
+        def g(*args: *Ts): pass
         self.assertEqual(f.__annotations__, {'args': Unpack[Ts]})
-        # self.assertEqual(g.__annotations__, {'args': (*Ts,)[0]})
+        self.assertEqual(g.__annotations__, {'args': (*Ts,)[0]})
 
 
     def test_variadic_args_with_ellipsis_annotations_are_correct(self):
-        # def a(*args: *tuple[int, ...]): pass
-        # self.assertEqual(a.__annotations__,
-                        #  {'args': (*tuple[int, ...],)[0]})
+        def a(*args: *tuple[int, ...]): pass
+        self.assertEqual(a.__annotations__,
+                         {'args': (*tuple[int, ...],)[0]})
 
         def b(*args: Unpack[Tuple[int, ...]]): pass
         self.assertEqual(b.__annotations__,
@@ -1849,29 +1831,29 @@ class TypeVarTupleTests(BaseTestCase):
 
         # Unpacking using `*`, native `tuple` type
 
-        # def a(*args: *tuple[int, *Ts]): pass
-        # self.assertEqual(
-            # a.__annotations__,
-            # {'args': (*tuple[int, *Ts],)[0]},
-        # )
+        def a(*args: *tuple[int, *Ts]): pass
+        self.assertEqual(
+            a.__annotations__,
+            {'args': (*tuple[int, *Ts],)[0]},
+        )
 
-        # def b(*args: *tuple[*Ts, int]): pass
-        # self.assertEqual(
-        #     b.__annotations__,
-        #     {'args': (*tuple[*Ts, int],)[0]},
-        # )
+        def b(*args: *tuple[*Ts, int]): pass
+        self.assertEqual(
+            b.__annotations__,
+            {'args': (*tuple[*Ts, int],)[0]},
+        )
 
-        # def c(*args: *tuple[str, *Ts, int]): pass
-        # self.assertEqual(
-        #     c.__annotations__,
-        #     {'args': (*tuple[str, *Ts, int],)[0]},
-        # )
+        def c(*args: *tuple[str, *Ts, int]): pass
+        self.assertEqual(
+            c.__annotations__,
+            {'args': (*tuple[str, *Ts, int],)[0]},
+        )
 
-        # def d(*args: *tuple[int, bool, *Ts, float, str]): pass
-        # self.assertEqual(
-        #     d.__annotations__,
-        #     {'args': (*tuple[int, bool, *Ts, float, str],)[0]},
-        # )
+        def d(*args: *tuple[int, bool, *Ts, float, str]): pass
+        self.assertEqual(
+            d.__annotations__,
+            {'args': (*tuple[int, bool, *Ts, float, str],)[0]},
+        )
 
         # Unpacking using `Unpack`, `Tuple` type from typing.py
 
@@ -1899,11 +1881,9 @@ class TypeVarTupleTests(BaseTestCase):
             {'args': Unpack[Tuple[int, bool, Unpack[Ts], float, str]]},
         )
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_variadic_class_same_args_results_in_equalty(self):
         Ts = TypeVarTuple('Ts')
-        # class C(Generic[*Ts]): pass
+        class C(Generic[*Ts]): pass
         class D(Generic[Unpack[Ts]]): pass
 
         self.assertEqual(C[int], C[int])
@@ -1913,8 +1893,8 @@ class TypeVarTupleTests(BaseTestCase):
         Ts2 = TypeVarTuple('Ts2')
 
         self.assertEqual(
-            # C[*Ts1],
-            # C[*Ts1],
+            C[*Ts1],
+            C[*Ts1],
         )
         self.assertEqual(
             D[Unpack[Ts1]],
@@ -1939,11 +1919,9 @@ class TypeVarTupleTests(BaseTestCase):
             D[int, Unpack[Ts1], Unpack[Ts2]],
         )
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_variadic_class_arg_ordering_matters(self):
         Ts = TypeVarTuple('Ts')
-        # class C(Generic[*Ts]): pass
+        class C(Generic[*Ts]): pass
         class D(Generic[Unpack[Ts]]): pass
 
         self.assertNotEqual(
@@ -1972,10 +1950,10 @@ class TypeVarTupleTests(BaseTestCase):
         Ts1 = TypeVarTuple('Ts1')
         Ts2 = TypeVarTuple('Ts2')
 
-        # class C(Generic[*Ts]): pass
+        class C(Generic[*Ts]): pass
         class D(Generic[Unpack[Ts]]): pass
 
-        # self.assertNotEqual(C[*Ts1], C[*Ts2])
+        self.assertNotEqual(C[*Ts1], C[*Ts2])
         self.assertNotEqual(D[Unpack[Ts1]], D[Unpack[Ts2]])
 
 class TypeVarTuplePicklingTests(BaseTestCase):
@@ -2014,8 +1992,7 @@ class TypeVarTuplePicklingTests(BaseTestCase):
         global_Ts = TypeVarTuple('global_Ts')
 
         tuples = [
-            # TODO: RUSTPYTHON
-            # tuple[*global_Ts],
+            tuple[*global_Ts],
             Tuple[Unpack[global_Ts]],
 
             tuple[T, *global_Ts],
@@ -2513,7 +2490,6 @@ class BaseCallableTests:
         self.assertEqual(C5[int, str, float],
                          Callable[[typing.List[int], tuple[str, int], float], int])
 
-    @unittest.skip("TODO: RUSTPYTHON")
     def test_type_subst_error(self):
         Callable = self.Callable
         P = ParamSpec('P')
@@ -3878,8 +3854,6 @@ class GenericTests(BaseTestCase):
         def barfoo2(x: CT): ...
         self.assertIs(get_type_hints(barfoo2, globals(), locals())['x'], CT)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_generic_pep585_forward_ref(self):
         # See https://bugs.python.org/issue41370
 
@@ -5208,8 +5182,6 @@ class ForwardRefTests(BaseTestCase):
             self.assertIsNot(r1, r2)
             self.assertRaises(RecursionError, cmp, r1, r2)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_union_forward_recursion(self):
         ValueList = List['Value']
         Value = Union[str, ValueList]
@@ -5258,8 +5230,6 @@ class ForwardRefTests(BaseTestCase):
         self.assertEqual(get_type_hints(foo, globals(), locals()),
                          {'a': Callable[..., T]})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_special_forms_forward(self):
 
         class C:
@@ -5342,8 +5312,6 @@ class ForwardRefTests(BaseTestCase):
 
         self.assertEqual(get_type_hints(Child.foo), {'x': int})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_no_type_check_nested_types(self):
         # See https://bugs.python.org/issue46571
         class Other:
@@ -5428,8 +5396,6 @@ class ForwardRefTests(BaseTestCase):
         # `TypeError: can't set attributes of built-in/extension type 'dict'`
         no_type_check(dict)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_no_type_check_forward_ref_as_string(self):
         class C:
             foo: typing.ClassVar[int] = 7
@@ -5484,8 +5450,6 @@ class ForwardRefTests(BaseTestCase):
         hints = get_type_hints(ns['C'].foo)
         self.assertEqual(hints, {'a': ns['C'], 'return': ns['D']})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_final_forward_ref(self):
         self.assertEqual(gth(Loop, globals())['attr'], Final[Loop])
         self.assertNotEqual(gth(Loop, globals())['attr'], Final[int])
@@ -5851,8 +5815,6 @@ class GetTypeHintTests(BaseTestCase):
                           'my_inner_a2': mod_generics_cache.B.A,
                           'my_outer_a': mod_generics_cache.A})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_get_type_hints_classes_no_implicit_optional(self):
         class WithNoneDefault:
             field: int = None  # most type-checkers won't be happy with it
@@ -5897,8 +5859,6 @@ class GetTypeHintTests(BaseTestCase):
         b.__annotations__ = {'x': 'A'}
         self.assertEqual(gth(b, locals()), {'x': A})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_get_type_hints_ClassVar(self):
         self.assertEqual(gth(ann_module2.CV, ann_module2.__dict__),
                          {'var': typing.ClassVar[ann_module2.CV]})
@@ -6025,8 +5985,6 @@ class GetTypeHintTests(BaseTestCase):
             {'x': Annotated[int, 'data']},
         )
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_get_type_hints_classes_str_annotations(self):
         class Foo:
             y = str
@@ -6042,8 +6000,6 @@ class GetTypeHintTests(BaseTestCase):
         self.assertNotIn('bad', sys.modules)
         self.assertEqual(get_type_hints(BadModule), {})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_get_type_hints_annotated_bad_module(self):
         # See https://bugs.python.org/issue44468
         class BadBase:
@@ -6054,8 +6010,6 @@ class GetTypeHintTests(BaseTestCase):
         self.assertNotIn('bad', sys.modules)
         self.assertEqual(get_type_hints(BadType), {'foo': tuple, 'bar': list})
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_forward_ref_and_final(self):
         # https://bugs.python.org/issue45166
         hints = get_type_hints(ann_module5)
@@ -6157,7 +6111,7 @@ class GetUtilitiesTestCase(TestCase):
         self.assertIs(get_origin(NotRequired[int]), NotRequired)
         self.assertIs(get_origin((*Ts,)[0]), Unpack)
         self.assertIs(get_origin(Unpack[Ts]), Unpack)
-        # self.assertIs(get_origin((*tuple[*Ts],)[0]), tuple)
+        self.assertIs(get_origin((*tuple[*Ts],)[0]), tuple)
         self.assertIs(get_origin(Unpack[Tuple[Unpack[Ts]]]), Unpack)
 
     # TODO: RUSTPYTHON
@@ -6225,9 +6179,9 @@ class GetUtilitiesTestCase(TestCase):
         self.assertEqual(get_args(Ts), ())
         self.assertEqual(get_args((*Ts,)[0]), (Ts,))
         self.assertEqual(get_args(Unpack[Ts]), (Ts,))
-        # self.assertEqual(get_args(tuple[*Ts]), (*Ts,))
+        self.assertEqual(get_args(tuple[*Ts]), (*Ts,))
         self.assertEqual(get_args(tuple[Unpack[Ts]]), (Unpack[Ts],))
-        # self.assertEqual(get_args((*tuple[*Ts],)[0]), (*Ts,))
+        self.assertEqual(get_args((*tuple[*Ts],)[0]), (*Ts,))
         self.assertEqual(get_args(Unpack[tuple[Unpack[Ts]]]), (tuple[Unpack[Ts]],))
 
 
@@ -8293,8 +8247,6 @@ class AnnotatedTests(BaseTestCase):
         A.x = 5
         self.assertEqual(C.x, 5)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_special_form_containment(self):
         class C:
             classvar: Annotated[ClassVar[int], "a decoration"] = 4
@@ -8303,8 +8255,6 @@ class AnnotatedTests(BaseTestCase):
         self.assertEqual(get_type_hints(C, globals())['classvar'], ClassVar[int])
         self.assertEqual(get_type_hints(C, globals())['const'], Final[int])
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_special_forms_nesting(self):
         # These are uncommon types and are to ensure runtime
         # is lax on validation. See gh-89547 for more context.
@@ -8409,8 +8359,6 @@ class AnnotatedTests(BaseTestCase):
         with self.assertRaises(TypeError):
             LI[None]
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_typevar_subst(self):
         dec = "a decoration"
         Ts = TypeVarTuple('Ts')
@@ -8418,7 +8366,7 @@ class AnnotatedTests(BaseTestCase):
         T1 = TypeVar('T1')
         T2 = TypeVar('T2')
 
-        # A = Annotated[tuple[*Ts], dec]
+        A = Annotated[tuple[*Ts], dec]
         self.assertEqual(A[int], Annotated[tuple[int], dec])
         self.assertEqual(A[str, int], Annotated[tuple[str, int], dec])
         with self.assertRaises(TypeError):
@@ -8584,8 +8532,6 @@ class TypeAliasTests(BaseTestCase):
         with self.assertRaises(TypeError):
             isinstance(42, TypeAlias)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_stringized_usage(self):
         class A:
             a: "TypeAlias"
@@ -8673,8 +8619,6 @@ class ParamSpecTests(BaseTestCase):
         self.assertEqual(repr(P.kwargs), "P.kwargs")
 
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_stringized(self):
         P = ParamSpec('P')
         class C(Generic[P]):
@@ -8755,15 +8699,13 @@ class ParamSpecTests(BaseTestCase):
         self.assertEqual(G1.__args__, ((int, str), (bytes,)))
         self.assertEqual(G2.__args__, ((int,), (str, bytes)))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_typevartuple_and_paramspecs_in_user_generics(self):
         Ts = TypeVarTuple("Ts")
         P = ParamSpec("P")
 
-        # class X(Generic[*Ts, P]):
-        #     f: Callable[P, int]
-        #     g: Tuple[*Ts]
+        class X(Generic[*Ts, P]):
+            f: Callable[P, int]
+            g: Tuple[*Ts]
 
         G1 = X[int, [bytes]]
         self.assertEqual(G1.__args__, (int, (bytes,)))
@@ -8776,9 +8718,9 @@ class ParamSpecTests(BaseTestCase):
         with self.assertRaises(TypeError):
             X[()]
 
-        # class Y(Generic[P, *Ts]):
-        #     f: Callable[P, int]
-        #     g: Tuple[*Ts]
+        class Y(Generic[P, *Ts]):
+            f: Callable[P, int]
+            g: Tuple[*Ts]
 
         G1 = Y[[bytes], int]
         self.assertEqual(G1.__args__, ((bytes,), int))
@@ -8791,8 +8733,6 @@ class ParamSpecTests(BaseTestCase):
         with self.assertRaises(TypeError):
             Y[()]
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_typevartuple_and_paramspecs_in_generic_aliases(self):
         P = ParamSpec('P')
         T = TypeVar('T')
@@ -8800,21 +8740,21 @@ class ParamSpecTests(BaseTestCase):
 
         for C in Callable, collections.abc.Callable:
             with self.subTest(generic=C):
-                # A = C[P, Tuple[*Ts]]
+                A = C[P, Tuple[*Ts]]
                 B = A[[int, str], bytes, float]
                 self.assertEqual(B.__args__, (int, str, Tuple[bytes, float]))
 
         class X(Generic[T, P]):
             pass
 
-        # A = X[Tuple[*Ts], P]
+        A = X[Tuple[*Ts], P]
         B = A[bytes, float, [int, str]]
         self.assertEqual(B.__args__, (Tuple[bytes, float], (int, str,)))
 
         class Y(Generic[P, T]):
             pass
 
-        # A = Y[P, Tuple[*Ts]]
+        A = Y[P, Tuple[*Ts]]
         B = A[[int, str], bytes, float]
         self.assertEqual(B.__args__, ((int, str,), Tuple[bytes, float]))
 
@@ -8896,10 +8836,10 @@ class ParamSpecTests(BaseTestCase):
         self.assertEqual(A8.__args__, ((T, list[T]),))
         self.assertEqual(A8[int], Base[[int, list[int]]])
 
-        # A9 = Base[[Tuple[*Ts], *Ts]]
-        # self.assertEqual(A9.__parameters__, (Ts,))
-        # self.assertEqual(A9.__args__, ((Tuple[*Ts], *Ts),))
-        # self.assertEqual(A9[int, str], Base[Tuple[int, str], int, str])
+        A9 = Base[[Tuple[*Ts], *Ts]]
+        self.assertEqual(A9.__parameters__, (Ts,))
+        self.assertEqual(A9.__args__, ((Tuple[*Ts], *Ts),))
+        self.assertEqual(A9[int, str], Base[Tuple[int, str], int, str])
 
         A10 = Base[P2]
         self.assertEqual(A10.__parameters__, (P2,))
