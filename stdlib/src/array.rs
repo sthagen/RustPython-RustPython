@@ -89,26 +89,26 @@ mod array {
                     }
                 }
 
-                fn typecode(&self) -> char {
+                const fn typecode(&self) -> char {
                     match self {
                         $(ArrayContentType::$n(_) => $c,)*
                     }
                 }
 
-                fn typecode_str(&self) -> &'static str {
+                const fn typecode_str(&self) -> &'static str {
                     match self {
                         $(ArrayContentType::$n(_) => $scode,)*
                     }
                 }
 
-                fn itemsize_of_typecode(c: char) -> Option<usize> {
+                const fn itemsize_of_typecode(c: char) -> Option<usize> {
                     match c {
                         $($c => Some(std::mem::size_of::<$t>()),)*
                         _ => None,
                     }
                 }
 
-                fn itemsize(&self) -> usize {
+                const fn itemsize(&self) -> usize {
                     match self {
                         $(ArrayContentType::$n(_) => std::mem::size_of::<$t>(),)*
                     }
@@ -554,11 +554,11 @@ mod array {
         (f64, f64_try_into_from_object, f64_swap_bytes, PyFloat::from),
     );
 
-    fn f32_swap_bytes(x: f32) -> f32 {
+    const fn f32_swap_bytes(x: f32) -> f32 {
         f32::from_bits(x.to_bits().swap_bytes())
     }
 
-    fn f64_swap_bytes(x: f64) -> f64 {
+    const fn f64_swap_bytes(x: f64) -> f64 {
         f64::from_bits(x.to_bits().swap_bytes())
     }
 
@@ -632,7 +632,7 @@ mod array {
 
     impl From<ArrayContentType> for PyArray {
         fn from(array: ArrayContentType) -> Self {
-            PyArray {
+            Self {
                 array: PyRwLock::new(array),
                 exports: AtomicUsize::new(0),
             }
@@ -659,7 +659,7 @@ mod array {
                 vm.new_type_error("array() argument 1 must be a unicode character, not str")
             })?;
 
-            if cls.is(PyArray::class(&vm.ctx)) && !kwargs.is_empty() {
+            if cls.is(Self::class(&vm.ctx)) && !kwargs.is_empty() {
                 return Err(vm.new_type_error("array.array() takes no keyword arguments"));
             }
 
@@ -667,7 +667,7 @@ mod array {
                 ArrayContentType::from_char(spec).map_err(|err| vm.new_value_error(err))?;
 
             if let OptionalArg::Present(init) = init {
-                if let Some(init) = init.payload::<PyArray>() {
+                if let Some(init) = init.payload::<Self>() {
                     match (spec, init.read().typecode()) {
                         (spec, ch) if spec == ch => array.frombytes(&init.get_bytes()),
                         (spec, 'u') => {
@@ -765,7 +765,7 @@ mod array {
             let mut w = zelf.try_resizable(vm)?;
             if zelf.is(&obj) {
                 w.imul(2, vm)
-            } else if let Some(array) = obj.payload::<PyArray>() {
+            } else if let Some(array) = obj.payload::<Self>() {
                 w.iadd(&array.read(), vm)
             } else {
                 let iter = ArgIterable::try_from_object(vm, obj)?;
@@ -977,12 +977,12 @@ mod array {
         }
 
         #[pymethod]
-        fn __copy__(&self) -> PyArray {
+        fn __copy__(&self) -> Self {
             self.array.read().clone().into()
         }
 
         #[pymethod]
-        fn __deepcopy__(&self, _memo: PyObjectRef) -> PyArray {
+        fn __deepcopy__(&self, _memo: PyObjectRef) -> Self {
             self.__copy__()
         }
 
@@ -1013,7 +1013,7 @@ mod array {
                         cloned = zelf.read().clone();
                         &cloned
                     } else {
-                        match value.payload::<PyArray>() {
+                        match value.payload::<Self>() {
                             Some(array) => {
                                 guard = array.read();
                                 &*guard
@@ -1059,10 +1059,10 @@ mod array {
 
         #[pymethod]
         fn __add__(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-            if let Some(other) = other.payload::<PyArray>() {
+            if let Some(other) = other.payload::<Self>() {
                 self.read()
                     .add(&other.read(), vm)
-                    .map(|array| PyArray::from(array).into_ref(&vm.ctx))
+                    .map(|array| Self::from(array).into_ref(&vm.ctx))
             } else {
                 Err(vm.new_type_error(format!(
                     "can only append array (not \"{}\") to array",
@@ -1079,7 +1079,7 @@ mod array {
         ) -> PyResult<PyRef<Self>> {
             if zelf.is(&other) {
                 zelf.try_resizable(vm)?.imul(2, vm)?;
-            } else if let Some(other) = other.payload::<PyArray>() {
+            } else if let Some(other) = other.payload::<Self>() {
                 zelf.try_resizable(vm)?.iadd(&other.read(), vm)?;
             } else {
                 return Err(vm.new_type_error(format!(
@@ -1454,17 +1454,17 @@ mod array {
     }
 
     impl From<MachineFormatCode> for u8 {
-        fn from(code: MachineFormatCode) -> u8 {
+        fn from(code: MachineFormatCode) -> Self {
             use MachineFormatCode::*;
             match code {
-                Int8 { signed } => signed as u8,
-                Int16 { signed, big_endian } => 2 + signed as u8 * 2 + big_endian as u8,
-                Int32 { signed, big_endian } => 6 + signed as u8 * 2 + big_endian as u8,
-                Int64 { signed, big_endian } => 10 + signed as u8 * 2 + big_endian as u8,
-                Ieee754Float { big_endian } => 14 + big_endian as u8,
-                Ieee754Double { big_endian } => 16 + big_endian as u8,
-                Utf16 { big_endian } => 18 + big_endian as u8,
-                Utf32 { big_endian } => 20 + big_endian as u8,
+                Int8 { signed } => signed as Self,
+                Int16 { signed, big_endian } => 2 + signed as Self * 2 + big_endian as Self,
+                Int32 { signed, big_endian } => 6 + signed as Self * 2 + big_endian as Self,
+                Int64 { signed, big_endian } => 10 + signed as Self * 2 + big_endian as Self,
+                Ieee754Float { big_endian } => 14 + big_endian as Self,
+                Ieee754Double { big_endian } => 16 + big_endian as Self,
+                Utf16 { big_endian } => 18 + big_endian as Self,
+                Utf32 { big_endian } => 20 + big_endian as Self,
             }
         }
     }
@@ -1557,7 +1557,7 @@ mod array {
                 _ => None,
             }
         }
-        fn item_size(self) -> usize {
+        const fn item_size(self) -> usize {
             match self {
                 Self::Int8 { .. } => 1,
                 Self::Int16 { .. } | Self::Utf16 { .. } => 2,

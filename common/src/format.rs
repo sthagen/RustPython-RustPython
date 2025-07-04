@@ -1,6 +1,8 @@
 // spell-checker:ignore ddfe
 use itertools::{Itertools, PeekingNext};
+use malachite_base::num::basic::floats::PrimitiveFloat;
 use malachite_bigint::{BigInt, Sign};
+use num_complex::Complex64;
 use num_traits::FromPrimitive;
 use num_traits::{Signed, cast::ToPrimitive};
 use rustpython_literal::float;
@@ -38,23 +40,23 @@ impl FormatParse for FormatConversion {
 }
 
 impl FormatConversion {
-    pub fn from_char(c: CodePoint) -> Option<FormatConversion> {
+    pub fn from_char(c: CodePoint) -> Option<Self> {
         match c.to_char_lossy() {
-            's' => Some(FormatConversion::Str),
-            'r' => Some(FormatConversion::Repr),
-            'a' => Some(FormatConversion::Ascii),
-            'b' => Some(FormatConversion::Bytes),
+            's' => Some(Self::Str),
+            'r' => Some(Self::Repr),
+            'a' => Some(Self::Ascii),
+            'b' => Some(Self::Bytes),
             _ => None,
         }
     }
 
-    fn from_string(text: &Wtf8) -> Option<FormatConversion> {
+    fn from_string(text: &Wtf8) -> Option<Self> {
         let mut chars = text.code_points();
         if chars.next()? != '!' {
             return None;
         }
 
-        FormatConversion::from_char(chars.next()?)
+        Self::from_char(chars.next()?)
     }
 }
 
@@ -67,12 +69,12 @@ pub enum FormatAlign {
 }
 
 impl FormatAlign {
-    fn from_char(c: CodePoint) -> Option<FormatAlign> {
+    fn from_char(c: CodePoint) -> Option<Self> {
         match c.to_char_lossy() {
-            '<' => Some(FormatAlign::Left),
-            '>' => Some(FormatAlign::Right),
-            '=' => Some(FormatAlign::AfterSign),
-            '^' => Some(FormatAlign::Center),
+            '<' => Some(Self::Left),
+            '>' => Some(Self::Right),
+            '=' => Some(Self::AfterSign),
+            '^' => Some(Self::Center),
             _ => None,
         }
     }
@@ -141,7 +143,7 @@ pub enum FormatType {
 }
 
 impl From<&FormatType> for char {
-    fn from(from: &FormatType) -> char {
+    fn from(from: &FormatType) -> Self {
         match from {
             FormatType::String => 's',
             FormatType::Binary => 'b',
@@ -299,7 +301,7 @@ impl FormatSpec {
             align = align.or(Some(FormatAlign::AfterSign));
         }
 
-        Ok(FormatSpec {
+        Ok(Self {
             conversion,
             fill,
             align,
@@ -327,7 +329,7 @@ impl FormatSpec {
         let magnitude_int_str = parts.next().unwrap().to_string();
         let dec_digit_cnt = magnitude_str.len() as i32 - magnitude_int_str.len() as i32;
         let int_digit_cnt = disp_digit_cnt - dec_digit_cnt;
-        let mut result = FormatSpec::separate_integer(magnitude_int_str, inter, sep, int_digit_cnt);
+        let mut result = Self::separate_integer(magnitude_int_str, inter, sep, int_digit_cnt);
         if let Some(part) = parts.next() {
             result.push_str(&format!(".{part}"))
         }
@@ -350,11 +352,11 @@ impl FormatSpec {
             // separate with 0 padding
             let padding = "0".repeat(diff as usize);
             let padded_num = format!("{padding}{magnitude_str}");
-            FormatSpec::insert_separator(padded_num, inter, sep, sep_cnt)
+            Self::insert_separator(padded_num, inter, sep, sep_cnt)
         } else {
             // separate without padding
             let sep_cnt = (magnitude_len - 1) / inter;
-            FormatSpec::insert_separator(magnitude_str, inter, sep, sep_cnt)
+            Self::insert_separator(magnitude_str, inter, sep, sep_cnt)
         }
     }
 
@@ -412,12 +414,7 @@ impl FormatSpec {
                 let magnitude_len = magnitude_str.len();
                 let width = self.width.unwrap_or(magnitude_len) as i32 - prefix.len() as i32;
                 let disp_digit_cnt = cmp::max(width, magnitude_len as i32);
-                FormatSpec::add_magnitude_separators_for_char(
-                    magnitude_str,
-                    inter,
-                    sep,
-                    disp_digit_cnt,
-                )
+                Self::add_magnitude_separators_for_char(magnitude_str, inter, sep, disp_digit_cnt)
             }
             None => magnitude_str,
         }
@@ -617,6 +614,126 @@ impl FormatSpec {
         }
     }
 
+    pub fn format_complex(&self, num: &Complex64) -> Result<String, FormatSpecError> {
+        let (formatted_re, formatted_im) = self.format_complex_re_im(num)?;
+        // Enclose in parentheses if there is no format type and formatted_re is not empty
+        let magnitude_str = if self.format_type.is_none() && !formatted_re.is_empty() {
+            format!("({formatted_re}{formatted_im})")
+        } else {
+            format!("{formatted_re}{formatted_im}")
+        };
+        if let Some(FormatAlign::AfterSign) = &self.align {
+            return Err(FormatSpecError::AlignmentFlag);
+        }
+        match &self.fill.unwrap_or(' '.into()).to_char() {
+            Some('0') => Err(FormatSpecError::ZeroPadding),
+            _ => self.format_sign_and_align(&AsciiStr::new(&magnitude_str), "", FormatAlign::Right),
+        }
+    }
+
+    fn format_complex_re_im(&self, num: &Complex64) -> Result<(String, String), FormatSpecError> {
+        // Format real part
+        let mut formatted_re = String::new();
+        if num.re != 0.0 || num.re.is_negative_zero() || self.format_type.is_some() {
+            let sign_re = if num.re.is_sign_negative() && !num.is_nan() {
+                "-"
+            } else {
+                match self.sign.unwrap_or(FormatSign::Minus) {
+                    FormatSign::Plus => "+",
+                    FormatSign::Minus => "",
+                    FormatSign::MinusOrSpace => " ",
+                }
+            };
+            let re = self.format_complex_float(num.re)?;
+            formatted_re = format!("{sign_re}{re}");
+        }
+        // Format imaginary part
+        let sign_im = if num.im.is_sign_negative() && !num.im.is_nan() {
+            "-"
+        } else if formatted_re.is_empty() {
+            ""
+        } else {
+            "+"
+        };
+        let im = self.format_complex_float(num.im)?;
+        Ok((formatted_re, format!("{sign_im}{im}j")))
+    }
+
+    fn format_complex_float(&self, num: f64) -> Result<String, FormatSpecError> {
+        self.validate_format(FormatType::FixedPoint(Case::Lower))?;
+        let precision = self.precision.unwrap_or(6);
+        let magnitude = num.abs();
+        let magnitude_str = match &self.format_type {
+            Some(FormatType::Decimal)
+            | Some(FormatType::Binary)
+            | Some(FormatType::Octal)
+            | Some(FormatType::Hex(_))
+            | Some(FormatType::String)
+            | Some(FormatType::Character)
+            | Some(FormatType::Number(Case::Upper))
+            | Some(FormatType::Percentage) => {
+                let ch = char::from(self.format_type.as_ref().unwrap());
+                Err(FormatSpecError::UnknownFormatCode(ch, "complex"))
+            }
+            Some(FormatType::FixedPoint(case)) => Ok(float::format_fixed(
+                precision,
+                magnitude,
+                *case,
+                self.alternate_form,
+            )),
+            Some(FormatType::GeneralFormat(case)) | Some(FormatType::Number(case)) => {
+                let precision = if precision == 0 { 1 } else { precision };
+                Ok(float::format_general(
+                    precision,
+                    magnitude,
+                    *case,
+                    self.alternate_form,
+                    false,
+                ))
+            }
+            Some(FormatType::Exponent(case)) => Ok(float::format_exponent(
+                precision,
+                magnitude,
+                *case,
+                self.alternate_form,
+            )),
+            None => match magnitude {
+                magnitude if magnitude.is_nan() => Ok("nan".to_owned()),
+                magnitude if magnitude.is_infinite() => Ok("inf".to_owned()),
+                _ => match self.precision {
+                    Some(precision) => Ok(float::format_general(
+                        precision,
+                        magnitude,
+                        Case::Lower,
+                        self.alternate_form,
+                        true,
+                    )),
+                    None => {
+                        if magnitude.fract() == 0.0 {
+                            Ok(magnitude.trunc().to_string())
+                        } else {
+                            Ok(magnitude.to_string())
+                        }
+                    }
+                },
+            },
+        }?;
+        match &self.grouping_option {
+            Some(fg) => {
+                let sep = match fg {
+                    FormatGrouping::Comma => ',',
+                    FormatGrouping::Underscore => '_',
+                };
+                let inter = self.get_separator_interval().try_into().unwrap();
+                let len = magnitude_str.len() as i32;
+                let separated_magnitude =
+                    FormatSpec::add_magnitude_separators_for_char(magnitude_str, inter, sep, len);
+                Ok(separated_magnitude)
+            }
+            None => Ok(magnitude_str),
+        }
+    }
+
     fn format_sign_and_align<T>(
         &self,
         magnitude_str: &T,
@@ -640,27 +757,26 @@ impl FormatSpec {
                 "{}{}{}",
                 sign_str,
                 magnitude_str,
-                FormatSpec::compute_fill_string(fill_char, fill_chars_needed)
+                Self::compute_fill_string(fill_char, fill_chars_needed)
             ),
             FormatAlign::Right => format!(
                 "{}{}{}",
-                FormatSpec::compute_fill_string(fill_char, fill_chars_needed),
+                Self::compute_fill_string(fill_char, fill_chars_needed),
                 sign_str,
                 magnitude_str
             ),
             FormatAlign::AfterSign => format!(
                 "{}{}{}",
                 sign_str,
-                FormatSpec::compute_fill_string(fill_char, fill_chars_needed),
+                Self::compute_fill_string(fill_char, fill_chars_needed),
                 magnitude_str
             ),
             FormatAlign::Center => {
                 let left_fill_chars_needed = fill_chars_needed / 2;
                 let right_fill_chars_needed = fill_chars_needed - left_fill_chars_needed;
-                let left_fill_string =
-                    FormatSpec::compute_fill_string(fill_char, left_fill_chars_needed);
+                let left_fill_string = Self::compute_fill_string(fill_char, left_fill_chars_needed);
                 let right_fill_string =
-                    FormatSpec::compute_fill_string(fill_char, right_fill_chars_needed);
+                    Self::compute_fill_string(fill_char, right_fill_chars_needed);
                 format!("{left_fill_string}{sign_str}{magnitude_str}{right_fill_string}")
             }
         })
@@ -707,6 +823,8 @@ pub enum FormatSpecError {
     NotAllowed(&'static str),
     UnableToConvert,
     CodeNotInRange,
+    ZeroPadding,
+    AlignmentFlag,
     NotImplemented(char, &'static str),
 }
 
@@ -725,7 +843,7 @@ pub enum FormatParseError {
 impl FromStr for FormatSpec {
     type Err = FormatSpecError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        FormatSpec::parse(s)
+        Self::parse(s)
     }
 }
 
@@ -739,7 +857,7 @@ pub enum FieldNamePart {
 impl FieldNamePart {
     fn parse_part(
         chars: &mut impl PeekingNext<Item = CodePoint>,
-    ) -> Result<Option<FieldNamePart>, FormatParseError> {
+    ) -> Result<Option<Self>, FormatParseError> {
         chars
             .next()
             .map(|ch| match ch.to_char_lossy() {
@@ -751,7 +869,7 @@ impl FieldNamePart {
                     if attribute.is_empty() {
                         Err(FormatParseError::EmptyAttribute)
                     } else {
-                        Ok(FieldNamePart::Attribute(attribute))
+                        Ok(Self::Attribute(attribute))
                     }
                 }
                 '[' => {
@@ -761,9 +879,9 @@ impl FieldNamePart {
                             return if index.is_empty() {
                                 Err(FormatParseError::EmptyAttribute)
                             } else if let Some(index) = parse_usize(&index) {
-                                Ok(FieldNamePart::Index(index))
+                                Ok(Self::Index(index))
                             } else {
-                                Ok(FieldNamePart::StringIndex(index))
+                                Ok(Self::StringIndex(index))
                             };
                         }
                         index.push(ch);
@@ -794,7 +912,7 @@ fn parse_usize(s: &Wtf8) -> Option<usize> {
 }
 
 impl FieldName {
-    pub fn parse(text: &Wtf8) -> Result<FieldName, FormatParseError> {
+    pub fn parse(text: &Wtf8) -> Result<Self, FormatParseError> {
         let mut chars = text.code_points().peekable();
         let first: Wtf8Buf = chars
             .peeking_take_while(|ch| *ch != '.' && *ch != '[')
@@ -813,7 +931,7 @@ impl FieldName {
             parts.push(part)
         }
 
-        Ok(FieldName { field_type, parts })
+        Ok(Self { field_type, parts })
     }
 }
 
@@ -854,7 +972,7 @@ impl FormatString {
         let mut cur_text = text;
         let mut result_string = Wtf8Buf::new();
         while !cur_text.is_empty() {
-            match FormatString::parse_literal_single(cur_text) {
+            match Self::parse_literal_single(cur_text) {
                 Ok((next_char, remaining)) => {
                     result_string.push(next_char);
                     cur_text = remaining;
@@ -968,7 +1086,7 @@ impl FormatString {
         }
         if let Some(pos) = end_bracket_pos {
             let right = &text[pos..];
-            let format_part = FormatString::parse_part_in_brackets(&left)?;
+            let format_part = Self::parse_part_in_brackets(&left)?;
             Ok((format_part, &right[1..]))
         } else {
             Err(FormatParseError::UnmatchedBracket)
@@ -990,14 +1108,14 @@ impl<'a> FromTemplate<'a> for FormatString {
         while !cur_text.is_empty() {
             // Try to parse both literals and bracketed format parts until we
             // run out of text
-            cur_text = FormatString::parse_literal(cur_text)
-                .or_else(|_| FormatString::parse_spec(cur_text))
+            cur_text = Self::parse_literal(cur_text)
+                .or_else(|_| Self::parse_spec(cur_text))
                 .map(|(part, new_text)| {
                     parts.push(part);
                     new_text
                 })?;
         }
-        Ok(FormatString {
+        Ok(Self {
             format_parts: parts,
         })
     }

@@ -68,7 +68,7 @@ mod _csv {
         type Args = PyObjectRef;
 
         fn py_new(cls: PyTypeRef, ctx: Self::Args, vm: &VirtualMachine) -> PyResult {
-            PyDialect::try_from_object(vm, ctx)?
+            Self::try_from_object(vm, ctx)?
                 .into_ref_with_type(vm, cls)
                 .map(Into::into)
         }
@@ -84,11 +84,11 @@ mod _csv {
             Some(vm.ctx.new_str(format!("{}", self.quotechar? as char)))
         }
         #[pygetset]
-        fn doublequote(&self) -> bool {
+        const fn doublequote(&self) -> bool {
             self.doublequote
         }
         #[pygetset]
-        fn skipinitialspace(&self) -> bool {
+        const fn skipinitialspace(&self) -> bool {
             self.skipinitialspace
         }
         #[pygetset]
@@ -108,7 +108,7 @@ mod _csv {
             Some(vm.ctx.new_str(format!("{}", self.escapechar? as char)))
         }
         #[pygetset(name = "strict")]
-        fn get_strict(&self) -> bool {
+        const fn get_strict(&self) -> bool {
             self.strict
         }
     }
@@ -425,10 +425,10 @@ mod _csv {
     impl From<QuoteStyle> for csv_core::QuoteStyle {
         fn from(val: QuoteStyle) -> Self {
             match val {
-                QuoteStyle::Minimal => csv_core::QuoteStyle::Always,
-                QuoteStyle::All => csv_core::QuoteStyle::Always,
-                QuoteStyle::Nonnumeric => csv_core::QuoteStyle::NonNumeric,
-                QuoteStyle::None => csv_core::QuoteStyle::Never,
+                QuoteStyle::Minimal => Self::Always,
+                QuoteStyle::All => Self::Always,
+                QuoteStyle::Nonnumeric => Self::NonNumeric,
+                QuoteStyle::None => Self::Never,
                 QuoteStyle::Strings => todo!(),
                 QuoteStyle::Notnull => todo!(),
             }
@@ -444,14 +444,14 @@ mod _csv {
     }
     impl TryFrom<isize> for QuoteStyle {
         type Error = PyTypeError;
-        fn try_from(num: isize) -> Result<QuoteStyle, PyTypeError> {
+        fn try_from(num: isize) -> Result<Self, PyTypeError> {
             match num {
-                0 => Ok(QuoteStyle::Minimal),
-                1 => Ok(QuoteStyle::All),
-                2 => Ok(QuoteStyle::Nonnumeric),
-                3 => Ok(QuoteStyle::None),
-                4 => Ok(QuoteStyle::Strings),
-                5 => Ok(QuoteStyle::Notnull),
+                0 => Ok(Self::Minimal),
+                1 => Ok(Self::All),
+                2 => Ok(Self::Nonnumeric),
+                3 => Ok(Self::None),
+                4 => Ok(Self::Strings),
+                5 => Ok(Self::Notnull),
                 _ => Err(PyTypeError {}),
             }
         }
@@ -488,7 +488,7 @@ mod _csv {
     }
     impl Default for FormatOptions {
         fn default() -> Self {
-            FormatOptions {
+            Self {
                 dialect: DialectItem::None,
                 delimiter: None,
                 quotechar: None,
@@ -557,7 +557,7 @@ mod _csv {
 
     impl FromArgs for FormatOptions {
         fn from_args(vm: &VirtualMachine, args: &mut FuncArgs) -> Result<Self, ArgumentError> {
-            let mut res = FormatOptions::default();
+            let mut res = Self::default();
             if let Some(dialect) = args.kwargs.swap_remove("dialect") {
                 res.dialect = prase_dialect_item_from_arg(vm, dialect)?;
             } else if let Some(dialect) = args.args.first() {
@@ -659,7 +659,7 @@ mod _csv {
     }
 
     impl FormatOptions {
-        fn update_py_dialect(&self, mut res: PyDialect) -> PyDialect {
+        const fn update_py_dialect(&self, mut res: PyDialect) -> PyDialect {
             macro_rules! check_and_fill {
                 ($res:ident, $e:ident) => {{
                     if let Some(t) = self.$e {
@@ -916,7 +916,7 @@ mod _csv {
             self.state.lock().line_num
         }
         #[pygetset]
-        fn dialect(&self, _vm: &VirtualMachine) -> PyDialect {
+        const fn dialect(&self, _vm: &VirtualMachine) -> PyDialect {
             self.dialect
         }
     }
@@ -1066,7 +1066,7 @@ mod _csv {
     #[pyclass]
     impl Writer {
         #[pygetset(name = "dialect")]
-        fn get_dialect(&self, _vm: &VirtualMachine) -> PyDialect {
+        const fn get_dialect(&self, _vm: &VirtualMachine) -> PyDialect {
             self.dialect
         }
         #[pymethod]

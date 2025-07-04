@@ -71,7 +71,7 @@ struct CStrPathLike {
 impl TryFromObject for CStrPathLike {
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
         let s = OsPath::try_from_object(vm, obj)?.into_cstring(vm)?;
-        Ok(CStrPathLike { s })
+        Ok(Self { s })
     }
 }
 impl AsRef<CStr> for CStrPathLike {
@@ -116,7 +116,7 @@ struct CharPtrSlice<'a> {
 }
 
 impl CharPtrSlice<'_> {
-    fn as_ptr(&self) -> *const *const libc::c_char {
+    const fn as_ptr(&self) -> *const *const libc::c_char {
         self.slice.as_ptr()
     }
 }
@@ -174,11 +174,11 @@ enum ExecErrorContext {
 }
 
 impl ExecErrorContext {
-    fn as_msg(&self) -> &'static str {
+    const fn as_msg(&self) -> &'static str {
         match self {
-            ExecErrorContext::NoExec => "noexec",
-            ExecErrorContext::ChDir => "noexec:chdir",
-            ExecErrorContext::Exec => "",
+            Self::NoExec => "noexec",
+            Self::ChDir => "noexec:chdir",
+            Self::Exec => "",
         }
     }
 }
