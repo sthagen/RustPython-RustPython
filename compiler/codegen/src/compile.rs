@@ -8,12 +8,39 @@
 #![deny(clippy::cast_possible_truncation)]
 
 use crate::{
-    IndexSet, ToPythonName,
+    IndexMap, IndexSet, ToPythonName,
     error::{CodegenError, CodegenErrorType, PatternUnreachableReason},
     ir::{self, BlockIdx},
-    symboltable::{self, SymbolFlags, SymbolScope, SymbolTable},
+    symboltable::{self, SymbolFlags, SymbolScope, SymbolTable, SymbolTableType},
     unparse::unparse_expr,
 };
+
+const MAXBLOCKS: usize = 20;
+
+#[derive(Debug, Clone, Copy)]
+pub enum FBlockType {
+    WhileLoop,
+    ForLoop,
+    TryExcept,
+    FinallyTry,
+    FinallyEnd,
+    With,
+    AsyncWith,
+    HandlerCleanup,
+    PopValue,
+    ExceptionHandler,
+    ExceptionGroupHandler,
+    AsyncComprehensionGenerator,
+    StopIteration,
+}
+
+#[derive(Debug, Clone)]
+pub struct FBlockInfo {
+    pub fb_type: FBlockType,
+    pub fb_block: BlockIdx,
+    pub fb_exit: BlockIdx,
+    // fb_datum is not needed in RustPython
+}
 use itertools::Itertools;
 use malachite_bigint::BigInt;
 use num_complex::Complex;
@@ -74,11 +101,9 @@ struct Compiler<'src> {
     source_code: SourceCode<'src>,
     // current_source_location: SourceLocation,
     current_source_range: TextRange,
-    qualified_path: Vec<String>,
     done_with_future_stmts: DoneWithFuture,
     future_annotations: bool,
     ctx: CompileContext,
-    class_name: Option<String>,
     opts: CompileOpts,
     in_annotation: bool,
 }
@@ -305,20 +330,27 @@ impl<'src> Compiler<'src> {
     fn new(opts: CompileOpts, source_code: SourceCode<'src>, code_name: String) -> Self {
         let module_code = ir::CodeInfo {
             flags: bytecode::CodeFlags::NEW_LOCALS,
-            posonlyarg_count: 0,
-            arg_count: 0,
-            kwonlyarg_count: 0,
             source_path: source_code.path.to_owned(),
-            first_line_number: OneIndexed::MIN,
-            obj_name: code_name.clone(),
-            qualname: Some(code_name),
+            private: None,
             blocks: vec![ir::Block::default()],
             current_block: ir::BlockIdx(0),
-            constants: IndexSet::default(),
-            name_cache: IndexSet::default(),
-            varname_cache: IndexSet::default(),
-            cellvar_cache: IndexSet::default(),
-            freevar_cache: IndexSet::default(),
+            metadata: ir::CodeUnitMetadata {
+                name: code_name.clone(),
+                qualname: Some(code_name),
+                consts: IndexSet::default(),
+                names: IndexSet::default(),
+                varnames: IndexSet::default(),
+                cellvars: IndexSet::default(),
+                freevars: IndexSet::default(),
+                fast_hidden: IndexMap::default(),
+                argcount: 0,
+                posonlyargcount: 0,
+                kwonlyargcount: 0,
+                firstlineno: OneIndexed::MIN,
+            },
+            static_attributes: None,
+            in_inlined_comp: false,
+            fblock: Vec::with_capacity(MAXBLOCKS),
         };
         Compiler {
             code_stack: vec![module_code],
@@ -326,7 +358,6 @@ impl<'src> Compiler<'src> {
             source_code,
             // current_source_location: SourceLocation::default(),
             current_source_range: TextRange::default(),
-            qualified_path: Vec::new(),
             done_with_future_stmts: DoneWithFuture::No,
             future_annotations: false,
             ctx: CompileContext {
@@ -334,7 +365,6 @@ impl<'src> Compiler<'src> {
                 in_class: false,
                 func: FunctionContext::NoFunction,
             },
-            class_name: None,
             opts,
             in_annotation: false,
         }
@@ -385,6 +415,9 @@ impl Compiler<'_> {
         let source_path = self.source_code.path.to_owned();
         let first_line_number = self.get_source_line_number();
 
+        // Get the private name from current scope if exists
+        let private = self.code_stack.last().and_then(|info| info.private.clone());
+
         let table = self.push_symbol_table();
 
         let cellvar_cache = table
@@ -402,30 +435,42 @@ impl Compiler<'_> {
             .map(|(var, _)| var.clone())
             .collect();
 
-        // Calculate qualname based on the current qualified path
-        let qualname = if self.qualified_path.is_empty() {
-            Some(obj_name.clone())
-        } else {
-            Some(self.qualified_path.join("."))
-        };
+        // Initialize varname_cache from SymbolTable::varnames
+        let varname_cache: IndexSet<String> = table.varnames.iter().cloned().collect();
+
+        // Qualname will be set later by set_qualname
+        let qualname = None;
+
+        // Check if this is a class scope
+        let is_class_scope = table.typ == SymbolTableType::Class;
 
         let info = ir::CodeInfo {
             flags,
-            posonlyarg_count,
-            arg_count,
-            kwonlyarg_count,
             source_path,
-            first_line_number,
-            obj_name,
-            qualname,
-
+            private,
             blocks: vec![ir::Block::default()],
             current_block: ir::BlockIdx(0),
-            constants: IndexSet::default(),
-            name_cache: IndexSet::default(),
-            varname_cache: IndexSet::default(),
-            cellvar_cache,
-            freevar_cache,
+            metadata: ir::CodeUnitMetadata {
+                name: obj_name,
+                qualname,
+                consts: IndexSet::default(),
+                names: IndexSet::default(),
+                varnames: varname_cache,
+                cellvars: cellvar_cache,
+                freevars: freevar_cache,
+                fast_hidden: IndexMap::default(),
+                argcount: arg_count,
+                posonlyargcount: posonlyarg_count,
+                kwonlyargcount: kwonlyarg_count,
+                firstlineno: first_line_number,
+            },
+            static_attributes: if is_class_scope {
+                Some(IndexSet::default())
+            } else {
+                None
+            },
+            in_inlined_comp: false,
+            fblock: Vec::with_capacity(MAXBLOCKS),
         };
         self.code_stack.push(info);
     }
@@ -438,10 +483,41 @@ impl Compiler<'_> {
         unwrap_internal(self, stack_top.finalize_code(self.opts.optimize))
     }
 
+    /// Push a new fblock
+    // = compiler_push_fblock
+    fn push_fblock(
+        &mut self,
+        fb_type: FBlockType,
+        fb_block: BlockIdx,
+        fb_exit: BlockIdx,
+    ) -> CompileResult<()> {
+        let code = self.current_code_info();
+        if code.fblock.len() >= MAXBLOCKS {
+            return Err(self.error(CodegenErrorType::SyntaxError(
+                "too many statically nested blocks".to_owned(),
+            )));
+        }
+        code.fblock.push(FBlockInfo {
+            fb_type,
+            fb_block,
+            fb_exit,
+        });
+        Ok(())
+    }
+
+    /// Pop an fblock
+    // = compiler_pop_fblock
+    fn pop_fblock(&mut self, _expected_type: FBlockType) -> FBlockInfo {
+        let code = self.current_code_info();
+        // TODO: Add assertion to check expected type matches
+        // assert!(matches!(fblock.fb_type, expected_type));
+        code.fblock.pop().expect("fblock stack underflow")
+    }
+
     // could take impl Into<Cow<str>>, but everything is borrowed from ast structs; we never
     // actually have a `String` to pass
     fn name(&mut self, name: &str) -> bytecode::NameIdx {
-        self._name_inner(name, |i| &mut i.name_cache)
+        self._name_inner(name, |i| &mut i.metadata.names)
     }
     fn varname(&mut self, name: &str) -> CompileResult<bytecode::NameIdx> {
         if Compiler::is_forbidden_arg_name(name) {
@@ -449,7 +525,7 @@ impl Compiler<'_> {
                 "cannot assign to {name}",
             ))));
         }
-        Ok(self._name_inner(name, |i| &mut i.varname_cache))
+        Ok(self._name_inner(name, |i| &mut i.metadata.varnames))
     }
     fn _name_inner(
         &mut self,
@@ -462,6 +538,98 @@ impl Compiler<'_> {
             .get_index_of(name.as_ref())
             .unwrap_or_else(|| cache.insert_full(name.into_owned()).0)
             .to_u32()
+    }
+
+    /// Set the qualified name for the current code object, based on CPython's compiler_set_qualname
+    fn set_qualname(&mut self) -> String {
+        let qualname = self.make_qualname();
+        self.current_code_info().metadata.qualname = Some(qualname.clone());
+        qualname
+    }
+    fn make_qualname(&mut self) -> String {
+        let stack_size = self.code_stack.len();
+        assert!(stack_size >= 1);
+
+        let current_obj_name = self.current_code_info().metadata.name.clone();
+
+        // If we're at the module level (stack_size == 1), qualname is just the name
+        if stack_size <= 1 {
+            return current_obj_name;
+        }
+
+        // Check parent scope
+        let mut parent_idx = stack_size - 2;
+        let mut parent = &self.code_stack[parent_idx];
+
+        // If parent is a type parameter scope, look at grandparent
+        if parent.metadata.name.starts_with("<generic parameters of ") {
+            if stack_size == 2 {
+                // If we're immediately within the module after type params,
+                // qualname is just the name
+                return current_obj_name;
+            }
+            parent_idx = stack_size - 3;
+            parent = &self.code_stack[parent_idx];
+        }
+
+        // Check if this is a global class/function
+        let mut force_global = false;
+        if stack_size > self.symbol_table_stack.len() {
+            // We might be in a situation where symbol table isn't pushed yet
+            // In this case, check the parent symbol table
+            if let Some(parent_table) = self.symbol_table_stack.last() {
+                if let Some(symbol) = parent_table.lookup(&current_obj_name) {
+                    if symbol.scope == SymbolScope::GlobalExplicit {
+                        force_global = true;
+                    }
+                }
+            }
+        } else if let Some(_current_table) = self.symbol_table_stack.last() {
+            // Mangle the name if necessary (for private names in classes)
+            let mangled_name = self.mangle(&current_obj_name);
+
+            // Look up in parent symbol table to check scope
+            if self.symbol_table_stack.len() >= 2 {
+                let parent_table = &self.symbol_table_stack[self.symbol_table_stack.len() - 2];
+                if let Some(symbol) = parent_table.lookup(&mangled_name) {
+                    if symbol.scope == SymbolScope::GlobalExplicit {
+                        force_global = true;
+                    }
+                }
+            }
+        }
+
+        // Build the qualified name
+        if force_global {
+            // For global symbols, qualname is just the name
+            current_obj_name
+        } else {
+            // Check parent scope type
+            let parent_obj_name = &parent.metadata.name;
+
+            // Determine if parent is a function-like scope
+            let is_function_parent = parent.flags.contains(bytecode::CodeFlags::IS_OPTIMIZED)
+                && !parent_obj_name.starts_with("<") // Not a special scope like <lambda>, <listcomp>, etc.
+                && parent_obj_name != "<module>"; // Not the module scope
+
+            if is_function_parent {
+                // For functions, append .<locals> to parent qualname
+                // Use parent's qualname if available, otherwise use parent_obj_name
+                let parent_qualname = parent.metadata.qualname.as_ref().unwrap_or(parent_obj_name);
+                format!("{parent_qualname}.<locals>.{current_obj_name}")
+            } else {
+                // For classes and other scopes, use parent's qualname directly
+                // Use parent's qualname if available, otherwise use parent_obj_name
+                let parent_qualname = parent.metadata.qualname.as_ref().unwrap_or(parent_obj_name);
+                if parent_qualname == "<module>" {
+                    // Module level, just use the name
+                    current_obj_name
+                } else {
+                    // Concatenate parent qualname with current name
+                    format!("{parent_qualname}.{current_obj_name}")
+                }
+            }
+        }
     }
 
     fn compile_program(
@@ -587,7 +755,12 @@ impl Compiler<'_> {
     }
 
     fn mangle<'a>(&self, name: &'a str) -> Cow<'a, str> {
-        symboltable::mangle_name(self.class_name.as_deref(), name)
+        // Use u_private from current code unit for name mangling
+        let private = self
+            .code_stack
+            .last()
+            .and_then(|info| info.private.as_deref());
+        symboltable::mangle_name(private, name)
     }
 
     fn check_forbidden_name(&mut self, name: &str, usage: NameUsage) -> CompileResult<()> {
@@ -612,7 +785,7 @@ impl Compiler<'_> {
                 .ok_or_else(|| InternalError::MissingSymbol(name.to_string())),
         );
         let info = self.code_stack.last_mut().unwrap();
-        let mut cache = &mut info.name_cache;
+        let mut cache = &mut info.metadata.names;
         enum NameOpType {
             Fast,
             Global,
@@ -621,7 +794,7 @@ impl Compiler<'_> {
         }
         let op_typ = match symbol.scope {
             SymbolScope::Local if self.ctx.in_func() => {
-                cache = &mut info.varname_cache;
+                cache = &mut info.metadata.varnames;
                 NameOpType::Fast
             }
             SymbolScope::GlobalExplicit => NameOpType::Global,
@@ -631,14 +804,18 @@ impl Compiler<'_> {
             SymbolScope::GlobalImplicit | SymbolScope::Unknown => NameOpType::Local,
             SymbolScope::Local => NameOpType::Local,
             SymbolScope::Free => {
-                cache = &mut info.freevar_cache;
+                cache = &mut info.metadata.freevars;
                 NameOpType::Deref
             }
             SymbolScope::Cell => {
-                cache = &mut info.cellvar_cache;
+                cache = &mut info.metadata.cellvars;
                 NameOpType::Deref
             } // TODO: is this right?
-              // SymbolScope::Unknown => NameOpType::Global,
+            SymbolScope::TypeParams => {
+                // Type parameters are always cell variables
+                cache = &mut info.metadata.cellvars;
+                NameOpType::Deref
+            } // SymbolScope::Unknown => NameOpType::Global,
         };
 
         if NameUsage::Load == usage && name == "__debug__" {
@@ -652,7 +829,7 @@ impl Compiler<'_> {
             .get_index_of(name.as_ref())
             .unwrap_or_else(|| cache.insert_full(name.into_owned()).0);
         if let SymbolScope::Free = symbol.scope {
-            idx += info.cellvar_cache.len();
+            idx += info.metadata.cellvars.len();
         }
         let op = match op_typ {
             NameOpType::Fast => match usage {
@@ -772,7 +949,12 @@ impl Compiler<'_> {
 
                 if import_star {
                     // from .... import *
-                    emit!(self, Instruction::ImportStar);
+                    emit!(
+                        self,
+                        Instruction::CallIntrinsic1 {
+                            func: bytecode::IntrinsicFunction1::ImportStar
+                        }
+                    );
                 } else {
                     // from mod import a, b as c
 
@@ -964,26 +1146,62 @@ impl Compiler<'_> {
                     self.switch_to_block(after_block);
                 }
             }
-            Stmt::Break(_) => match self.ctx.loop_data {
-                Some((_, end)) => {
-                    emit!(self, Instruction::Break { target: end });
+            Stmt::Break(_) => {
+                // Find the innermost loop in fblock stack
+                let found_loop = {
+                    let code = self.current_code_info();
+                    let mut result = None;
+                    for i in (0..code.fblock.len()).rev() {
+                        match code.fblock[i].fb_type {
+                            FBlockType::WhileLoop | FBlockType::ForLoop => {
+                                result = Some(code.fblock[i].fb_exit);
+                                break;
+                            }
+                            _ => continue,
+                        }
+                    }
+                    result
+                };
+
+                match found_loop {
+                    Some(exit_block) => {
+                        emit!(self, Instruction::Break { target: exit_block });
+                    }
+                    None => {
+                        return Err(
+                            self.error_ranged(CodegenErrorType::InvalidBreak, statement.range())
+                        );
+                    }
                 }
-                None => {
-                    return Err(
-                        self.error_ranged(CodegenErrorType::InvalidBreak, statement.range())
-                    );
+            }
+            Stmt::Continue(_) => {
+                // Find the innermost loop in fblock stack
+                let found_loop = {
+                    let code = self.current_code_info();
+                    let mut result = None;
+                    for i in (0..code.fblock.len()).rev() {
+                        match code.fblock[i].fb_type {
+                            FBlockType::WhileLoop | FBlockType::ForLoop => {
+                                result = Some(code.fblock[i].fb_block);
+                                break;
+                            }
+                            _ => continue,
+                        }
+                    }
+                    result
+                };
+
+                match found_loop {
+                    Some(loop_block) => {
+                        emit!(self, Instruction::Continue { target: loop_block });
+                    }
+                    None => {
+                        return Err(
+                            self.error_ranged(CodegenErrorType::InvalidContinue, statement.range())
+                        );
+                    }
                 }
-            },
-            Stmt::Continue(_) => match self.ctx.loop_data {
-                Some((start, _)) => {
-                    emit!(self, Instruction::Continue { target: start });
-                }
-                None => {
-                    return Err(
-                        self.error_ranged(CodegenErrorType::InvalidContinue, statement.range())
-                    );
-                }
-            },
+            }
             Stmt::Return(StmtReturn { value, .. }) => {
                 if !self.ctx.in_func() {
                     return Err(
@@ -1055,33 +1273,41 @@ impl Compiler<'_> {
 
                 // For PEP 695 syntax, we need to compile type_params first
                 // so that they're available when compiling the value expression
-                if let Some(type_params) = type_params {
-                    self.push_symbol_table();
-
-                    // Compile type params first to define T1, T2, etc.
-                    self.compile_type_params(type_params)?;
-                    // Stack now has type_params tuple at top
-
-                    // Compile value expression (can now see T1, T2)
-                    self.compile_expression(value)?;
-                    // Stack: [type_params_tuple, value]
-
-                    // We need [value, type_params_tuple] for TypeAlias instruction
-                    emit!(self, Instruction::Rotate2);
-
-                    self.pop_symbol_table();
-                } else {
-                    // No type params - push value first, then None (not empty tuple)
-                    self.compile_expression(value)?;
-                    // Push None for type_params (matching CPython)
-                    self.emit_load_const(ConstantData::None);
-                }
-
-                // Push name last
+                // Push name first
                 self.emit_load_const(ConstantData::Str {
                     value: name_string.clone().into(),
                 });
-                emit!(self, Instruction::TypeAlias);
+
+                if let Some(type_params) = type_params {
+                    self.push_symbol_table();
+
+                    // Compile type params and push to stack
+                    self.compile_type_params(type_params)?;
+                    // Stack now has [name, type_params_tuple]
+
+                    // Compile value expression (can now see T1, T2)
+                    self.compile_expression(value)?;
+                    // Stack: [name, type_params_tuple, value]
+
+                    self.pop_symbol_table();
+                } else {
+                    // Push None for type_params (matching CPython)
+                    self.emit_load_const(ConstantData::None);
+                    // Stack: [name, None]
+
+                    // Compile value expression
+                    self.compile_expression(value)?;
+                    // Stack: [name, None, value]
+                }
+
+                // Build tuple of 3 elements and call intrinsic
+                emit!(self, Instruction::BuildTuple { size: 3 });
+                emit!(
+                    self,
+                    Instruction::CallIntrinsic1 {
+                        func: bytecode::IntrinsicFunction1::TypeAlias
+                    }
+                );
                 self.store_name(&name_string)?;
             }
             Stmt::IpyEscapeCommand(_) => todo!(),
@@ -1234,12 +1460,22 @@ impl Compiler<'_> {
                         self.emit_load_const(ConstantData::Str {
                             value: name.as_str().into(),
                         });
-                        emit!(self, Instruction::TypeVarWithBound);
+                        emit!(
+                            self,
+                            Instruction::CallIntrinsic2 {
+                                func: bytecode::IntrinsicFunction2::TypeVarWithBound
+                            }
+                        );
                     } else {
                         self.emit_load_const(ConstantData::Str {
                             value: name.as_str().into(),
                         });
-                        emit!(self, Instruction::TypeVar);
+                        emit!(
+                            self,
+                            Instruction::CallIntrinsic1 {
+                                func: bytecode::IntrinsicFunction1::TypeVar
+                            }
+                        );
                     }
 
                     // Handle default value if present (PEP 695)
@@ -1262,7 +1498,12 @@ impl Compiler<'_> {
                     self.emit_load_const(ConstantData::Str {
                         value: name.as_str().into(),
                     });
-                    emit!(self, Instruction::ParamSpec);
+                    emit!(
+                        self,
+                        Instruction::CallIntrinsic1 {
+                            func: bytecode::IntrinsicFunction1::ParamSpec
+                        }
+                    );
 
                     // Handle default value if present (PEP 695)
                     if let Some(default_expr) = default {
@@ -1284,7 +1525,12 @@ impl Compiler<'_> {
                     self.emit_load_const(ConstantData::Str {
                         value: name.as_str().into(),
                     });
-                    emit!(self, Instruction::TypeVarTuple);
+                    emit!(
+                        self,
+                        Instruction::CallIntrinsic1 {
+                            func: bytecode::IntrinsicFunction1::TypeVarTuple
+                        }
+                    );
 
                     // Handle default value if present (PEP 695)
                     if let Some(default_expr) = default {
@@ -1502,19 +1748,23 @@ impl Compiler<'_> {
             },
         };
 
-        self.push_qualified_path(name);
-        let qualified_name = self.qualified_path.join(".");
-
-        // Update the qualname in the current code info
-        self.code_stack.last_mut().unwrap().qualname = Some(qualified_name.clone());
-
-        self.push_qualified_path("<locals>");
+        // Set qualname using the new method
+        let qualname = self.set_qualname();
 
         let (doc_str, body) = split_doc(body, &self.opts);
 
         self.current_code_info()
-            .constants
+            .metadata
+            .consts
             .insert_full(ConstantData::None);
+
+        // Emit RESUME instruction at function start
+        emit!(
+            self,
+            Instruction::Resume {
+                arg: bytecode::ResumeType::AtFuncStart as u32
+            }
+        );
 
         self.compile_statements(body)?;
 
@@ -1529,8 +1779,6 @@ impl Compiler<'_> {
         }
 
         let code = self.pop_code_object();
-        self.qualified_path.pop();
-        self.qualified_path.pop();
         self.ctx = prev_ctx;
 
         // Prepare generic type parameters:
@@ -1593,7 +1841,7 @@ impl Compiler<'_> {
             code: Box::new(code),
         });
         self.emit_load_const(ConstantData::Str {
-            value: qualified_name.into(),
+            value: qualname.into(),
         });
 
         // Turn code object into function object:
@@ -1628,9 +1876,12 @@ impl Compiler<'_> {
             );
             let parent_code = self.code_stack.last().unwrap();
             let vars = match symbol.scope {
-                SymbolScope::Free => &parent_code.freevar_cache,
-                SymbolScope::Cell => &parent_code.cellvar_cache,
-                _ if symbol.flags.contains(SymbolFlags::FREE_CLASS) => &parent_code.freevar_cache,
+                SymbolScope::Free => &parent_code.metadata.freevars,
+                SymbolScope::Cell => &parent_code.metadata.cellvars,
+                SymbolScope::TypeParams => &parent_code.metadata.cellvars,
+                _ if symbol.flags.contains(SymbolFlags::FREE_CLASS) => {
+                    &parent_code.metadata.freevars
+                }
                 x => unreachable!(
                     "var {} in a {:?} should be free or cell but it's {:?}",
                     var, table.typ, x
@@ -1638,7 +1889,7 @@ impl Compiler<'_> {
             };
             let mut idx = vars.get_index_of(var).unwrap();
             if let SymbolScope::Free = symbol.scope {
-                idx += parent_code.cellvar_cache.len();
+                idx += parent_code.metadata.cellvars.len();
             }
             emit!(self, Instruction::LoadClosure(idx.to_u32()))
         }
@@ -1704,36 +1955,28 @@ impl Compiler<'_> {
             loop_data: None,
         };
 
-        let prev_class_name = self.class_name.replace(name.to_owned());
-
-        // Check if the class is declared global
-        let symbol_table = self.symbol_table_stack.last().unwrap();
-        let symbol = unwrap_internal(
-            self,
-            symbol_table
-                .lookup(name.as_ref())
-                .ok_or_else(|| InternalError::MissingSymbol(name.to_owned())),
-        );
-        let mut global_path_prefix = Vec::new();
-        if symbol.scope == SymbolScope::GlobalExplicit {
-            global_path_prefix.append(&mut self.qualified_path);
-        }
-        self.push_qualified_path(name);
-        let qualified_name = self.qualified_path.join(".");
-
         // If there are type params, we need to push a special symbol table just for them
         if let Some(type_params) = type_params {
             self.push_symbol_table();
+            // Save current private name to restore later
+            let saved_private = self.code_stack.last().and_then(|info| info.private.clone());
             // Compile type parameters and store as .type_params
             self.compile_type_params(type_params)?;
+            // Restore private name after type param scope
+            if let Some(private) = saved_private {
+                self.code_stack.last_mut().unwrap().private = Some(private);
+            }
             let dot_type_params = self.name(".type_params");
             emit!(self, Instruction::StoreLocal(dot_type_params));
         }
 
         self.push_output(bytecode::CodeFlags::empty(), 0, 0, 0, name.to_owned());
 
-        // Update the qualname in the current code info
-        self.code_stack.last_mut().unwrap().qualname = Some(qualified_name.clone());
+        // Set qualname using the new method
+        let qualname = self.set_qualname();
+
+        // For class scopes, set u_private to the class name for name mangling
+        self.code_stack.last_mut().unwrap().private = Some(name.to_owned());
 
         let (doc_str, body) = split_doc(body, &self.opts);
 
@@ -1742,10 +1985,10 @@ impl Compiler<'_> {
         let dunder_module = self.name("__module__");
         emit!(self, Instruction::StoreLocal(dunder_module));
         self.emit_load_const(ConstantData::Str {
-            value: qualified_name.into(),
+            value: qualname.into(),
         });
-        let qualname = self.name("__qualname__");
-        emit!(self, Instruction::StoreLocal(qualname));
+        let qualname_name = self.name("__qualname__");
+        emit!(self, Instruction::StoreLocal(qualname_name));
         self.load_docstring(doc_str);
         let doc = self.name("__doc__");
         emit!(self, Instruction::StoreLocal(doc));
@@ -1771,7 +2014,8 @@ impl Compiler<'_> {
             .code_stack
             .last_mut()
             .unwrap()
-            .cellvar_cache
+            .metadata
+            .cellvars
             .iter()
             .position(|var| *var == "__class__");
 
@@ -1787,10 +2031,6 @@ impl Compiler<'_> {
         self.emit_return_value();
 
         let code = self.pop_code_object();
-
-        self.class_name = prev_class_name;
-        self.qualified_path.pop();
-        self.qualified_path.append(global_path_prefix.as_mut());
         self.ctx = prev_ctx;
 
         emit!(self, Instruction::LoadBuildClass);
@@ -1884,6 +2124,9 @@ impl Compiler<'_> {
         emit!(self, Instruction::SetupLoop);
         self.switch_to_block(while_block);
 
+        // Push fblock for while loop
+        self.push_fblock(FBlockType::WhileLoop, while_block, after_block)?;
+
         self.compile_jump_if(test, false, else_block)?;
 
         let was_in_loop = self.ctx.loop_data.replace((while_block, after_block));
@@ -1896,6 +2139,9 @@ impl Compiler<'_> {
             }
         );
         self.switch_to_block(else_block);
+
+        // Pop fblock
+        self.pop_fblock(FBlockType::WhileLoop);
         emit!(self, Instruction::PopBlock);
         self.compile_statements(orelse)?;
         self.switch_to_block(after_block);
@@ -1924,6 +2170,12 @@ impl Compiler<'_> {
                 emit!(self, Instruction::GetAwaitable);
                 self.emit_load_const(ConstantData::None);
                 emit!(self, Instruction::YieldFrom);
+                emit!(
+                    self,
+                    Instruction::Resume {
+                        arg: bytecode::ResumeType::AfterAwait as u32
+                    }
+                );
                 emit!(self, Instruction::SetupAsyncWith { end: final_block });
             } else {
                 emit!(self, Instruction::SetupWith { end: final_block });
@@ -1965,6 +2217,12 @@ impl Compiler<'_> {
             emit!(self, Instruction::GetAwaitable);
             self.emit_load_const(ConstantData::None);
             emit!(self, Instruction::YieldFrom);
+            emit!(
+                self,
+                Instruction::Resume {
+                    arg: bytecode::ResumeType::AfterAwait as u32
+                }
+            );
         }
 
         emit!(self, Instruction::WithCleanupFinish);
@@ -1994,6 +2252,10 @@ impl Compiler<'_> {
             emit!(self, Instruction::GetAIter);
 
             self.switch_to_block(for_block);
+
+            // Push fblock for async for loop
+            self.push_fblock(FBlockType::ForLoop, for_block, after_block)?;
+
             emit!(
                 self,
                 Instruction::SetupExcept {
@@ -2003,6 +2265,12 @@ impl Compiler<'_> {
             emit!(self, Instruction::GetANext);
             self.emit_load_const(ConstantData::None);
             emit!(self, Instruction::YieldFrom);
+            emit!(
+                self,
+                Instruction::Resume {
+                    arg: bytecode::ResumeType::AfterAwait as u32
+                }
+            );
             self.compile_store(target)?;
             emit!(self, Instruction::PopBlock);
         } else {
@@ -2010,6 +2278,10 @@ impl Compiler<'_> {
             emit!(self, Instruction::GetIter);
 
             self.switch_to_block(for_block);
+
+            // Push fblock for for loop
+            self.push_fblock(FBlockType::ForLoop, for_block, after_block)?;
+
             emit!(self, Instruction::ForIter { target: else_block });
 
             // Start of loop iteration, set targets:
@@ -2022,6 +2294,10 @@ impl Compiler<'_> {
         emit!(self, Instruction::Jump { target: for_block });
 
         self.switch_to_block(else_block);
+
+        // Pop fblock
+        self.pop_fblock(FBlockType::ForLoop);
+
         if is_async {
             emit!(self, Instruction::EndAsyncFor);
         }
@@ -3474,6 +3750,12 @@ impl Compiler<'_> {
                     Option::None => self.emit_load_const(ConstantData::None),
                 };
                 emit!(self, Instruction::YieldValue);
+                emit!(
+                    self,
+                    Instruction::Resume {
+                        arg: bytecode::ResumeType::AfterYield as u32
+                    }
+                );
             }
             Expr::Await(ExprAwait { value, .. }) => {
                 if self.ctx.func != FunctionContext::AsyncFunction {
@@ -3483,6 +3765,12 @@ impl Compiler<'_> {
                 emit!(self, Instruction::GetAwaitable);
                 self.emit_load_const(ConstantData::None);
                 emit!(self, Instruction::YieldFrom);
+                emit!(
+                    self,
+                    Instruction::Resume {
+                        arg: bytecode::ResumeType::AfterAwait as u32
+                    }
+                );
             }
             Expr::YieldFrom(ExprYieldFrom { value, .. }) => {
                 match self.ctx.func {
@@ -3499,6 +3787,12 @@ impl Compiler<'_> {
                 emit!(self, Instruction::GetIter);
                 self.emit_load_const(ConstantData::None);
                 emit!(self, Instruction::YieldFrom);
+                emit!(
+                    self,
+                    Instruction::Resume {
+                        arg: bytecode::ResumeType::AfterYieldFrom as u32
+                    }
+                );
             }
             Expr::Name(ExprName { id, .. }) => self.load_name(id.as_str())?,
             Expr::Lambda(ExprLambda {
@@ -3510,8 +3804,8 @@ impl Compiler<'_> {
                 let mut func_flags = self
                     .enter_function(&name, parameters.as_deref().unwrap_or(&Default::default()))?;
 
-                // Lambda qualname should be <lambda>
-                self.code_stack.last_mut().unwrap().qualname = Some(name.clone());
+                // Set qualname for lambda
+                self.set_qualname();
 
                 self.ctx = CompileContext {
                     loop_data: Option::None,
@@ -3520,7 +3814,8 @@ impl Compiler<'_> {
                 };
 
                 self.current_code_info()
-                    .constants
+                    .metadata
+                    .consts
                     .insert_full(ConstantData::None);
 
                 self.compile_expression(body)?;
@@ -3625,6 +3920,12 @@ impl Compiler<'_> {
                         compiler.compile_comprehension_element(elt)?;
                         compiler.mark_generator();
                         emit!(compiler, Instruction::YieldValue);
+                        emit!(
+                            compiler,
+                            Instruction::Resume {
+                                arg: bytecode::ResumeType::AfterYield as u32
+                            }
+                        );
                         emit!(compiler, Instruction::Pop);
 
                         Ok(())
@@ -3975,8 +4276,11 @@ impl Compiler<'_> {
         // Create magnificent function <listcomp>:
         self.push_output(flags, 1, 1, 0, name.to_owned());
 
+        // Mark that we're in an inlined comprehension
+        self.current_code_info().in_inlined_comp = true;
+
         // Set qualname for comprehension
-        self.code_stack.last_mut().unwrap().qualname = Some(name.to_owned());
+        self.set_qualname();
 
         let arg0 = self.varname(".0")?;
 
@@ -4020,6 +4324,12 @@ impl Compiler<'_> {
                 emit!(self, Instruction::GetANext);
                 self.emit_load_const(ConstantData::None);
                 emit!(self, Instruction::YieldFrom);
+                emit!(
+                    self,
+                    Instruction::Resume {
+                        arg: bytecode::ResumeType::AfterAwait as u32
+                    }
+                );
                 self.compile_store(&generator.target)?;
                 emit!(self, Instruction::PopBlock);
             } else {
@@ -4098,6 +4408,12 @@ impl Compiler<'_> {
             emit!(self, Instruction::GetAwaitable);
             self.emit_load_const(ConstantData::None);
             emit!(self, Instruction::YieldFrom);
+            emit!(
+                self,
+                Instruction::Resume {
+                    arg: bytecode::ResumeType::AfterAwait as u32
+                }
+            );
         }
 
         Ok(())
@@ -4155,7 +4471,7 @@ impl Compiler<'_> {
 
     fn arg_constant(&mut self, constant: ConstantData) -> u32 {
         let info = self.current_code_info();
-        info.constants.insert_full(constant).0.to_u32()
+        info.metadata.consts.insert_full(constant).0.to_u32()
     }
 
     fn emit_load_const(&mut self, constant: ConstantData) {
@@ -4220,10 +4536,6 @@ impl Compiler<'_> {
     fn get_source_line_number(&mut self) -> OneIndexed {
         self.source_code
             .line_index(self.current_source_range.start())
-    }
-
-    fn push_qualified_path(&mut self, name: &str) {
-        self.qualified_path.push(name.to_owned());
     }
 
     fn mark_generator(&mut self) {

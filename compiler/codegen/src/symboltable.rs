@@ -45,6 +45,9 @@ pub struct SymbolTable {
     /// A list of sub-scopes in the order as found in the
     /// AST nodes.
     pub sub_tables: Vec<SymbolTable>,
+
+    /// Variable names in definition order (parameters first, then locals)
+    pub varnames: Vec<String>,
 }
 
 impl SymbolTable {
@@ -56,6 +59,7 @@ impl SymbolTable {
             is_nested,
             symbols: IndexMap::default(),
             sub_tables: vec![],
+            varnames: Vec::new(),
         }
     }
 
@@ -80,6 +84,7 @@ pub enum SymbolTableType {
     Module,
     Class,
     Function,
+    Lambda,
     Comprehension,
     TypeParams,
 }
@@ -90,6 +95,7 @@ impl fmt::Display for SymbolTableType {
             Self::Module => write!(f, "module"),
             Self::Class => write!(f, "class"),
             Self::Function => write!(f, "function"),
+            Self::Lambda => write!(f, "lambda"),
             Self::Comprehension => write!(f, "comprehension"),
             Self::TypeParams => write!(f, "type parameter"),
             // TODO missing types from the C implementation
@@ -113,6 +119,7 @@ pub enum SymbolScope {
     GlobalImplicit,
     Free,
     Cell,
+    TypeParams,
 }
 
 bitflags! {
@@ -359,6 +366,10 @@ impl SymbolTableAnalyzer {
                 SymbolScope::Local | SymbolScope::Cell => {
                     // all is well
                 }
+                SymbolScope::TypeParams => {
+                    // Type parameters are always cell variables in their scope
+                    symbol.scope = SymbolScope::Cell;
+                }
                 SymbolScope::Unknown => {
                     // Try hard to figure out what the scope of this symbol is.
                     let scope = if symbol.is_bound() {
@@ -488,7 +499,7 @@ impl SymbolTableAnalyzer {
                     location: None,
                 });
             }
-            SymbolTableType::Function => {
+            SymbolTableType::Function | SymbolTableType::Lambda => {
                 if let Some(parent_symbol) = symbols.get_mut(&symbol.name) {
                     if let SymbolScope::Unknown = parent_symbol.scope {
                         // this information is new, as the assignment is done in inner scope
@@ -557,6 +568,7 @@ enum SymbolUsage {
     AnnotationParameter,
     AssignedNamedExprInComprehension,
     Iter,
+    TypeParam,
 }
 
 struct SymbolTableBuilder<'src> {
@@ -565,6 +577,8 @@ struct SymbolTableBuilder<'src> {
     tables: Vec<SymbolTable>,
     future_annotations: bool,
     source_code: SourceCode<'src>,
+    // Current scope's varnames being collected (temporary storage)
+    current_varnames: Vec<String>,
 }
 
 /// Enum to indicate in what mode an expression
@@ -587,6 +601,7 @@ impl<'src> SymbolTableBuilder<'src> {
             tables: vec![],
             future_annotations: false,
             source_code,
+            current_varnames: Vec::new(),
         };
         this.enter_scope("top", SymbolTableType::Module, 0);
         this
@@ -597,6 +612,8 @@ impl SymbolTableBuilder<'_> {
     fn finish(mut self) -> Result<SymbolTable, SymbolTableError> {
         assert_eq!(self.tables.len(), 1);
         let mut symbol_table = self.tables.pop().unwrap();
+        // Save varnames for the top-level module scope
+        symbol_table.varnames = self.current_varnames;
         analyze_symbol_table(&mut symbol_table)?;
         Ok(symbol_table)
     }
@@ -609,11 +626,15 @@ impl SymbolTableBuilder<'_> {
             .unwrap_or(false);
         let table = SymbolTable::new(name.to_owned(), typ, line_number, is_nested);
         self.tables.push(table);
+        // Clear current_varnames for the new scope
+        self.current_varnames.clear();
     }
 
     /// Pop symbol table and add to sub table of parent table.
     fn leave_scope(&mut self) {
-        let table = self.tables.pop().unwrap();
+        let mut table = self.tables.pop().unwrap();
+        // Save the collected varnames to the symbol table
+        table.varnames = std::mem::take(&mut self.current_varnames);
         self.tables.last_mut().unwrap().sub_tables.push(table);
     }
 
@@ -1134,7 +1155,7 @@ impl SymbolTableBuilder<'_> {
                 } else {
                     self.enter_scope(
                         "lambda",
-                        SymbolTableType::Function,
+                        SymbolTableType::Lambda,
                         self.line_index_start(expression.range()),
                     );
                 }
@@ -1267,6 +1288,9 @@ impl SymbolTableBuilder<'_> {
     }
 
     fn scan_type_params(&mut self, type_params: &TypeParams) -> SymbolTableResult {
+        // Register .type_params as a type parameter (automatically becomes cell variable)
+        self.register_name(".type_params", SymbolUsage::TypeParam, type_params.range)?;
+
         // First register all type parameters
         for type_param in &type_params.type_params {
             match type_param {
@@ -1276,7 +1300,7 @@ impl SymbolTableBuilder<'_> {
                     range: type_var_range,
                     ..
                 }) => {
-                    self.register_name(name.as_str(), SymbolUsage::Assigned, *type_var_range)?;
+                    self.register_name(name.as_str(), SymbolUsage::TypeParam, *type_var_range)?;
                     if let Some(binding) = bound {
                         self.scan_expression(binding, ExpressionContext::Load)?;
                     }
@@ -1286,14 +1310,14 @@ impl SymbolTableBuilder<'_> {
                     range: param_spec_range,
                     ..
                 }) => {
-                    self.register_name(name, SymbolUsage::Assigned, *param_spec_range)?;
+                    self.register_name(name, SymbolUsage::TypeParam, *param_spec_range)?;
                 }
                 TypeParam::TypeVarTuple(TypeParamTypeVarTuple {
                     name,
                     range: type_var_tuple_range,
                     ..
                 }) => {
-                    self.register_name(name, SymbolUsage::Assigned, *type_var_tuple_range)?;
+                    self.register_name(name, SymbolUsage::TypeParam, *type_var_tuple_range)?;
                 }
             }
         }
@@ -1522,18 +1546,43 @@ impl SymbolTableBuilder<'_> {
             }
             SymbolUsage::Parameter => {
                 flags.insert(SymbolFlags::PARAMETER);
+                // Parameters are always added to varnames first
+                let name_str = symbol.name.clone();
+                if !self.current_varnames.contains(&name_str) {
+                    self.current_varnames.push(name_str);
+                }
             }
             SymbolUsage::AnnotationParameter => {
                 flags.insert(SymbolFlags::PARAMETER | SymbolFlags::ANNOTATED);
+                // Annotated parameters are also added to varnames
+                let name_str = symbol.name.clone();
+                if !self.current_varnames.contains(&name_str) {
+                    self.current_varnames.push(name_str);
+                }
             }
             SymbolUsage::AnnotationAssigned => {
                 flags.insert(SymbolFlags::ASSIGNED | SymbolFlags::ANNOTATED);
             }
             SymbolUsage::Assigned => {
                 flags.insert(SymbolFlags::ASSIGNED);
+                // Local variables (assigned) are added to varnames if they are local scope
+                // and not already in varnames
+                if symbol.scope == SymbolScope::Local {
+                    let name_str = symbol.name.clone();
+                    if !self.current_varnames.contains(&name_str) {
+                        self.current_varnames.push(name_str);
+                    }
+                }
             }
             SymbolUsage::AssignedNamedExprInComprehension => {
                 flags.insert(SymbolFlags::ASSIGNED | SymbolFlags::ASSIGNED_IN_COMPREHENSION);
+                // Named expressions in comprehensions might also be locals
+                if symbol.scope == SymbolScope::Local {
+                    let name_str = symbol.name.clone();
+                    if !self.current_varnames.contains(&name_str) {
+                        self.current_varnames.push(name_str);
+                    }
+                }
             }
             SymbolUsage::Global => {
                 symbol.scope = SymbolScope::GlobalExplicit;
@@ -1543,6 +1592,11 @@ impl SymbolTableBuilder<'_> {
             }
             SymbolUsage::Iter => {
                 flags.insert(SymbolFlags::ITER);
+            }
+            SymbolUsage::TypeParam => {
+                // Type parameters are always cell variables in their scope
+                symbol.scope = SymbolScope::Cell;
+                flags.insert(SymbolFlags::ASSIGNED);
             }
         }
 

@@ -24,6 +24,16 @@ pub enum ConversionFlag {
     Repr = b'r' as i8,
 }
 
+/// Resume type for the RESUME instruction
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ResumeType {
+    AtFuncStart = 0,
+    AfterYield = 1,
+    AfterYieldFrom = 2,
+    AfterAwait = 3,
+}
+
 pub trait Constant: Sized {
     type Name: AsRef<str>;
 
@@ -382,27 +392,15 @@ op_arg_enum!(
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     #[repr(u8)]
     pub enum IntrinsicFunction1 {
-        /// Import * special case
-        // ImportStar = 0,
-        /// Set stop iteration value
-        // StopAsyncIteration = 1,
-        /// Unary operators
-        // UnaryPositive = 2,
-        // UnaryNegative = 3,
-        // UnaryNot = 4,
-        // UnaryInvert = 5,
-        /// Exit init subclass
-        // ExitInitCheck = 6,
-        /// Create a new list from an iterator
-        // ListToTupleForCall = 7,
+        /// Import * operation
+        ImportStar = 2,
         /// Type parameter related
-        // TypeVar = 8,
-        // TypeVarTuple = 9,
-        // ParamSpec = 10,
+        TypeVar = 7,
+        ParamSpec = 8,
+        TypeVarTuple = 9,
         /// Generic subscript for PEP 695
         SubscriptGeneric = 10,
-        // TypeAlias = 12,
-        // TypeParams = 13,
+        TypeAlias = 11,
     }
 );
 
@@ -412,9 +410,9 @@ op_arg_enum!(
     #[repr(u8)]
     pub enum IntrinsicFunction2 {
         // PrepReraiseS tar = 1,
-        // TypeVarWithBound = 2,
-        // TypeVarWithConstraints = 3,
-        // SetFunctionTypeParams = 4,
+        TypeVarWithBound = 2,
+        TypeVarWithConstraint = 3,
+        SetFunctionTypeParams = 4,
         /// Set default value for type parameter (PEP 695)
         SetTypeparamDefault = 5,
     }
@@ -433,8 +431,6 @@ pub enum Instruction {
     },
     /// Importing without name
     ImportNameless,
-    /// Import *
-    ImportStar,
     /// from ... import ...
     ImportFrom {
         idx: Arg<NameIdx>,
@@ -563,6 +559,12 @@ pub enum Instruction {
     },
     YieldValue,
     YieldFrom,
+
+    /// Resume execution (e.g., at function start, after yield, etc.)
+    Resume {
+        arg: Arg<u32>,
+    },
+
     SetupAnnotation,
     SetupLoop,
 
@@ -668,16 +670,10 @@ pub enum Instruction {
     MatchKeys,
     MatchClass(Arg<u32>),
     ExtendedArg,
-    TypeVar,
-    TypeVarWithBound,
-    TypeVarWithConstraint,
-    TypeAlias,
-    TypeVarTuple,
-    ParamSpec,
     // If you add a new instruction here, be sure to keep LAST_INSTRUCTION updated
 }
 // This must be kept up to date to avoid marshaling errors
-const LAST_INSTRUCTION: Instruction = Instruction::ParamSpec;
+const LAST_INSTRUCTION: Instruction = Instruction::ExtendedArg;
 const _: () = assert!(mem::size_of::<Instruction>() == 1);
 
 impl From<Instruction> for u8 {
@@ -1260,7 +1256,6 @@ impl Instruction {
         match self {
             Nop => 0,
             ImportName { .. } | ImportNameless => -1,
-            ImportStar => -1,
             ImportFrom { .. } => 1,
             LoadFast(_) | LoadNameAny(_) | LoadGlobal(_) | LoadDeref(_) | LoadClassDeref(_) => 1,
             StoreFast(_) | StoreLocal(_) | StoreGlobal(_) | StoreDeref(_) => -1,
@@ -1325,6 +1320,7 @@ impl Instruction {
             }
             ReturnValue => -1,
             ReturnConst { .. } => 0,
+            Resume { .. } => 0,
             YieldValue => 0,
             YieldFrom => -1,
             SetupAnnotation | SetupLoop | SetupFinally { .. } | EnterFinally | EndFinally => 0,
@@ -1380,12 +1376,6 @@ impl Instruction {
             MatchKeys => -1,
             MatchClass(_) => -2,
             ExtendedArg => 0,
-            TypeVar => 0,
-            TypeVarWithBound => -1,
-            TypeVarWithConstraint => -1,
-            TypeAlias => -2,
-            ParamSpec => 0,
-            TypeVarTuple => 0,
         }
     }
 
@@ -1459,7 +1449,6 @@ impl Instruction {
             Nop => w!(Nop),
             ImportName { idx } => w!(ImportName, name = idx),
             ImportNameless => w!(ImportNameless),
-            ImportStar => w!(ImportStar),
             ImportFrom { idx } => w!(ImportFrom, name = idx),
             LoadFast(idx) => w!(LoadFast, varname = idx),
             LoadNameAny(idx) => w!(LoadNameAny, name = idx),
@@ -1519,6 +1508,7 @@ impl Instruction {
             ForIter { target } => w!(ForIter, target),
             ReturnValue => w!(ReturnValue),
             ReturnConst { idx } => fmt_const("ReturnConst", arg, f, idx),
+            Resume { arg } => w!(Resume, arg),
             YieldValue => w!(YieldValue),
             YieldFrom => w!(YieldFrom),
             SetupAnnotation => w!(SetupAnnotation),
@@ -1565,12 +1555,6 @@ impl Instruction {
             MatchKeys => w!(MatchKeys),
             MatchClass(arg) => w!(MatchClass, arg),
             ExtendedArg => w!(ExtendedArg, Arg::<u32>::marker()),
-            TypeVar => w!(TypeVar),
-            TypeVarWithBound => w!(TypeVarWithBound),
-            TypeVarWithConstraint => w!(TypeVarWithConstraint),
-            TypeAlias => w!(TypeAlias),
-            ParamSpec => w!(ParamSpec),
-            TypeVarTuple => w!(TypeVarTuple),
         }
     }
 }
