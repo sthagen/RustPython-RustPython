@@ -7,7 +7,7 @@ use crate::{
         PySlice, PyStr, PyStrInterned, PyStrRef, PyTraceback, PyType,
         asyncgenerator::PyAsyncGenWrappedValue,
         function::{PyCell, PyCellRef, PyFunction},
-        tuple::{PyTuple, PyTupleRef, PyTupleTyped},
+        tuple::{PyTuple, PyTupleRef},
     },
     bytecode,
     convert::{IntoObject, ToPyResult},
@@ -1159,8 +1159,9 @@ impl ExecutingFrame<'_> {
                 }
             }
             bytecode::Instruction::ForIter { target } => self.execute_for_iter(vm, target.get(arg)),
-            bytecode::Instruction::MakeFunction(flags) => {
-                self.execute_make_function(vm, flags.get(arg))
+            bytecode::Instruction::MakeFunction => self.execute_make_function(vm),
+            bytecode::Instruction::SetFunctionAttribute { attr } => {
+                self.execute_set_function_attribute(vm, attr.get(arg))
             }
             bytecode::Instruction::CallFunctionPositional { nargs } => {
                 let args = self.collect_positional_args(nargs.get(arg));
@@ -1346,11 +1347,14 @@ impl ExecutingFrame<'_> {
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
     fn import(&mut self, vm: &VirtualMachine, module_name: Option<&Py<PyStr>>) -> PyResult<()> {
         let module_name = module_name.unwrap_or(vm.ctx.empty_str);
-        let from_list = <Option<PyTupleTyped<PyStrRef>>>::try_from_object(vm, self.pop_value())?
-            .unwrap_or_else(|| PyTupleTyped::empty(vm));
+        let top = self.pop_value();
+        let from_list = match <Option<PyTupleRef>>::try_from_object(vm, top)? {
+            Some(from_list) => from_list.try_into_typed::<PyStr>(vm)?,
+            None => vm.ctx.empty_tuple_typed().to_owned(),
+        };
         let level = usize::try_from_object(vm, self.pop_value())?;
 
-        let module = vm.import_from(module_name, from_list, level)?;
+        let module = vm.import_from(module_name, &from_list, level)?;
 
         self.push_value(module);
         Ok(())
@@ -1360,19 +1364,38 @@ impl ExecutingFrame<'_> {
     fn import_from(&mut self, vm: &VirtualMachine, idx: bytecode::NameIdx) -> PyResult {
         let module = self.top_value();
         let name = self.code.names[idx as usize];
-        let err = || vm.new_import_error(format!("cannot import name '{name}'"), name.to_owned());
+
         // Load attribute, and transform any error into import error.
         if let Some(obj) = vm.get_attribute_opt(module.to_owned(), name)? {
             return Ok(obj);
         }
         // fallback to importing '{module.__name__}.{name}' from sys.modules
-        let mod_name = module
-            .get_attr(identifier!(vm, __name__), vm)
-            .map_err(|_| err())?;
-        let mod_name = mod_name.downcast::<PyStr>().map_err(|_| err())?;
-        let full_mod_name = format!("{mod_name}.{name}");
-        let sys_modules = vm.sys_module.get_attr("modules", vm).map_err(|_| err())?;
-        sys_modules.get_item(&full_mod_name, vm).map_err(|_| err())
+        let fallback_module = (|| {
+            let mod_name = module.get_attr(identifier!(vm, __name__), vm).ok()?;
+            let mod_name = mod_name.downcast_ref::<PyStr>()?;
+            let full_mod_name = format!("{mod_name}.{name}");
+            let sys_modules = vm.sys_module.get_attr("modules", vm).ok()?;
+            sys_modules.get_item(&full_mod_name, vm).ok()
+        })();
+
+        if let Some(sub_module) = fallback_module {
+            return Ok(sub_module);
+        }
+
+        if is_module_initializing(module, vm) {
+            let module_name = module
+                .get_attr(identifier!(vm, __name__), vm)
+                .ok()
+                .and_then(|n| n.downcast_ref::<PyStr>().map(|s| s.as_str().to_owned()))
+                .unwrap_or_else(|| "<unknown>".to_owned());
+
+            let msg = format!(
+                "cannot import name '{name}' from partially initialized module '{module_name}' (most likely due to a circular import)",
+            );
+            Err(vm.new_import_error(msg, name.to_owned()))
+        } else {
+            Err(vm.new_import_error(format!("cannot import name '{name}'"), name.to_owned()))
+        }
     }
 
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
@@ -1824,78 +1847,46 @@ impl ExecutingFrame<'_> {
             }
         }
     }
-    fn execute_make_function(
-        &mut self,
-        vm: &VirtualMachine,
-        flags: bytecode::MakeFunctionFlags,
-    ) -> FrameResult {
-        let qualified_name = self
-            .pop_value()
-            .downcast::<PyStr>()
-            .expect("qualified name to be a string");
+    fn execute_make_function(&mut self, vm: &VirtualMachine) -> FrameResult {
+        // MakeFunction only takes code object, no flags
         let code_obj: PyRef<PyCode> = self
             .pop_value()
             .downcast()
-            .expect("Second to top value on the stack must be a code object");
+            .expect("Stack value should be code object");
 
-        let closure = if flags.contains(bytecode::MakeFunctionFlags::CLOSURE) {
-            Some(PyTupleTyped::try_from_object(vm, self.pop_value()).unwrap())
-        } else {
-            None
-        };
-
-        let annotations = if flags.contains(bytecode::MakeFunctionFlags::ANNOTATIONS) {
-            self.pop_value()
-        } else {
-            vm.ctx.new_dict().into()
-        };
-
-        let type_params: PyTupleRef = if flags.contains(bytecode::MakeFunctionFlags::TYPE_PARAMS) {
-            self.pop_value()
-                .downcast()
-                .map_err(|_| vm.new_type_error("Type params must be a tuple."))?
-        } else {
-            vm.ctx.empty_tuple.clone()
-        };
-
-        let kw_only_defaults = if flags.contains(bytecode::MakeFunctionFlags::KW_ONLY_DEFAULTS) {
-            Some(
-                self.pop_value()
-                    .downcast::<PyDict>()
-                    .expect("Stack value for keyword only defaults expected to be a dict"),
-            )
-        } else {
-            None
-        };
-
-        let defaults = if flags.contains(bytecode::MakeFunctionFlags::DEFAULTS) {
-            Some(
-                self.pop_value()
-                    .downcast::<PyTuple>()
-                    .expect("Stack value for defaults expected to be a tuple"),
-            )
-        } else {
-            None
-        };
-
-        // pop argc arguments
-        // argument: name, args, globals
-        // let scope = self.scope.clone();
-        let func_obj = PyFunction::new(
-            code_obj,
-            self.globals.clone(),
-            closure,
-            defaults,
-            kw_only_defaults,
-            qualified_name.clone(),
-            type_params,
-            annotations.downcast().unwrap(),
-            vm.ctx.none(),
-            vm,
-        )?
-        .into_pyobject(vm);
+        // Create function with minimal attributes
+        let func_obj = PyFunction::new(code_obj, self.globals.clone(), vm)?.into_pyobject(vm);
 
         self.push_value(func_obj);
+        Ok(None)
+    }
+
+    fn execute_set_function_attribute(
+        &mut self,
+        vm: &VirtualMachine,
+        attr: bytecode::MakeFunctionFlags,
+    ) -> FrameResult {
+        // CPython 3.13 style: SET_FUNCTION_ATTRIBUTE sets attributes on a function
+        // Stack: [..., attr_value, func] -> [..., func]
+        // Stack order: func is at -1, attr_value is at -2
+
+        let func = self.pop_value();
+        let attr_value = self.replace_top(func);
+
+        let func = self.top_value();
+        // Get the function reference and call the new method
+        let func_ref = func
+            .downcast_ref::<PyFunction>()
+            .expect("SET_FUNCTION_ATTRIBUTE expects function on stack");
+
+        let payload: &PyFunction = func_ref.payload();
+        // SetFunctionAttribute always follows MakeFunction, so at this point
+        // there are no other references to func. It is therefore safe to treat it as mutable.
+        unsafe {
+            let payload_ptr = payload as *const PyFunction as *mut PyFunction;
+            (*payload_ptr).set_function_attribute(attr, attr_value, vm)?;
+        };
+
         Ok(None)
     }
 
@@ -2367,4 +2358,17 @@ impl fmt::Debug for Frame {
             locals.into_object()
         )
     }
+}
+
+fn is_module_initializing(module: &PyObject, vm: &VirtualMachine) -> bool {
+    let Ok(spec) = module.get_attr(&vm.ctx.new_str("__spec__"), vm) else {
+        return false;
+    };
+    if vm.is_none(&spec) {
+        return false;
+    }
+    let Ok(initializing_attr) = spec.get_attr(&vm.ctx.new_str("_initializing"), vm) else {
+        return false;
+    };
+    initializing_attr.try_to_bool(vm).unwrap_or(false)
 }

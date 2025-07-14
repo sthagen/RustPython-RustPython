@@ -695,7 +695,11 @@ mod _sqlite {
         }
         if let Ok(adapter) = proto.get_attr("__adapt__", vm) {
             match adapter.call((obj,), vm) {
-                Ok(val) => return Ok(val),
+                Ok(val) => {
+                    if !vm.is_none(&val) {
+                        return Ok(val);
+                    }
+                }
                 Err(exc) => {
                     if !exc.fast_isinstance(vm.ctx.exceptions.type_error) {
                         return Err(exc);
@@ -705,7 +709,11 @@ mod _sqlite {
         }
         if let Ok(adapter) = obj.get_attr("__conform__", vm) {
             match adapter.call((proto,), vm) {
-                Ok(val) => return Ok(val),
+                Ok(val) => {
+                    if !vm.is_none(&val) {
+                        return Ok(val);
+                    }
+                }
                 Err(exc) => {
                     if !exc.fast_isinstance(vm.ctx.exceptions.type_error) {
                         return Err(exc);
@@ -836,7 +844,7 @@ mod _sqlite {
         type Args = (PyStrRef,);
 
         fn call(zelf: &Py<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult {
-            if let Some(stmt) = Statement::new(zelf, &args.0, vm)? {
+            if let Some(stmt) = Statement::new(zelf, args.0, vm)? {
                 Ok(stmt.into_ref(&vm.ctx).into())
             } else {
                 Ok(vm.ctx.none())
@@ -1472,7 +1480,7 @@ mod _sqlite {
                 stmt.lock().reset();
             }
 
-            let Some(stmt) = Statement::new(&zelf.connection, &sql, vm)? else {
+            let Some(stmt) = Statement::new(&zelf.connection, sql, vm)? else {
                 drop(inner);
                 return Ok(zelf);
             };
@@ -1544,7 +1552,7 @@ mod _sqlite {
                 stmt.lock().reset();
             }
 
-            let Some(stmt) = Statement::new(&zelf.connection, &sql, vm)? else {
+            let Some(stmt) = Statement::new(&zelf.connection, sql, vm)? else {
                 drop(inner);
                 return Ok(zelf);
             };
@@ -2283,9 +2291,10 @@ mod _sqlite {
     impl Statement {
         fn new(
             connection: &Connection,
-            sql: &PyStr,
+            sql: PyStrRef,
             vm: &VirtualMachine,
         ) -> PyResult<Option<Self>> {
+            let sql = sql.try_into_utf8(vm)?;
             let sql_cstr = sql.to_cstring(vm)?;
             let sql_len = sql.byte_len() + 1;
 
@@ -2965,12 +2974,10 @@ mod _sqlite {
     }
 
     fn str_to_ptr_len(s: &PyStr, vm: &VirtualMachine) -> PyResult<(*const libc::c_char, i32)> {
-        let s = s
-            .to_str()
-            .ok_or_else(|| vm.new_unicode_encode_error("surrogates not allowed"))?;
-        let len = c_int::try_from(s.len())
+        let s_str = s.try_to_str(vm)?;
+        let len = c_int::try_from(s_str.len())
             .map_err(|_| vm.new_overflow_error("TEXT longer than INT_MAX bytes"))?;
-        let ptr = s.as_ptr().cast();
+        let ptr = s_str.as_ptr().cast();
         Ok((ptr, len))
     }
 

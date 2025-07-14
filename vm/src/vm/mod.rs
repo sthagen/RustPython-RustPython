@@ -14,16 +14,11 @@ mod vm_new;
 mod vm_object;
 mod vm_ops;
 
-#[cfg(not(feature = "stdio"))]
-use crate::builtins::PyNone;
 use crate::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
     builtins::{
         PyBaseExceptionRef, PyDictRef, PyInt, PyList, PyModule, PyStr, PyStrInterned, PyStrRef,
-        PyTypeRef,
-        code::PyCode,
-        pystr::AsPyStr,
-        tuple::{PyTuple, PyTupleTyped},
+        PyTypeRef, code::PyCode, pystr::AsPyStr, tuple::PyTuple,
     },
     codecs::CodecsRegistry,
     common::{hash::HashSecret, lock::PyMutex, rc::PyRc},
@@ -340,7 +335,8 @@ impl VirtualMachine {
                     Ok(stdio)
                 };
                 #[cfg(not(feature = "stdio"))]
-                let make_stdio = |_name, _fd, _write| Ok(PyNone.into_pyobject(self));
+                let make_stdio =
+                    |_name, _fd, _write| Ok(crate::builtins::PyNone.into_pyobject(self));
 
                 let set_stdio = |name, fd, write| {
                     let stdio = make_stdio(name, fd, write)?;
@@ -452,19 +448,7 @@ impl VirtualMachine {
         use crate::builtins::PyFunction;
 
         // Create a function object for module code, similar to CPython's PyEval_EvalCode
-        let qualname = self.ctx.new_str(code.obj_name.as_str());
-        let func = PyFunction::new(
-            code.clone(),
-            scope.globals.clone(),
-            None, // closure
-            None, // defaults
-            None, // kwdefaults
-            qualname,
-            self.ctx.new_tuple(vec![]), // type_params
-            self.ctx.new_dict(),        // annotations
-            self.ctx.none(),            // doc
-            self,
-        )?;
+        let func = PyFunction::new(code.clone(), scope.globals.clone(), self)?;
         let func_obj = func.into_ref(&self.ctx).into();
 
         let frame = Frame::new(code, scope, self.builtins.dict(), &[], Some(func_obj), self)
@@ -599,7 +583,7 @@ impl VirtualMachine {
     #[inline]
     pub fn import<'a>(&self, module_name: impl AsPyStr<'a>, level: usize) -> PyResult {
         let module_name = module_name.as_pystr(&self.ctx);
-        let from_list = PyTupleTyped::empty(self);
+        let from_list = self.ctx.empty_tuple_typed();
         self.import_inner(module_name, from_list, level)
     }
 
@@ -609,7 +593,7 @@ impl VirtualMachine {
     pub fn import_from<'a>(
         &self,
         module_name: impl AsPyStr<'a>,
-        from_list: PyTupleTyped<PyStrRef>,
+        from_list: &Py<PyTuple<PyStrRef>>,
         level: usize,
     ) -> PyResult {
         let module_name = module_name.as_pystr(&self.ctx);
@@ -619,7 +603,7 @@ impl VirtualMachine {
     fn import_inner(
         &self,
         module: &Py<PyStr>,
-        from_list: PyTupleTyped<PyStrRef>,
+        from_list: &Py<PyTuple<PyStrRef>>,
         level: usize,
     ) -> PyResult {
         // if the import inputs seem weird, e.g a package import or something, rather than just
@@ -657,7 +641,7 @@ impl VirtualMachine {
                 } else {
                     (None, None)
                 };
-                let from_list = from_list.to_pyobject(self);
+                let from_list: PyObjectRef = from_list.to_owned().into();
                 import_func
                     .call((module.to_owned(), globals, locals, from_list, level), self)
                     .inspect_err(|exc| import::remove_importlib_frames(self, exc))
