@@ -732,7 +732,14 @@ mod _sqlite {
         alt: OptionalArg<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult {
-        // TODO: None proto
+        if matches!(proto, OptionalArg::Present(None)) {
+            return if let OptionalArg::Present(alt) = alt {
+                Ok(alt)
+            } else {
+                Err(new_programming_error(vm, "can't adapt".to_owned()))
+            };
+        }
+
         let proto = proto
             .flatten()
             .unwrap_or_else(|| PrepareProtocol::class(&vm.ctx).to_owned());
@@ -2295,12 +2302,17 @@ mod _sqlite {
             vm: &VirtualMachine,
         ) -> PyResult<Option<Self>> {
             let sql = sql.try_into_utf8(vm)?;
+            if sql.as_str().contains('\0') {
+                return Err(new_programming_error(
+                    vm,
+                    "statement contains a null character.".to_owned(),
+                ));
+            }
             let sql_cstr = sql.to_cstring(vm)?;
-            let sql_len = sql.byte_len() + 1;
 
             let db = connection.db_lock(vm)?;
 
-            db.sql_limit(sql_len, vm)?;
+            db.sql_limit(sql.byte_len(), vm)?;
 
             let mut tail = null();
             let st = db.prepare(sql_cstr.as_ptr(), &mut tail, vm)?;
