@@ -908,8 +908,6 @@ class CursorTests(unittest.TestCase):
         row = self.cu.fetchone()
         self.assertEqual(row[0], "foo")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_execute_dict_mapping_too_little_args(self):
         self.cu.execute("insert into test(name) values ('foo')")
         with self.assertRaises(sqlite.ProgrammingError):
@@ -1655,8 +1653,6 @@ class ExtensionTests(unittest.TestCase):
                 insert into a(i) values (5);
                 """)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_cursor_executescript_with_surrogates(self):
         con = sqlite.connect(":memory:")
         cur = con.cursor()
