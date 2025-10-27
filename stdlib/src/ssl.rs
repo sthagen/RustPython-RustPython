@@ -1,5 +1,7 @@
 // spell-checker:disable
 
+mod cert;
+
 use crate::vm::{PyRef, VirtualMachine, builtins::PyModule};
 use openssl_probe::ProbeResult;
 
@@ -26,22 +28,21 @@ cfg_if::cfg_if! {
 }
 
 #[allow(non_upper_case_globals)]
-#[pymodule(with(ossl101, ossl111, windows))]
+#[pymodule(with(cert::ssl_cert, ossl101, ossl111, windows))]
 mod _ssl {
     use super::{bio, probe};
     use crate::{
-        common::{
-            ascii,
-            lock::{
-                PyMappedRwLockReadGuard, PyMutex, PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard,
-            },
+        common::lock::{
+            PyMappedRwLockReadGuard, PyMutex, PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard,
         },
         socket::{self, PySocket},
         vm::{
-            Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
-            builtins::{PyBaseExceptionRef, PyBytesRef, PyListRef, PyStrRef, PyTypeRef, PyWeak},
+            AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+            builtins::{
+                PyBaseExceptionRef, PyBytesRef, PyListRef, PyOSError, PyStrRef, PyTypeRef, PyWeak,
+            },
             class_or_notimplemented,
-            convert::{ToPyException, ToPyObject},
+            convert::ToPyException,
             exceptions,
             function::{
                 ArgBytesLike, ArgCallable, ArgMemoryBuffer, ArgStrOrBytesLike, Either, FsPath,
@@ -58,7 +59,7 @@ mod _ssl {
         error::ErrorStack,
         nid::Nid,
         ssl::{self, SslContextBuilder, SslOptions, SslVerifyMode},
-        x509::{self, X509, X509Ref},
+        x509::X509,
     };
     use openssl_sys as sys;
     use rustpython_vm::ospath::OsPath;
@@ -70,6 +71,14 @@ mod _ssl {
         sync::LazyLock,
         time::Instant,
     };
+
+    // Import certificate types from parent module
+    use super::cert::{self, cert_to_certificate, cert_to_py};
+
+    // Re-export PySSLCertificate to make it available in the _ssl module
+    // It will be automatically exposed to Python via #[pyclass]
+    #[allow(unused_imports)]
+    use super::cert::PySSLCertificate;
 
     // Constants
     #[pyattr]
@@ -176,6 +185,18 @@ mod _ssl {
     #[pyattr]
     const HAS_PSK: bool = true;
 
+    // Encoding constants for Certificate.public_bytes()
+    #[pyattr]
+    pub(crate) const ENCODING_PEM: i32 = sys::X509_FILETYPE_PEM;
+    #[pyattr]
+    pub(crate) const ENCODING_DER: i32 = sys::X509_FILETYPE_ASN1;
+    #[pyattr]
+    const ENCODING_PEM_AUX: i32 = sys::X509_FILETYPE_PEM + 0x100;
+
+    // OpenSSL error codes for unexpected EOF detection
+    const ERR_LIB_SSL: i32 = 20;
+    const SSL_R_UNEXPECTED_EOF_WHILE_READING: i32 = 294;
+
     // the openssl version from the API headers
 
     #[pyattr(name = "OPENSSL_VERSION")]
@@ -198,63 +219,84 @@ mod _ssl {
         parse_version_info(openssl_api_version)
     }
 
+    // SSL Exception Types
+
     /// An error occurred in the SSL implementation.
-    #[pyattr(name = "SSLError", once)]
-    fn ssl_error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx.new_exception_type(
-            "ssl",
-            "SSLError",
-            Some(vec![vm.ctx.exceptions.os_error.to_owned()]),
-        )
+    #[pyattr]
+    #[pyexception(name = "SSLError", base = "PyOSError")]
+    #[derive(Debug)]
+    pub struct PySslError {}
+
+    #[pyexception]
+    impl PySslError {
+        // Returns strerror attribute if available, otherwise str(args)
+        #[pymethod]
+        fn __str__(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+            // Try to get strerror attribute first (OSError compatibility)
+            if let Ok(strerror) = exc.as_object().get_attr("strerror", vm)
+                && !vm.is_none(&strerror)
+            {
+                return strerror.str(vm);
+            }
+
+            // Otherwise return str(args)
+            exc.args().as_object().str(vm)
+        }
     }
 
     /// A certificate could not be verified.
-    #[pyattr(name = "SSLCertVerificationError", once)]
-    fn ssl_cert_verification_error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx.new_exception_type(
-            "ssl",
-            "SSLCertVerificationError",
-            Some(vec![
-                ssl_error(vm),
-                vm.ctx.exceptions.value_error.to_owned(),
-            ]),
-        )
-    }
+    #[pyattr]
+    #[pyexception(name = "SSLCertVerificationError", base = "PySslError")]
+    #[derive(Debug)]
+    pub struct PySslCertVerificationError {}
+
+    #[pyexception]
+    impl PySslCertVerificationError {}
 
     /// SSL/TLS session closed cleanly.
-    #[pyattr(name = "SSLZeroReturnError", once)]
-    fn ssl_zero_return_error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx
-            .new_exception_type("ssl", "SSLZeroReturnError", Some(vec![ssl_error(vm)]))
-    }
+    #[pyattr]
+    #[pyexception(name = "SSLZeroReturnError", base = "PySslError")]
+    #[derive(Debug)]
+    pub struct PySslZeroReturnError {}
 
-    /// Non-blocking SSL socket needs to read more data before the requested operation can be completed.
-    #[pyattr(name = "SSLWantReadError", once)]
-    fn ssl_want_read_error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx
-            .new_exception_type("ssl", "SSLWantReadError", Some(vec![ssl_error(vm)]))
-    }
+    #[pyexception]
+    impl PySslZeroReturnError {}
 
-    /// Non-blocking SSL socket needs to write more data before the requested operation can be completed.
-    #[pyattr(name = "SSLWantWriteError", once)]
-    fn ssl_want_write_error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx
-            .new_exception_type("ssl", "SSLWantWriteError", Some(vec![ssl_error(vm)]))
-    }
+    /// Non-blocking SSL socket needs to read more data.
+    #[pyattr]
+    #[pyexception(name = "SSLWantReadError", base = "PySslError")]
+    #[derive(Debug)]
+    pub struct PySslWantReadError {}
+
+    #[pyexception]
+    impl PySslWantReadError {}
+
+    /// Non-blocking SSL socket needs to write more data.
+    #[pyattr]
+    #[pyexception(name = "SSLWantWriteError", base = "PySslError")]
+    #[derive(Debug)]
+    pub struct PySslWantWriteError {}
+
+    #[pyexception]
+    impl PySslWantWriteError {}
 
     /// System error when attempting SSL operation.
-    #[pyattr(name = "SSLSyscallError", once)]
-    fn ssl_syscall_error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx
-            .new_exception_type("ssl", "SSLSyscallError", Some(vec![ssl_error(vm)]))
-    }
+    #[pyattr]
+    #[pyexception(name = "SSLSyscallError", base = "PySslError")]
+    #[derive(Debug)]
+    pub struct PySslSyscallError {}
+
+    #[pyexception]
+    impl PySslSyscallError {}
 
     /// SSL/TLS connection terminated abruptly.
-    #[pyattr(name = "SSLEOFError", once)]
-    fn ssl_eof_error(vm: &VirtualMachine) -> PyTypeRef {
-        vm.ctx
-            .new_exception_type("ssl", "SSLEOFError", Some(vec![ssl_error(vm)]))
-    }
+    #[pyattr]
+    #[pyexception(name = "SSLEOFError", base = "PySslError")]
+    #[derive(Debug)]
+    pub struct PySslEOFError {}
+
+    #[pyexception]
+    impl PySslEOFError {}
 
     type OpensslVersionInfo = (u8, u8, u8, u8, u8);
     const fn parse_version_info(mut n: i64) -> OpensslVersionInfo {
@@ -326,32 +368,6 @@ mod _ssl {
     fn _nid2obj(nid: Nid) -> Option<Asn1Object> {
         unsafe { ptr2obj(sys::OBJ_nid2obj(nid.as_raw())) }
     }
-    fn obj2txt(obj: &Asn1ObjectRef, no_name: bool) -> Option<String> {
-        let no_name = i32::from(no_name);
-        let ptr = obj.as_ptr();
-        let b = unsafe {
-            let buflen = sys::OBJ_obj2txt(std::ptr::null_mut(), 0, ptr, no_name);
-            assert!(buflen >= 0);
-            if buflen == 0 {
-                return None;
-            }
-            let buflen = buflen as usize;
-            let mut buf = Vec::<u8>::with_capacity(buflen + 1);
-            let ret = sys::OBJ_obj2txt(
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.capacity() as _,
-                ptr,
-                no_name,
-            );
-            assert!(ret >= 0);
-            // SAFETY: OBJ_obj2txt initialized the buffer successfully
-            buf.set_len(buflen);
-            buf
-        };
-        let s = String::from_utf8(b)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        Some(s)
-    }
 
     type PyNid = (libc::c_int, String, String, Option<String>);
     fn obj2py(obj: &Asn1ObjectRef, vm: &VirtualMachine) -> PyResult<PyNid> {
@@ -364,7 +380,12 @@ mod _ssl {
             .long_name()
             .map_err(|_| vm.new_value_error("NID has no long name".to_owned()))?
             .to_owned();
-        Ok((nid.as_raw(), short_name, long_name, obj2txt(obj, true)))
+        Ok((
+            nid.as_raw(),
+            short_name,
+            long_name,
+            cert::obj2txt(obj, true),
+        ))
     }
 
     #[derive(FromArgs)]
@@ -617,7 +638,10 @@ mod _ssl {
                 return Err(exceptions::cstring_error(vm));
             }
             self.builder().set_cipher_list(ciphers).map_err(|_| {
-                vm.new_exception_msg(ssl_error(vm), "No cipher can be selected.".to_owned())
+                vm.new_exception_msg(
+                    PySslError::class(&vm.ctx).to_owned(),
+                    "No cipher can be selected.".to_owned(),
+                )
             })
         }
 
@@ -744,13 +768,13 @@ mod _ssl {
 
                 if clear != 0 && sys::X509_VERIFY_PARAM_clear_flags(param, clear) == 0 {
                     return Err(vm.new_exception_msg(
-                        ssl_error(vm),
+                        PySslError::class(&vm.ctx).to_owned(),
                         "Failed to clear verify flags".to_owned(),
                     ));
                 }
                 if set != 0 && sys::X509_VERIFY_PARAM_set_flags(param, set) == 0 {
                     return Err(vm.new_exception_msg(
-                        ssl_error(vm),
+                        PySslError::class(&vm.ctx).to_owned(),
                         "Failed to set verify flags".to_owned(),
                     ));
                 }
@@ -934,13 +958,13 @@ mod _ssl {
             // validate socket type and context protocol
             if !args.server_side && zelf.protocol == SslVersion::TlsServer {
                 return Err(vm.new_exception_msg(
-                    ssl_error(vm),
+                    PySslError::class(&vm.ctx).to_owned(),
                     "Cannot create a client socket with a PROTOCOL_TLS_SERVER context".to_owned(),
                 ));
             }
             if args.server_side && zelf.protocol == SslVersion::TlsClient {
                 return Err(vm.new_exception_msg(
-                    ssl_error(vm),
+                    PySslError::class(&vm.ctx).to_owned(),
                     "Cannot create a server socket with a PROTOCOL_TLS_CLIENT context".to_owned(),
                 ));
             }
@@ -1124,7 +1148,7 @@ mod _ssl {
 
     fn socket_closed_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
         vm.new_exception_msg(
-            ssl_error(vm),
+            PySslError::class(&vm.ctx).to_owned(),
             "Underlying socket has been closed.".to_owned(),
         )
     }
@@ -1193,46 +1217,54 @@ mod _ssl {
         }
 
         #[pymethod]
-        fn get_unverified_chain(&self, vm: &VirtualMachine) -> Option<PyObjectRef> {
+        fn get_unverified_chain(&self, vm: &VirtualMachine) -> PyResult<Option<PyListRef>> {
             let stream = self.stream.read();
-            let chain = stream.ssl().peer_cert_chain()?;
+            let Some(chain) = stream.ssl().peer_cert_chain() else {
+                return Ok(None);
+            };
 
+            // Return Certificate objects
             let certs: Vec<PyObjectRef> = chain
                 .iter()
-                .filter_map(|cert| cert.to_der().ok().map(|der| vm.ctx.new_bytes(der).into()))
-                .collect();
-
-            Some(vm.ctx.new_list(certs).into())
+                .map(|cert| unsafe {
+                    sys::X509_up_ref(cert.as_ptr());
+                    let owned = X509::from_ptr(cert.as_ptr());
+                    cert_to_certificate(vm, owned)
+                })
+                .collect::<PyResult<_>>()?;
+            Ok(Some(vm.ctx.new_list(certs)))
         }
 
         #[pymethod]
-        fn get_verified_chain(&self, vm: &VirtualMachine) -> Option<PyListRef> {
+        fn get_verified_chain(&self, vm: &VirtualMachine) -> PyResult<Option<PyListRef>> {
             let stream = self.stream.read();
             unsafe {
                 let chain = sys::SSL_get0_verified_chain(stream.ssl().as_ptr());
                 if chain.is_null() {
-                    return None;
+                    return Ok(None);
                 }
 
                 let num_certs = sys::OPENSSL_sk_num(chain as *const _);
-                let mut certs = Vec::new();
 
+                let mut certs = Vec::with_capacity(num_certs as usize);
+                // Return Certificate objects
                 for i in 0..num_certs {
                     let cert_ptr = sys::OPENSSL_sk_value(chain as *const _, i) as *mut sys::X509;
                     if cert_ptr.is_null() {
                         continue;
                     }
-                    let cert = X509Ref::from_ptr(cert_ptr);
-                    if let Ok(der) = cert.to_der() {
-                        certs.push(vm.ctx.new_bytes(der).into());
-                    }
+                    // Clone the X509 certificate to create an owned copy
+                    sys::X509_up_ref(cert_ptr);
+                    let owned_cert = X509::from_ptr(cert_ptr);
+                    let cert_obj = cert_to_certificate(vm, owned_cert)?;
+                    certs.push(cert_obj);
                 }
 
-                if certs.is_empty() {
+                Ok(if certs.is_empty() {
                     None
                 } else {
                     Some(vm.ctx.new_list(certs))
-                }
+                })
             }
         }
 
@@ -1390,7 +1422,7 @@ mod _ssl {
                 let result = unsafe { SSL_verify_client_post_handshake(stream.ssl().as_ptr()) };
                 if result == 0 {
                     Err(vm.new_exception_msg(
-                        ssl_error(vm),
+                        PySslError::class(&vm.ctx).to_owned(),
                         "Post-handshake authentication failed".to_owned(),
                     ))
                 } else {
@@ -1422,7 +1454,7 @@ mod _ssl {
                     // Return the underlying socket
                 } else {
                     return Err(vm.new_exception_msg(
-                        ssl_error(vm),
+                        PySslError::class(&vm.ctx).to_owned(),
                         format!("SSL shutdown failed: error code {}", err),
                     ));
                 }
@@ -1854,7 +1886,7 @@ mod _ssl {
         fn write(&self, data: ArgBytesLike, vm: &VirtualMachine) -> PyResult<i32> {
             if self.eof_written.load() {
                 return Err(vm.new_exception_msg(
-                    ssl_error(vm),
+                    PySslError::class(&vm.ctx).to_owned(),
                     "cannot write() after write_eof()".to_owned(),
                 ));
             }
@@ -1952,8 +1984,11 @@ mod _ssl {
     }
 
     #[track_caller]
-    fn convert_openssl_error(vm: &VirtualMachine, err: ErrorStack) -> PyBaseExceptionRef {
-        let cls = ssl_error(vm);
+    pub(crate) fn convert_openssl_error(
+        vm: &VirtualMachine,
+        err: ErrorStack,
+    ) -> PyBaseExceptionRef {
+        let cls = PySslError::class(&vm.ctx).to_owned();
         match err.errors().last() {
             Some(e) => {
                 let caller = std::panic::Location::caller();
@@ -2012,25 +2047,62 @@ mod _ssl {
         let e = e.borrow();
         let (cls, msg) = match e.code() {
             ssl::ErrorCode::WANT_READ => (
-                vm.class("_ssl", "SSLWantReadError"),
+                PySslWantReadError::class(&vm.ctx).to_owned(),
                 "The operation did not complete (read)",
             ),
             ssl::ErrorCode::WANT_WRITE => (
-                vm.class("_ssl", "SSLWantWriteError"),
+                PySslWantWriteError::class(&vm.ctx).to_owned(),
                 "The operation did not complete (write)",
             ),
             ssl::ErrorCode::SYSCALL => match e.io_error() {
                 Some(io_err) => return io_err.to_pyexception(vm),
-                None => (
-                    vm.class("_ssl", "SSLSyscallError"),
-                    "EOF occurred in violation of protocol",
-                ),
+                // When no I/O error and OpenSSL error queue is empty,
+                // this is an EOF in violation of protocol -> SSLEOFError
+                // Need to set args[0] = SSL_ERROR_EOF for suppress_ragged_eofs check
+                None => {
+                    return vm.new_exception(
+                        PySslEOFError::class(&vm.ctx).to_owned(),
+                        vec![
+                            vm.ctx.new_int(SSL_ERROR_EOF).into(),
+                            vm.ctx
+                                .new_str("EOF occurred in violation of protocol")
+                                .into(),
+                        ],
+                    );
+                }
             },
-            ssl::ErrorCode::SSL => match e.ssl_error() {
-                Some(e) => return convert_openssl_error(vm, e.clone()),
-                None => (ssl_error(vm), "A failure in the SSL library occurred"),
-            },
-            _ => (ssl_error(vm), "A failure in the SSL library occurred"),
+            ssl::ErrorCode::SSL => {
+                // Check for OpenSSL 3.0 SSL_R_UNEXPECTED_EOF_WHILE_READING
+                if let Some(ssl_err) = e.ssl_error() {
+                    // In OpenSSL 3.0+, unexpected EOF is reported as SSL_ERROR_SSL
+                    // with this specific reason code instead of SSL_ERROR_SYSCALL
+                    unsafe {
+                        let err_code = sys::ERR_peek_last_error();
+                        let reason = sys::ERR_GET_REASON(err_code);
+                        let lib = sys::ERR_GET_LIB(err_code);
+                        if lib == ERR_LIB_SSL && reason == SSL_R_UNEXPECTED_EOF_WHILE_READING {
+                            return vm.new_exception(
+                                vm.class("_ssl", "SSLEOFError"),
+                                vec![
+                                    vm.ctx.new_int(SSL_ERROR_EOF).into(),
+                                    vm.ctx
+                                        .new_str("EOF occurred in violation of protocol")
+                                        .into(),
+                                ],
+                            );
+                        }
+                    }
+                    return convert_openssl_error(vm, ssl_err.clone());
+                }
+                (
+                    PySslError::class(&vm.ctx).to_owned(),
+                    "A failure in the SSL library occurred",
+                )
+            }
+            _ => (
+                PySslError::class(&vm.ctx).to_owned(),
+                "A failure in the SSL library occurred",
+            ),
         };
         vm.new_exception_msg(cls, msg.to_owned())
     }
@@ -2072,93 +2144,6 @@ mod _ssl {
 
     fn cipher_to_tuple(cipher: &ssl::SslCipherRef) -> CipherTuple {
         (cipher.name(), cipher.version(), cipher.bits().secret)
-    }
-
-    fn cert_to_py(vm: &VirtualMachine, cert: &X509Ref, binary: bool) -> PyResult {
-        let r = if binary {
-            let b = cert.to_der().map_err(|e| convert_openssl_error(vm, e))?;
-            vm.ctx.new_bytes(b).into()
-        } else {
-            let dict = vm.ctx.new_dict();
-
-            let name_to_py = |name: &x509::X509NameRef| -> PyResult {
-                let list = name
-                    .entries()
-                    .map(|entry| {
-                        let txt = obj2txt(entry.object(), false).to_pyobject(vm);
-                        let data = vm.ctx.new_str(entry.data().as_utf8()?.to_owned());
-                        Ok(vm.new_tuple(((txt, data),)).into())
-                    })
-                    .collect::<Result<_, _>>()
-                    .map_err(|e| convert_openssl_error(vm, e))?;
-                Ok(vm.ctx.new_tuple(list).into())
-            };
-
-            dict.set_item("subject", name_to_py(cert.subject_name())?, vm)?;
-            dict.set_item("issuer", name_to_py(cert.issuer_name())?, vm)?;
-            // X.509 version: OpenSSL uses 0-based (0=v1, 1=v2, 2=v3) but Python uses 1-based (1=v1, 2=v2, 3=v3)
-            dict.set_item("version", vm.new_pyobj(cert.version() + 1), vm)?;
-
-            let serial_num = cert
-                .serial_number()
-                .to_bn()
-                .and_then(|bn| bn.to_hex_str())
-                .map_err(|e| convert_openssl_error(vm, e))?;
-            dict.set_item(
-                "serialNumber",
-                vm.ctx.new_str(serial_num.to_owned()).into(),
-                vm,
-            )?;
-
-            dict.set_item(
-                "notBefore",
-                vm.ctx.new_str(cert.not_before().to_string()).into(),
-                vm,
-            )?;
-            dict.set_item(
-                "notAfter",
-                vm.ctx.new_str(cert.not_after().to_string()).into(),
-                vm,
-            )?;
-
-            #[allow(clippy::manual_map)]
-            if let Some(names) = cert.subject_alt_names() {
-                let san = names
-                    .iter()
-                    .filter_map(|gen_name| {
-                        if let Some(email) = gen_name.email() {
-                            Some(vm.new_tuple((ascii!("email"), email)).into())
-                        } else if let Some(dnsname) = gen_name.dnsname() {
-                            Some(vm.new_tuple((ascii!("DNS"), dnsname)).into())
-                        } else if let Some(ip) = gen_name.ipaddress() {
-                            Some(
-                                vm.new_tuple((
-                                    ascii!("IP Address"),
-                                    String::from_utf8_lossy(ip).into_owned(),
-                                ))
-                                .into(),
-                            )
-                        } else {
-                            // TODO: convert every type of general name:
-                            // https://github.com/python/cpython/blob/3.6/Modules/_ssl.c#L1092-L1231
-                            None
-                        }
-                    })
-                    .collect();
-                dict.set_item("subjectAltName", vm.ctx.new_tuple(san).into(), vm)?;
-            };
-
-            dict.into()
-        };
-        Ok(r)
-    }
-
-    #[pyfunction]
-    fn _test_decode_cert(path: FsPath, vm: &VirtualMachine) -> PyResult {
-        let path = path.to_path_buf(vm)?;
-        let pem = std::fs::read(path).map_err(|e| e.to_pyexception(vm))?;
-        let x509 = X509::from_pem(&pem).map_err(|e| convert_openssl_error(vm, e))?;
-        cert_to_py(vm, &x509, false)
     }
 
     impl Read for SocketStream {
