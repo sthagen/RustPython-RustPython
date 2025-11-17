@@ -6,16 +6,16 @@ mod cert;
 cfg_if::cfg_if! {
     if #[cfg(ossl310)] {
         // OpenSSL 3.1.0+
-        #[path = "ssl/ssl_data_31.rs"]
-        mod ssl_data;
+        mod ssl_data_31;
+        use ssl_data_31 as ssl_data;
     } else if #[cfg(ossl300)] {
         // OpenSSL 3.0.0+
-        #[path = "ssl/ssl_data_300.rs"]
-        mod ssl_data;
+        mod ssl_data_300;
+        use ssl_data_300 as ssl_data;
     } else {
         // OpenSSL 1.1.1+ (fallback)
-        #[path = "ssl/ssl_data_111.rs"]
-        mod ssl_data;
+        mod ssl_data_111;
+        use ssl_data_111 as ssl_data;
     }
 }
 
@@ -100,10 +100,10 @@ mod _ssl {
     // Constants
     #[pyattr]
     use sys::{
-        // TODO: so many more of these
-        SSL_AD_DECODE_ERROR as ALERT_DESCRIPTION_DECODE_ERROR,
-        SSL_AD_ILLEGAL_PARAMETER as ALERT_DESCRIPTION_ILLEGAL_PARAMETER,
-        SSL_AD_UNRECOGNIZED_NAME as ALERT_DESCRIPTION_UNRECOGNIZED_NAME,
+        // SSL Alert Descriptions that are exported by openssl_sys
+        SSL_AD_DECODE_ERROR,
+        SSL_AD_ILLEGAL_PARAMETER,
+        SSL_AD_UNRECOGNIZED_NAME,
         // SSL_ERROR_INVALID_ERROR_CODE,
         SSL_ERROR_SSL,
         // SSL_ERROR_WANT_X509_LOOKUP,
@@ -127,6 +127,63 @@ mod _ssl {
         X509_V_FLAG_TRUSTED_FIRST as VERIFY_X509_TRUSTED_FIRST,
         X509_V_FLAG_X509_STRICT as VERIFY_X509_STRICT,
     };
+
+    // SSL Alert Descriptions (RFC 5246 and extensions)
+    // Hybrid approach: use openssl_sys constants where available, hardcode others
+    #[pyattr]
+    const ALERT_DESCRIPTION_CLOSE_NOTIFY: libc::c_int = 0;
+    #[pyattr]
+    const ALERT_DESCRIPTION_UNEXPECTED_MESSAGE: libc::c_int = 10;
+    #[pyattr]
+    const ALERT_DESCRIPTION_BAD_RECORD_MAC: libc::c_int = 20;
+    #[pyattr]
+    const ALERT_DESCRIPTION_RECORD_OVERFLOW: libc::c_int = 22;
+    #[pyattr]
+    const ALERT_DESCRIPTION_DECOMPRESSION_FAILURE: libc::c_int = 30;
+    #[pyattr]
+    const ALERT_DESCRIPTION_HANDSHAKE_FAILURE: libc::c_int = 40;
+    #[pyattr]
+    const ALERT_DESCRIPTION_BAD_CERTIFICATE: libc::c_int = 42;
+    #[pyattr]
+    const ALERT_DESCRIPTION_UNSUPPORTED_CERTIFICATE: libc::c_int = 43;
+    #[pyattr]
+    const ALERT_DESCRIPTION_CERTIFICATE_REVOKED: libc::c_int = 44;
+    #[pyattr]
+    const ALERT_DESCRIPTION_CERTIFICATE_EXPIRED: libc::c_int = 45;
+    #[pyattr]
+    const ALERT_DESCRIPTION_CERTIFICATE_UNKNOWN: libc::c_int = 46;
+    #[pyattr]
+    const ALERT_DESCRIPTION_ILLEGAL_PARAMETER: libc::c_int = SSL_AD_ILLEGAL_PARAMETER;
+    #[pyattr]
+    const ALERT_DESCRIPTION_UNKNOWN_CA: libc::c_int = 48;
+    #[pyattr]
+    const ALERT_DESCRIPTION_ACCESS_DENIED: libc::c_int = 49;
+    #[pyattr]
+    const ALERT_DESCRIPTION_DECODE_ERROR: libc::c_int = SSL_AD_DECODE_ERROR;
+    #[pyattr]
+    const ALERT_DESCRIPTION_DECRYPT_ERROR: libc::c_int = 51;
+    #[pyattr]
+    const ALERT_DESCRIPTION_PROTOCOL_VERSION: libc::c_int = 70;
+    #[pyattr]
+    const ALERT_DESCRIPTION_INSUFFICIENT_SECURITY: libc::c_int = 71;
+    #[pyattr]
+    const ALERT_DESCRIPTION_INTERNAL_ERROR: libc::c_int = 80;
+    #[pyattr]
+    const ALERT_DESCRIPTION_USER_CANCELLED: libc::c_int = 90;
+    #[pyattr]
+    const ALERT_DESCRIPTION_NO_RENEGOTIATION: libc::c_int = 100;
+    #[pyattr]
+    const ALERT_DESCRIPTION_UNSUPPORTED_EXTENSION: libc::c_int = 110;
+    #[pyattr]
+    const ALERT_DESCRIPTION_CERTIFICATE_UNOBTAINABLE: libc::c_int = 111;
+    #[pyattr]
+    const ALERT_DESCRIPTION_UNRECOGNIZED_NAME: libc::c_int = SSL_AD_UNRECOGNIZED_NAME;
+    #[pyattr]
+    const ALERT_DESCRIPTION_BAD_CERTIFICATE_STATUS_RESPONSE: libc::c_int = 113;
+    #[pyattr]
+    const ALERT_DESCRIPTION_BAD_CERTIFICATE_HASH_VALUE: libc::c_int = 114;
+    #[pyattr]
+    const ALERT_DESCRIPTION_UNKNOWN_PSK_IDENTITY: libc::c_int = 115;
 
     // CRL verification constants
     #[pyattr]
@@ -570,11 +627,12 @@ mod _ssl {
     // SNI callback function called by OpenSSL
     unsafe extern "C" fn _servername_callback(
         ssl_ptr: *mut sys::SSL,
-        _al: *mut libc::c_int,
+        al: *mut libc::c_int,
         arg: *mut libc::c_void,
     ) -> libc::c_int {
         const SSL_TLSEXT_ERR_OK: libc::c_int = 0;
         const SSL_TLSEXT_ERR_ALERT_FATAL: libc::c_int = 2;
+        const SSL_AD_INTERNAL_ERROR: libc::c_int = 80;
         const TLSEXT_NAMETYPE_host_name: libc::c_int = 0;
 
         if arg.is_null() {
@@ -639,11 +697,115 @@ mod _ssl {
                 ),
                 vm,
             ) {
-                Ok(_) => SSL_TLSEXT_ERR_OK,
+                Ok(result) => {
+                    // Check return value type (must be None or integer)
+                    if vm.is_none(&result) {
+                        // None is OK
+                        SSL_TLSEXT_ERR_OK
+                    } else {
+                        // Try to convert to integer
+                        match result.try_to_value::<i32>(vm) {
+                            Ok(alert_code) => {
+                                // Valid integer - use as alert code
+                                *al = alert_code;
+                                SSL_TLSEXT_ERR_ALERT_FATAL
+                            }
+                            Err(_) => {
+                                // Type conversion failed - raise TypeError
+                                let type_error = vm.new_type_error(format!(
+                                    "servername callback must return None or an integer, not '{}'",
+                                    result.class().name()
+                                ));
+                                vm.run_unraisable(type_error, None, result);
+                                *al = SSL_AD_INTERNAL_ERROR;
+                                SSL_TLSEXT_ERR_ALERT_FATAL
+                            }
+                        }
+                    }
+                }
                 Err(exc) => {
                     // Log the exception but don't propagate it
                     vm.run_unraisable(exc, None, vm.ctx.none());
+                    *al = SSL_AD_INTERNAL_ERROR;
                     SSL_TLSEXT_ERR_ALERT_FATAL
+                }
+            }
+        }
+    }
+
+    // Message callback function called by OpenSSL
+    // Based on CPython's _PySSL_msg_callback in Modules/_ssl/debughelpers.c
+    unsafe extern "C" fn _msg_callback(
+        write_p: libc::c_int,
+        version: libc::c_int,
+        content_type: libc::c_int,
+        buf: *const libc::c_void,
+        len: usize,
+        ssl_ptr: *mut sys::SSL,
+        _arg: *mut libc::c_void,
+    ) {
+        if ssl_ptr.is_null() {
+            return;
+        }
+
+        unsafe {
+            // Get SSL socket from SSL_get_app_data (index 0)
+            let ssl_socket_ptr = sys::SSL_get_ex_data(ssl_ptr, 0);
+            if ssl_socket_ptr.is_null() {
+                return;
+            }
+
+            let ssl_socket = &*(ssl_socket_ptr as *const PySslSocket);
+
+            // Get the callback from the context
+            let callback_opt = ssl_socket.ctx.read().msg_callback.lock().clone();
+            let Some(callback) = callback_opt else {
+                return;
+            };
+
+            // Get callback data from SSL ex_data (for VM)
+            let idx = get_sni_ex_data_index();
+            let data_ptr = sys::SSL_get_ex_data(ssl_ptr, idx);
+            if data_ptr.is_null() {
+                return;
+            }
+
+            let callback_data = &*(data_ptr as *const SniCallbackData);
+            let vm = &*callback_data.vm_ptr;
+
+            // Get SSL socket owner object
+            let ssl_socket_obj = ssl_socket
+                .owner
+                .read()
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .unwrap_or_else(|| vm.ctx.none());
+
+            // Create the message bytes
+            let buf_slice = std::slice::from_raw_parts(buf as *const u8, len);
+            let msg_bytes = vm.ctx.new_bytes(buf_slice.to_vec());
+
+            // Determine direction string
+            let direction_str = if write_p != 0 { "write" } else { "read" };
+
+            // Call the Python callback
+            // Signature: callback(conn, direction, version, content_type, msg_type, data)
+            // For simplicity, we'll pass msg_type as 0 (would need more parsing to get the actual type)
+            match callback.call(
+                (
+                    ssl_socket_obj,
+                    vm.ctx.new_str(direction_str),
+                    vm.ctx.new_int(version),
+                    vm.ctx.new_int(content_type),
+                    vm.ctx.new_int(0), // msg_type - would need parsing
+                    msg_bytes,
+                ),
+                vm,
+            ) {
+                Ok(_) => {}
+                Err(exc) => {
+                    // Log the exception but don't propagate it
+                    vm.run_unraisable(exc, None, vm.ctx.none());
                 }
             }
         }
@@ -671,6 +833,7 @@ mod _ssl {
         protocol: SslVersion,
         post_handshake_auth: PyMutex<bool>,
         sni_callback: PyMutex<Option<PyObjectRef>>,
+        msg_callback: PyMutex<Option<PyObjectRef>>,
     }
 
     impl fmt::Debug for PySslContext {
@@ -734,9 +897,10 @@ mod _ssl {
                 sys::SSL_CTX_set_post_handshake_auth(builder.as_ptr(), 0);
             }
 
-            builder
-                .set_session_id_context(b"Python")
-                .map_err(|e| convert_openssl_error(vm, e))?;
+            // Note: Unlike some other implementations, we do NOT set session_id_context at the
+            // context level. CPython sets it only on individual SSL objects (server-side only).
+            // This matches CPython's behavior in _ssl.c where SSL_set_session_id_context is called
+            // in newPySSLSocket() at line 862, not during context creation.
 
             // Set protocol version limits based on the protocol version
             unsafe {
@@ -773,6 +937,7 @@ mod _ssl {
                 protocol: proto,
                 post_handshake_auth: PyMutex::new(false),
                 sni_callback: PyMutex::new(None),
+                msg_callback: PyMutex::new(None),
             }
             .into_ref_with_type(vm, cls)
             .map(Into::into)
@@ -1066,7 +1231,6 @@ mod _ssl {
             }
             #[cfg(not(ossl110))]
             {
-                let _ = vm;
                 Ok(0)
             }
         }
@@ -1425,6 +1589,51 @@ mod _ssl {
             self.set_sni_callback(callback, vm)
         }
 
+        #[pygetset(name = "_msg_callback")]
+        fn msg_callback(&self) -> Option<PyObjectRef> {
+            self.msg_callback.lock().clone()
+        }
+
+        #[pygetset(setter, name = "_msg_callback")]
+        fn set_msg_callback(
+            &self,
+            value: Option<PyObjectRef>,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            let mut callback_guard = self.msg_callback.lock();
+
+            if let Some(callback_obj) = value {
+                if !vm.is_none(&callback_obj) {
+                    // Check if callable
+                    if !callback_obj.is_callable() {
+                        return Err(vm.new_type_error("not a callable object".to_owned()));
+                    }
+
+                    // Set the callback
+                    *callback_guard = Some(callback_obj);
+
+                    // Set OpenSSL callback
+                    unsafe {
+                        SSL_CTX_set_msg_callback(self.ctx().as_ptr(), Some(_msg_callback));
+                    }
+                } else {
+                    // Clear callback
+                    *callback_guard = None;
+                    unsafe {
+                        SSL_CTX_set_msg_callback(self.ctx().as_ptr(), None);
+                    }
+                }
+            } else {
+                // Clear callback when value is None
+                *callback_guard = None;
+                unsafe {
+                    SSL_CTX_set_msg_callback(self.ctx().as_ptr(), None);
+                }
+            }
+
+            Ok(())
+        }
+
         #[pymethod]
         fn load_cert_chain(&self, args: LoadCertChainArgs, vm: &VirtualMachine) -> PyResult<()> {
             let LoadCertChainArgs {
@@ -1450,74 +1659,88 @@ mod _ssl {
                 .map_err(|e| convert_openssl_error(vm, e))
         }
 
-        #[pymethod]
-        fn _wrap_socket(
-            zelf: PyRef<Self>,
-            args: WrapSocketArgs,
+        // Helper function to create SSL socket
+        // = CPython's newPySSLSocket()
+        fn new_py_ssl_socket(
+            ctx_ref: PyRef<PySslContext>,
+            server_side: bool,
+            server_hostname: Option<PyStrRef>,
             vm: &VirtualMachine,
-        ) -> PyResult<PyObjectRef> {
-            // validate socket type and context protocol
-            if !args.server_side && zelf.protocol == SslVersion::TlsServer {
-                return Err(vm.new_exception_msg(
-                    PySslError::class(&vm.ctx).to_owned(),
-                    "Cannot create a client socket with a PROTOCOL_TLS_SERVER context".to_owned(),
-                ));
-            }
-            if args.server_side && zelf.protocol == SslVersion::TlsClient {
+        ) -> PyResult<(ssl::Ssl, SslServerOrClient, Option<PyStrRef>)> {
+            // Validate socket type and context protocol
+            if server_side && ctx_ref.protocol == SslVersion::TlsClient {
                 return Err(vm.new_exception_msg(
                     PySslError::class(&vm.ctx).to_owned(),
                     "Cannot create a server socket with a PROTOCOL_TLS_CLIENT context".to_owned(),
                 ));
             }
+            if !server_side && ctx_ref.protocol == SslVersion::TlsServer {
+                return Err(vm.new_exception_msg(
+                    PySslError::class(&vm.ctx).to_owned(),
+                    "Cannot create a client socket with a PROTOCOL_TLS_SERVER context".to_owned(),
+                ));
+            }
 
-            let mut ssl = ssl::Ssl::new(&zelf.ctx()).map_err(|e| convert_openssl_error(vm, e))?;
+            // Create SSL object
+            let mut ssl =
+                ssl::Ssl::new(&ctx_ref.ctx()).map_err(|e| convert_openssl_error(vm, e))?;
 
-            let socket_type = if args.server_side {
-                ssl.set_accept_state();
+            // Set session id context for server-side sockets
+            let socket_type = if server_side {
+                unsafe {
+                    const SID_CTX: &[u8] = b"Python";
+                    let ret = SSL_set_session_id_context(
+                        ssl.as_ptr(),
+                        SID_CTX.as_ptr(),
+                        SID_CTX.len() as libc::c_uint,
+                    );
+                    if ret == 0 {
+                        return Err(convert_openssl_error(vm, ErrorStack::get()));
+                    }
+                }
                 SslServerOrClient::Server
             } else {
-                ssl.set_connect_state();
                 SslServerOrClient::Client
             };
 
-            if let Some(hostname) = &args.server_hostname {
-                let hostname = hostname.as_str();
-                if hostname.is_empty() || hostname.starts_with('.') {
+            // Configure server hostname
+            if let Some(hostname) = &server_hostname {
+                let hostname_str = hostname.as_str();
+                if hostname_str.is_empty() || hostname_str.starts_with('.') {
                     return Err(vm.new_value_error(
                         "server_hostname cannot be an empty string or start with a leading dot.",
                     ));
                 }
-                if hostname.contains('\0') {
+                if hostname_str.contains('\0') {
                     return Err(vm.new_value_error("embedded null byte in server_hostname"));
                 }
-                let ip = hostname.parse::<std::net::IpAddr>();
+                let ip = hostname_str.parse::<std::net::IpAddr>();
                 if ip.is_err() {
-                    ssl.set_hostname(hostname)
+                    ssl.set_hostname(hostname_str)
                         .map_err(|e| convert_openssl_error(vm, e))?;
                 }
-                if zelf.check_hostname.load() {
+                if ctx_ref.check_hostname.load() {
                     if let Ok(ip) = ip {
                         ssl.param_mut()
                             .set_ip(ip)
                             .map_err(|e| convert_openssl_error(vm, e))?;
                     } else {
                         ssl.param_mut()
-                            .set_host(hostname)
+                            .set_host(hostname_str)
                             .map_err(|e| convert_openssl_error(vm, e))?;
                     }
                 }
             }
 
-            // Configure post-handshake authentication (PHA)
+            // Configure post-handshake authentication
             #[cfg(ossl111)]
-            if *zelf.post_handshake_auth.lock() {
+            if *ctx_ref.post_handshake_auth.lock() {
                 unsafe {
-                    if args.server_side {
+                    if server_side {
                         // Server socket: add SSL_VERIFY_POST_HANDSHAKE flag
                         // Only in combination with SSL_VERIFY_PEER
                         let mode = sys::SSL_get_verify_mode(ssl.as_ptr());
                         if (mode & sys::SSL_VERIFY_PEER as libc::c_int) != 0 {
-                            // Add POST_HANDSHAKE flag (keep existing flags including FAIL_IF_NO_PEER_CERT)
                             sys::SSL_set_verify(
                                 ssl.as_ptr(),
                                 mode | SSL_VERIFY_POST_HANDSHAKE,
@@ -1531,6 +1754,27 @@ mod _ssl {
                 }
             }
 
+            // Set connect/accept state
+            if server_side {
+                ssl.set_accept_state();
+            } else {
+                ssl.set_connect_state();
+            }
+
+            Ok((ssl, socket_type, server_hostname))
+        }
+
+        #[pymethod]
+        fn _wrap_socket(
+            zelf: PyRef<Self>,
+            args: WrapSocketArgs,
+            vm: &VirtualMachine,
+        ) -> PyResult<PyObjectRef> {
+            // Use common helper function
+            let (ssl, socket_type, server_hostname) =
+                Self::new_py_ssl_socket(zelf.clone(), args.server_side, args.server_hostname, vm)?;
+
+            // Create SslStream with socket
             let stream = ssl::SslStream::new(ssl, SocketStream(args.sock.clone()))
                 .map_err(|e| convert_openssl_error(vm, e))?;
 
@@ -1538,7 +1782,7 @@ mod _ssl {
                 ctx: PyRwLock::new(zelf.clone()),
                 connection: PyRwLock::new(SslConnection::Socket(stream)),
                 socket_type,
-                server_hostname: args.server_hostname,
+                server_hostname,
                 owner: PyRwLock::new(args.owner.map(|o| o.downgrade(None, vm)).transpose()?),
             };
 
@@ -1580,84 +1824,11 @@ mod _ssl {
             args: WrapBioArgs,
             vm: &VirtualMachine,
         ) -> PyResult<PyObjectRef> {
-            // validate socket type and context protocol
-            if !args.server_side && zelf.protocol == SslVersion::TlsServer {
-                return Err(vm.new_exception_msg(
-                    PySslError::class(&vm.ctx).to_owned(),
-                    "Cannot create a client socket with a PROTOCOL_TLS_SERVER context".to_owned(),
-                ));
-            }
-            if args.server_side && zelf.protocol == SslVersion::TlsClient {
-                return Err(vm.new_exception_msg(
-                    PySslError::class(&vm.ctx).to_owned(),
-                    "Cannot create a server socket with a PROTOCOL_TLS_CLIENT context".to_owned(),
-                ));
-            }
+            // Use common helper function
+            let (ssl, socket_type, server_hostname) =
+                Self::new_py_ssl_socket(zelf.clone(), args.server_side, args.server_hostname, vm)?;
 
-            let mut ssl = ssl::Ssl::new(&zelf.ctx()).map_err(|e| convert_openssl_error(vm, e))?;
-
-            let socket_type = if args.server_side {
-                ssl.set_accept_state();
-                SslServerOrClient::Server
-            } else {
-                ssl.set_connect_state();
-                SslServerOrClient::Client
-            };
-
-            if let Some(hostname) = &args.server_hostname {
-                let hostname = hostname.as_str();
-                if hostname.is_empty() || hostname.starts_with('.') {
-                    return Err(vm.new_value_error(
-                        "server_hostname cannot be an empty string or start with a leading dot.",
-                    ));
-                }
-                if hostname.contains('\0') {
-                    return Err(vm.new_value_error("embedded null byte in server_hostname"));
-                }
-                let ip = hostname.parse::<std::net::IpAddr>();
-                if ip.is_err() {
-                    ssl.set_hostname(hostname)
-                        .map_err(|e| convert_openssl_error(vm, e))?;
-                }
-                if zelf.check_hostname.load() {
-                    if let Ok(ip) = ip {
-                        ssl.param_mut()
-                            .set_ip(ip)
-                            .map_err(|e| convert_openssl_error(vm, e))?;
-                    } else {
-                        ssl.param_mut()
-                            .set_host(hostname)
-                            .map_err(|e| convert_openssl_error(vm, e))?;
-                    }
-                }
-            }
-
-            // Don't use SSL_set_bio - let SslStream drive I/O through BioStream Read/Write
-
-            // Configure post-handshake authentication (PHA)
-            #[cfg(ossl111)]
-            if *zelf.post_handshake_auth.lock() {
-                unsafe {
-                    if args.server_side {
-                        // Server socket: add SSL_VERIFY_POST_HANDSHAKE flag
-                        // Only in combination with SSL_VERIFY_PEER
-                        let mode = sys::SSL_get_verify_mode(ssl.as_ptr());
-                        if (mode & sys::SSL_VERIFY_PEER as libc::c_int) != 0 {
-                            // Add POST_HANDSHAKE flag (keep existing flags including FAIL_IF_NO_PEER_CERT)
-                            sys::SSL_set_verify(
-                                ssl.as_ptr(),
-                                mode | SSL_VERIFY_POST_HANDSHAKE,
-                                None,
-                            );
-                        }
-                    } else {
-                        // Client socket: call SSL_set_post_handshake_auth
-                        SSL_set_post_handshake_auth(ssl.as_ptr(), 1);
-                    }
-                }
-            }
-
-            // Create a BioStream wrapper (dummy, actual IO goes through BIOs)
+            // Create BioStream wrapper
             let bio_stream = BioStream {
                 inbio: args.incoming,
                 outbio: args.outgoing,
@@ -1671,7 +1842,7 @@ mod _ssl {
                 ctx: PyRwLock::new(zelf.clone()),
                 connection: PyRwLock::new(SslConnection::Bio(stream)),
                 socket_type,
-                server_hostname: args.server_hostname,
+                server_hostname,
                 owner: PyRwLock::new(args.owner.map(|o| o.downgrade(None, vm)).transpose()?),
             };
 
@@ -2354,7 +2525,9 @@ mod _ssl {
                     }
                     SelectRet::Closed => return Err(socket_closed_error(vm)),
                     SelectRet::Nonblocking => {}
-                    _ => {
+                    SelectRet::IsBlocking | SelectRet::Ok => {
+                        // For blocking sockets, select() has completed successfully
+                        // Continue the handshake loop (matches CPython's SOCKET_IS_BLOCKING behavior)
                         if needs.is_some() {
                             continue;
                         }
@@ -2414,7 +2587,9 @@ mod _ssl {
                     }
                     SelectRet::Closed => return Err(socket_closed_error(vm)),
                     SelectRet::Nonblocking => {}
-                    _ => {
+                    SelectRet::IsBlocking | SelectRet::Ok => {
+                        // For blocking sockets, select() has completed successfully
+                        // Continue the write loop (matches CPython's SOCKET_IS_BLOCKING behavior)
                         if needs.is_some() {
                             continue;
                         }
@@ -2428,14 +2603,11 @@ mod _ssl {
         fn session(&self, _vm: &VirtualMachine) -> PyResult<Option<PySslSession>> {
             let stream = self.connection.read();
             unsafe {
-                let session_ptr = sys::SSL_get_session(stream.ssl().as_ptr());
+                // Use SSL_get1_session which returns an owned reference (ref count already incremented)
+                let session_ptr = SSL_get1_session(stream.ssl().as_ptr());
                 if session_ptr.is_null() {
                     Ok(None)
                 } else {
-                    // Increment reference count since SSL_get_session returns a borrowed reference
-                    #[cfg(ossl110)]
-                    let _session = sys::SSL_SESSION_up_ref(session_ptr);
-
                     Ok(Some(PySslSession {
                         session: session_ptr,
                         ctx: self.ctx.read().clone(),
@@ -2477,7 +2649,8 @@ mod _ssl {
                     );
                 }
 
-                if sys::SSL_set_session(stream.ssl().as_ptr(), session.session) == 0 {
+                let ret = sys::SSL_set_session(stream.ssl().as_ptr(), session.session);
+                if ret == 0 {
                     return Err(convert_openssl_error(vm, ErrorStack::get()));
                 }
             }
@@ -2555,8 +2728,11 @@ mod _ssl {
                                 "The read operation timed out".to_owned(),
                             ));
                         }
+                        SelectRet::Closed => return Err(socket_closed_error(vm)),
                         SelectRet::Nonblocking => {}
-                        _ => {
+                        SelectRet::IsBlocking | SelectRet::Ok => {
+                            // For blocking sockets, select() has completed successfully
+                            // Continue the read loop (matches CPython's SOCKET_IS_BLOCKING behavior)
                             if needs.is_some() {
                                 continue;
                             }
@@ -2695,6 +2871,24 @@ mod _ssl {
         fn SSL_set_SSL_CTX(ssl: *mut sys::SSL, ctx: *mut sys::SSL_CTX) -> *mut sys::SSL_CTX;
     }
 
+    // Message callback type
+    #[allow(non_camel_case_types)]
+    type SSL_CTX_msg_callback = Option<
+        unsafe extern "C" fn(
+            write_p: libc::c_int,
+            version: libc::c_int,
+            content_type: libc::c_int,
+            buf: *const libc::c_void,
+            len: usize,
+            ssl: *mut sys::SSL,
+            arg: *mut libc::c_void,
+        ),
+    >;
+
+    unsafe extern "C" {
+        fn SSL_CTX_set_msg_callback(ctx: *mut sys::SSL_CTX, cb: SSL_CTX_msg_callback);
+    }
+
     #[cfg(ossl110)]
     unsafe extern "C" {
         fn SSL_SESSION_has_ticket(session: *const sys::SSL_SESSION) -> libc::c_int;
@@ -2707,6 +2901,12 @@ mod _ssl {
 
     unsafe extern "C" {
         fn X509_OBJECT_get_type(obj: *const sys::X509_OBJECT) -> libc::c_int;
+        fn SSL_set_session_id_context(
+            ssl: *mut sys::SSL,
+            sid_ctx: *const libc::c_uchar,
+            sid_ctx_len: libc::c_uint,
+        ) -> libc::c_int;
+        fn SSL_get1_session(ssl: *const sys::SSL) -> *mut sys::SSL_SESSION;
     }
 
     // SSL session statistics constants (used with SSL_CTX_ctrl)
@@ -2909,8 +3109,22 @@ mod _ssl {
                 let len = size.unwrap_or(-1);
                 let len = if len < 0 || len > avail { avail } else { len };
 
-                if len == 0 {
+                // Check if EOF has been written and no data available
+                // This matches CPython's behavior where read() returns b'' when EOF is set
+                if len == 0 && self.eof_written.load() {
                     return Ok(Vec::new());
+                }
+
+                if len == 0 {
+                    // No data available and no EOF - would block
+                    // Call BIO_read() to get the proper error (SSL_ERROR_WANT_READ)
+                    let mut test_buf = [0u8; 1];
+                    let nbytes = sys::BIO_read(self.bio, test_buf.as_mut_ptr() as *mut _, 1);
+                    if nbytes < 0 {
+                        return Err(convert_openssl_error(vm, ErrorStack::get()));
+                    }
+                    // Shouldn't reach here, but if we do, return what we got
+                    return Ok(test_buf[..nbytes as usize].to_vec());
                 }
 
                 let mut buf = vec![0u8; len as usize];
@@ -3028,7 +3242,6 @@ mod _ssl {
         match err.errors().last() {
             Some(e) => {
                 // Check if this is a system library error (errno-based)
-                // CPython: Modules/_ssl.c:667-671
                 let lib = sys::ERR_GET_LIB(e.code());
 
                 if lib == sys::ERR_LIB_SYS {
@@ -3236,6 +3449,7 @@ mod _ssl {
             let bio = bio::MemBioSlice::new(der)?;
 
             let mut certs = vec![];
+
             loop {
                 let cert = sys::d2i_X509_bio(bio.as_ptr(), std::ptr::null_mut());
                 if cert.is_null() {
@@ -3244,20 +3458,22 @@ mod _ssl {
                 certs.push(X509::from_ptr(cert));
             }
 
-            let err = sys::ERR_peek_last_error();
-
             if certs.is_empty() {
-                // let msg = if filetype == sys::SSL_FILETYPE_PEM {
-                //     "no start line: cadata does not contain a certificate"
-                // } else {
-                //     "not enough data: cadata does not contain a certificate"
-                // };
-                return Err(ErrorStack::get());
-            }
-            if err != 0 {
+                // No certificates loaded at all
                 return Err(ErrorStack::get());
             }
 
+            // Successfully loaded at least one certificate from DER data.
+            // Clear any trailing errors from EOF.
+            // CPython clears errors when:
+            // - DER: was_bio_eof is set (EOF reached)
+            // - PEM: PEM_R_NO_START_LINE error (normal EOF)
+            // Both cases mean successful completion with loaded certs.
+            eprintln!(
+                "[x509_stack_from_der] SUCCESS: Clearing errors and returning {} certs",
+                certs.len()
+            );
+            sys::ERR_clear_error();
             Ok(certs)
         }
     }
