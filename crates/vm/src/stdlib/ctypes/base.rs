@@ -3,8 +3,9 @@ use crate::builtins::PyType;
 use crate::builtins::{PyBytes, PyFloat, PyInt, PyNone, PyStr, PyTypeRef};
 use crate::convert::ToPyObject;
 use crate::function::{Either, OptionalArg};
+use crate::protocol::PyNumberMethods;
 use crate::stdlib::ctypes::_ctypes::new_simple_type;
-use crate::types::Constructor;
+use crate::types::{AsNumber, Constructor};
 use crate::{AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine};
 use crossbeam_utils::atomic::AtomicCell;
 use num_traits::ToPrimitive;
@@ -158,9 +159,10 @@ pub struct PyCData {
 impl PyCData {}
 
 #[pyclass(module = "_ctypes", name = "PyCSimpleType", base = PyType)]
+#[derive(Debug, PyPayload)]
 pub struct PyCSimpleType {}
 
-#[pyclass(flags(BASETYPE))]
+#[pyclass(flags(BASETYPE), with(AsNumber))]
 impl PyCSimpleType {
     #[allow(clippy::new_ret_no_self)]
     #[pymethod]
@@ -170,6 +172,48 @@ impl PyCSimpleType {
                 .into_ref_with_type(vm, cls)?
                 .clone(),
         ))
+    }
+
+    #[pyclassmethod]
+    fn from_param(cls: PyTypeRef, value: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        // If the value is already an instance of the requested type, return it
+        if value.fast_isinstance(&cls) {
+            return Ok(value);
+        }
+
+        // Check for _as_parameter_ attribute
+        let Ok(as_parameter) = value.get_attr("_as_parameter_", vm) else {
+            return Err(vm.new_type_error("wrong type"));
+        };
+
+        PyCSimpleType::from_param(cls, as_parameter, vm)
+    }
+
+    #[pymethod]
+    fn __mul__(cls: PyTypeRef, n: isize, vm: &VirtualMachine) -> PyResult {
+        PyCSimple::repeat(cls, n, vm)
+    }
+}
+
+impl AsNumber for PyCSimpleType {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            multiply: Some(|a, b, vm| {
+                // a is a PyCSimpleType instance (type object like c_char)
+                // b is int (array size)
+                let cls = a
+                    .downcast_ref::<PyType>()
+                    .ok_or_else(|| vm.new_type_error("expected type".to_owned()))?;
+                let n = b
+                    .try_index(vm)?
+                    .as_bigint()
+                    .to_isize()
+                    .ok_or_else(|| vm.new_overflow_error("array size too large".to_owned()))?;
+                PyCSimple::repeat(cls.to_owned(), n, vm)
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
     }
 }
 
@@ -200,8 +244,18 @@ impl Constructor for PyCSimple {
         let attributes = cls.get_attributes();
         let _type_ = attributes
             .iter()
-            .find(|(k, _)| k.to_object().str(vm).unwrap().to_string() == *"_type_")
-            .unwrap()
+            .find(|(k, _)| {
+                k.to_object()
+                    .str(vm)
+                    .map(|s| s.to_string() == "_type_")
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| {
+                vm.new_type_error(format!(
+                    "cannot create '{}' instances: no _type_ attribute",
+                    cls.name()
+                ))
+            })?
             .1
             .str(vm)?
             .to_string();
@@ -218,11 +272,12 @@ impl Constructor for PyCSimple {
                 _ => vm.ctx.none(), // "z" | "Z" | "P"
             }
         };
-        Ok(PyCSimple {
+        PyCSimple {
             _type_,
             value: AtomicCell::new(value),
         }
-        .to_pyobject(vm))
+        .into_ref_with_type(vm, cls)
+        .map(Into::into)
     }
 }
 
@@ -260,11 +315,6 @@ impl PyCSimple {
         }
         .to_pyobject(vm))
     }
-
-    #[pyclassmethod]
-    fn __mul__(cls: PyTypeRef, n: isize, vm: &VirtualMachine) -> PyResult {
-        PyCSimple::repeat(cls, n, vm)
-    }
 }
 
 impl PyCSimple {
@@ -276,25 +326,25 @@ impl PyCSimple {
         let value = unsafe { (*self.value.as_ptr()).clone() };
         if let Ok(i) = value.try_int(vm) {
             let i = i.as_bigint();
-            if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::u8().as_raw_ptr()) {
-                return i.to_u8().map(|r: u8| libffi::middle::Arg::new(&r));
+            return if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::u8().as_raw_ptr()) {
+                i.to_u8().map(|r: u8| libffi::middle::Arg::new(&r))
             } else if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::i8().as_raw_ptr()) {
-                return i.to_i8().map(|r: i8| libffi::middle::Arg::new(&r));
+                i.to_i8().map(|r: i8| libffi::middle::Arg::new(&r))
             } else if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::u16().as_raw_ptr()) {
-                return i.to_u16().map(|r: u16| libffi::middle::Arg::new(&r));
+                i.to_u16().map(|r: u16| libffi::middle::Arg::new(&r))
             } else if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::i16().as_raw_ptr()) {
-                return i.to_i16().map(|r: i16| libffi::middle::Arg::new(&r));
+                i.to_i16().map(|r: i16| libffi::middle::Arg::new(&r))
             } else if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::u32().as_raw_ptr()) {
-                return i.to_u32().map(|r: u32| libffi::middle::Arg::new(&r));
+                i.to_u32().map(|r: u32| libffi::middle::Arg::new(&r))
             } else if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::i32().as_raw_ptr()) {
-                return i.to_i32().map(|r: i32| libffi::middle::Arg::new(&r));
+                i.to_i32().map(|r: i32| libffi::middle::Arg::new(&r))
             } else if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::u64().as_raw_ptr()) {
-                return i.to_u64().map(|r: u64| libffi::middle::Arg::new(&r));
+                i.to_u64().map(|r: u64| libffi::middle::Arg::new(&r))
             } else if std::ptr::eq(ty.as_raw_ptr(), libffi::middle::Type::i64().as_raw_ptr()) {
-                return i.to_i64().map(|r: i64| libffi::middle::Arg::new(&r));
+                i.to_i64().map(|r: i64| libffi::middle::Arg::new(&r))
             } else {
-                return None;
-            }
+                None
+            };
         }
         if let Ok(_f) = value.try_float(vm) {
             todo!();
