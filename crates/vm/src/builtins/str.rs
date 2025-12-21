@@ -21,7 +21,7 @@ use crate::{
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
         AsMapping, AsNumber, AsSequence, Comparable, Constructor, Hashable, IterNext, Iterable,
-        PyComparisonOp, Representable, SelfIter, Unconstructible,
+        PyComparisonOp, Representable, SelfIter,
     },
 };
 use ascii::{AsciiChar, AsciiStr, AsciiString};
@@ -282,7 +282,7 @@ impl PyPayload for PyStrIterator {
     }
 }
 
-#[pyclass(with(Unconstructible, IterNext, Iterable))]
+#[pyclass(flags(DISALLOW_INSTANTIATION), with(IterNext, Iterable))]
 impl PyStrIterator {
     #[pymethod]
     fn __length_hint__(&self) -> usize {
@@ -306,8 +306,6 @@ impl PyStrIterator {
             .builtins_iter_reduce(|x| x.clone().into(), vm)
     }
 }
-
-impl Unconstructible for PyStrIterator {}
 
 impl SelfIter for PyStrIterator {}
 
@@ -350,30 +348,38 @@ pub struct StrArgs {
 impl Constructor for PyStr {
     type Args = StrArgs;
 
-    fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
-        let string: PyRef<PyStr> = match args.object {
+    fn slot_new(cls: PyTypeRef, func_args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        // Optimization: return exact str as-is (only when no encoding/errors provided)
+        if cls.is(vm.ctx.types.str_type)
+            && func_args.args.len() == 1
+            && func_args.kwargs.is_empty()
+            && func_args.args[0].class().is(vm.ctx.types.str_type)
+        {
+            return Ok(func_args.args[0].clone());
+        }
+
+        let args: Self::Args = func_args.bind(vm)?;
+        let payload = Self::py_new(&cls, args, vm)?;
+        payload.into_ref_with_type(vm, cls).map(Into::into)
+    }
+
+    fn py_new(_cls: &Py<PyType>, args: Self::Args, vm: &VirtualMachine) -> PyResult<Self> {
+        match args.object {
             OptionalArg::Present(input) => {
                 if let OptionalArg::Present(enc) = args.encoding {
-                    vm.state.codec_registry.decode_text(
+                    let s = vm.state.codec_registry.decode_text(
                         input,
                         enc.as_str(),
                         args.errors.into_option(),
                         vm,
-                    )?
+                    )?;
+                    Ok(Self::from(s.as_wtf8().to_owned()))
                 } else {
-                    input.str(vm)?
+                    let s = input.str(vm)?;
+                    Ok(Self::from(s.as_wtf8().to_owned()))
                 }
             }
-            OptionalArg::Missing => {
-                Self::from(String::new()).into_ref_with_type(vm, cls.clone())?
-            }
-        };
-        if string.class().is(&cls) {
-            Ok(string.into())
-        } else {
-            Self::from(string.as_wtf8())
-                .into_ref_with_type(vm, cls)
-                .map(Into::into)
+            OptionalArg::Missing => Ok(Self::from(String::new())),
         }
     }
 }
@@ -619,9 +625,9 @@ impl PyStr {
         self.data.char_len()
     }
 
-    #[pymethod(name = "isascii")]
+    #[pymethod]
     #[inline(always)]
-    pub const fn is_ascii(&self) -> bool {
+    pub const fn isascii(&self) -> bool {
         matches!(self.kind(), StrKind::Ascii)
     }
 
@@ -954,7 +960,7 @@ impl PyStr {
         format_map(&format_string, &mapping, vm)
     }
 
-    #[pymethod(name = "__format__")]
+    #[pymethod]
     fn __format__(
         zelf: PyRef<PyStr>,
         spec: PyStrRef,
@@ -1932,12 +1938,10 @@ impl PyPayload for PyUtf8Str {
         std::any::TypeId::of::<PyStr>()
     }
 
-    fn downcastable_from(obj: &PyObject) -> bool {
-        obj.typeid() == Self::payload_type_id() && {
-            // SAFETY: we know the object is a PyStr in this context
-            let wtf8 = unsafe { obj.downcast_unchecked_ref::<PyStr>() };
-            wtf8.is_utf8()
-        }
+    fn validate_downcastable_from(obj: &PyObject) -> bool {
+        // SAFETY: we know the object is a PyStr in this context
+        let wtf8 = unsafe { obj.downcast_unchecked_ref::<PyStr>() };
+        wtf8.is_utf8()
     }
 
     fn try_downcast_from(obj: &PyObject, vm: &VirtualMachine) -> PyResult<()> {

@@ -24,13 +24,12 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
 pub mod module {
     use crate::{
         AsObject, Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
-        builtins::{PyDictRef, PyInt, PyListRef, PyStrRef, PyTupleRef, PyTypeRef, PyUtf8StrRef},
+        builtins::{PyDictRef, PyInt, PyListRef, PyStrRef, PyTupleRef, PyType, PyUtf8StrRef},
         convert::{IntoPyException, ToPyObject, TryFromObject},
+        exceptions::OSErrorBuilder,
         function::{Either, KwArgs, OptionalArg},
-        ospath::{IOErrorBuilder, OsPath, OsPathOrFd},
-        stdlib::os::{
-            _os, DirFd, FollowSymlinks, SupportFunc, TargetIsDirectory, errno_err, fs_metadata,
-        },
+        ospath::{OsPath, OsPathOrFd},
+        stdlib::os::{_os, DirFd, FollowSymlinks, SupportFunc, TargetIsDirectory, fs_metadata},
         types::{Constructor, Representable},
         utils::ToCString,
     };
@@ -414,7 +413,7 @@ pub mod module {
         }
 
         let metadata =
-            metadata.map_err(|err| IOErrorBuilder::with_filename(&err, path.clone(), vm))?;
+            metadata.map_err(|err| OSErrorBuilder::with_filename(&err, path.clone(), vm))?;
 
         let user_id = metadata.uid();
         let group_id = metadata.gid();
@@ -467,7 +466,11 @@ pub mod module {
         {
             let [] = args.dir_fd.0;
             let res = unsafe { libc::symlink(src.as_ptr(), dst.as_ptr()) };
-            if res < 0 { Err(errno_err(vm)) } else { Ok(()) }
+            if res < 0 {
+                Err(vm.new_last_errno_error())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -480,12 +483,12 @@ pub mod module {
     #[cfg(not(target_os = "redox"))]
     #[pyfunction]
     fn chroot(path: OsPath, vm: &VirtualMachine) -> PyResult<()> {
-        use crate::ospath::IOErrorBuilder;
+        use crate::exceptions::OSErrorBuilder;
 
         nix::unistd::chroot(&*path.path).map_err(|err| {
             // Use `From<nix::Error> for io::Error` when it is available
-            let err = io::Error::from_raw_os_error(err as i32);
-            IOErrorBuilder::with_filename(&err, path, vm)
+            let io_err: io::Error = err.into();
+            OSErrorBuilder::with_filename(&io_err, path, vm)
         })
     }
 
@@ -531,7 +534,7 @@ pub mod module {
         .map_err(|err| {
             // Use `From<nix::Error> for io::Error` when it is available
             let err = io::Error::from_raw_os_error(err as i32);
-            IOErrorBuilder::with_filename(&err, path, vm)
+            OSErrorBuilder::with_filename(&err, path, vm)
         })
     }
 
@@ -715,14 +718,22 @@ pub mod module {
                     )
                 },
             };
-            if ret != 0 { Err(errno_err(vm)) } else { Ok(()) }
+            if ret != 0 {
+                Err(vm.new_last_errno_error())
+            } else {
+                Ok(())
+            }
         }
 
         #[cfg(target_vendor = "apple")]
         fn mknod(self, vm: &VirtualMachine) -> PyResult<()> {
             let [] = self.dir_fd.0;
             let ret = self._mknod(vm)?;
-            if ret != 0 { Err(errno_err(vm)) } else { Ok(()) }
+            if ret != 0 {
+                Err(vm.new_last_errno_error())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -739,7 +750,7 @@ pub mod module {
         Errno::clear();
         let res = unsafe { libc::nice(increment) };
         if res == -1 && Errno::last_raw() != 0 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(res)
         }
@@ -750,7 +761,7 @@ pub mod module {
     fn sched_get_priority_max(policy: i32, vm: &VirtualMachine) -> PyResult<i32> {
         let max = unsafe { libc::sched_get_priority_max(policy) };
         if max == -1 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(max)
         }
@@ -761,7 +772,7 @@ pub mod module {
     fn sched_get_priority_min(policy: i32, vm: &VirtualMachine) -> PyResult<i32> {
         let min = unsafe { libc::sched_get_priority_min(policy) };
         if min == -1 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(min)
         }
@@ -822,12 +833,10 @@ pub mod module {
     impl Constructor for SchedParam {
         type Args = SchedParamArg;
 
-        fn py_new(cls: PyTypeRef, arg: Self::Args, vm: &VirtualMachine) -> PyResult {
-            Self {
+        fn py_new(_cls: &Py<PyType>, arg: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(Self {
                 sched_priority: arg.sched_priority,
-            }
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+            })
         }
     }
 
@@ -852,7 +861,7 @@ pub mod module {
     fn sched_getscheduler(pid: libc::pid_t, vm: &VirtualMachine) -> PyResult<i32> {
         let policy = unsafe { libc::sched_getscheduler(pid) };
         if policy == -1 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(policy)
         }
@@ -886,7 +895,7 @@ pub mod module {
         let libc_sched_param = args.sched_param_obj.try_to_libc(vm)?;
         let policy = unsafe { libc::sched_setscheduler(args.pid, args.policy, &libc_sched_param) };
         if policy == -1 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(policy)
         }
@@ -902,7 +911,7 @@ pub mod module {
         let param = unsafe {
             let mut param = std::mem::MaybeUninit::uninit();
             if -1 == libc::sched_getparam(pid, param.as_mut_ptr()) {
-                return Err(errno_err(vm));
+                return Err(vm.new_last_errno_error());
             }
             param.assume_init()
         };
@@ -937,7 +946,7 @@ pub mod module {
         let libc_sched_param = args.sched_param_obj.try_to_libc(vm)?;
         let ret = unsafe { libc::sched_setparam(args.pid, &libc_sched_param) };
         if ret == -1 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(ret)
         }
@@ -1023,7 +1032,7 @@ pub mod module {
             permissions.set_mode(mode);
             fs::set_permissions(&path, permissions)
         };
-        body().map_err(|err| IOErrorBuilder::with_filename(&err, err_path, vm))
+        body().map_err(|err| OSErrorBuilder::with_filename(&err, err_path, vm))
     }
 
     #[cfg(not(target_os = "redox"))]
@@ -1085,7 +1094,7 @@ pub mod module {
             Ok(())
         } else {
             let err = std::io::Error::last_os_error();
-            Err(IOErrorBuilder::with_filename(&err, path, vm))
+            Err(OSErrorBuilder::with_filename(&err, path, vm))
         }
     }
 
@@ -1330,9 +1339,9 @@ pub mod module {
     }
 
     #[pyfunction]
-    fn uname(vm: &VirtualMachine) -> PyResult<_os::UnameResult> {
+    fn uname(vm: &VirtualMachine) -> PyResult<_os::UnameResultData> {
         let info = uname::uname().map_err(|err| err.into_pyexception(vm))?;
-        Ok(_os::UnameResult {
+        Ok(_os::UnameResultData {
             sysname: info.sysname,
             nodename: info.nodename,
             release: info.release,
@@ -1546,7 +1555,7 @@ pub mod module {
                     };
                     if let Err(err) = ret {
                         let err = err.into();
-                        return Err(IOErrorBuilder::with_filename(&err, self.path, vm));
+                        return Err(OSErrorBuilder::with_filename(&err, self.path, vm));
                     }
                 }
             }
@@ -1645,7 +1654,7 @@ pub mod module {
                 nix::spawn::posix_spawn(&*path, &file_actions, &attrp, &args, &env)
             };
             ret.map(Into::into)
-                .map_err(|err| IOErrorBuilder::with_filename(&err.into(), self.path, vm))
+                .map_err(|err| OSErrorBuilder::with_filename(&err.into(), self.path, vm))
         }
     }
 
@@ -1719,7 +1728,7 @@ pub mod module {
         {
             let ret = unsafe { libc::kill(pid, sig as i32) };
             if ret == -1 {
-                Err(errno_err(vm))
+                Err(vm.new_last_errno_error())
             } else {
                 Ok(())
             }
@@ -1730,7 +1739,7 @@ pub mod module {
     fn get_terminal_size(
         fd: OptionalArg<i32>,
         vm: &VirtualMachine,
-    ) -> PyResult<_os::PyTerminalSize> {
+    ) -> PyResult<_os::TerminalSizeData> {
         let (columns, lines) = {
             nix::ioctl_read_bad!(winsz, libc::TIOCGWINSZ, libc::winsize);
             let mut w = libc::winsize {
@@ -1743,7 +1752,7 @@ pub mod module {
                 .map_err(|err| err.into_pyexception(vm))?;
             (w.ws_col.into(), w.ws_row.into())
         };
-        Ok(_os::PyTerminalSize { columns, lines })
+        Ok(_os::TerminalSizeData { columns, lines })
     }
 
     // from libstd:
@@ -1762,7 +1771,11 @@ pub mod module {
     #[pyfunction]
     fn _fcopyfile(in_fd: i32, out_fd: i32, flags: i32, vm: &VirtualMachine) -> PyResult<()> {
         let ret = unsafe { fcopyfile(in_fd, out_fd, std::ptr::null_mut(), flags as u32) };
-        if ret < 0 { Err(errno_err(vm)) } else { Ok(()) }
+        if ret < 0 {
+            Err(vm.new_last_errno_error())
+        } else {
+            Ok(())
+        }
     }
 
     #[pyfunction]
@@ -1884,7 +1897,7 @@ pub mod module {
         Errno::clear();
         let retval = unsafe { libc::getpriority(which, who) };
         if Errno::last_raw() != 0 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(vm.ctx.new_int(retval).into())
         }
@@ -1900,7 +1913,7 @@ pub mod module {
     ) -> PyResult<()> {
         let retval = unsafe { libc::setpriority(which, who, priority) };
         if retval == -1 {
-            Err(errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(())
         }
@@ -2114,7 +2127,7 @@ pub mod module {
             if Errno::last_raw() == 0 {
                 Ok(None)
             } else {
-                Err(IOErrorBuilder::with_filename(
+                Err(OSErrorBuilder::with_filename(
                     &io::Error::from(Errno::last()),
                     path,
                     vm,
@@ -2323,9 +2336,10 @@ pub mod module {
 
     #[pyfunction]
     fn sysconf(name: SysconfName, vm: &VirtualMachine) -> PyResult<libc::c_long> {
+        crate::common::os::set_errno(0);
         let r = unsafe { libc::sysconf(name.0) };
-        if r == -1 {
-            return Err(errno_err(vm));
+        if r == -1 && crate::common::os::get_errno() != 0 {
+            return Err(vm.new_last_errno_error());
         }
         Ok(r)
     }
@@ -2452,7 +2466,7 @@ pub mod module {
                 flags.unwrap_or(0),
             )
             .try_into()
-            .map_err(|_| errno_err(vm))?;
+            .map_err(|_| vm.new_last_os_error())?;
             buf.set_len(len);
         }
         Ok(buf)

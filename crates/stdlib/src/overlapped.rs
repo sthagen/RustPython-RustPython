@@ -9,11 +9,10 @@ mod _overlapped {
 
     use crate::vm::{
         Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
-        builtins::{PyBaseExceptionRef, PyBytesRef, PyTypeRef},
+        builtins::{PyBaseExceptionRef, PyBytesRef, PyType},
         common::lock::PyMutex,
         convert::{ToPyException, ToPyObject},
         protocol::PyBuffer,
-        stdlib::os::errno_err,
         types::Constructor,
     };
     use windows_sys::Win32::{
@@ -256,7 +255,7 @@ mod _overlapped {
             };
             // CancelIoEx returns ERROR_NOT_FOUND if the I/O completed in-between
             if ret == 0 && unsafe { GetLastError() } != Foundation::ERROR_NOT_FOUND {
-                return Err(errno_err(vm));
+                return Err(vm.new_last_os_error());
             }
             Ok(())
         }
@@ -265,7 +264,11 @@ mod _overlapped {
     impl Constructor for Overlapped {
         type Args = (isize,);
 
-        fn py_new(cls: PyTypeRef, (mut event,): Self::Args, vm: &VirtualMachine) -> PyResult {
+        fn py_new(
+            _cls: &Py<PyType>,
+            (mut event,): Self::Args,
+            vm: &VirtualMachine,
+        ) -> PyResult<Self> {
             if event == INVALID_HANDLE_VALUE {
                 event = unsafe {
                     windows_sys::Win32::System::Threading::CreateEventA(
@@ -276,7 +279,7 @@ mod _overlapped {
                     ) as isize
                 };
                 if event == NULL {
-                    return Err(errno_err(vm));
+                    return Err(vm.new_last_os_error());
                 }
             }
 
@@ -290,10 +293,9 @@ mod _overlapped {
                 error: 0,
                 data: OverlappedData::None,
             };
-            let overlapped = Overlapped {
+            Ok(Overlapped {
                 inner: PyMutex::new(inner),
-            };
-            overlapped.into_ref_with_type(vm, cls).map(Into::into)
+            })
         }
     }
 
@@ -318,7 +320,7 @@ mod _overlapped {
             ) as isize
         };
         if r as usize == 0 {
-            return Err(errno_err(vm));
+            return Err(vm.new_last_os_error());
         }
         Ok(r)
     }
@@ -346,7 +348,7 @@ mod _overlapped {
             if err == Foundation::WAIT_TIMEOUT {
                 return Ok(vm.ctx.none());
             } else {
-                return Err(errno_err(vm));
+                return Err(vm.new_last_os_error());
             }
         }
 
@@ -387,7 +389,7 @@ mod _overlapped {
             ) as isize
         };
         if event == NULL {
-            return Err(errno_err(vm));
+            return Err(vm.new_last_os_error());
         }
         Ok(event)
     }
@@ -396,7 +398,7 @@ mod _overlapped {
     fn SetEvent(handle: u64, vm: &VirtualMachine) -> PyResult<()> {
         let ret = unsafe { windows_sys::Win32::System::Threading::SetEvent(u64_to_handle(handle)) };
         if ret == 0 {
-            return Err(errno_err(vm));
+            return Err(vm.new_last_os_error());
         }
         Ok(())
     }
@@ -406,7 +408,7 @@ mod _overlapped {
         let ret =
             unsafe { windows_sys::Win32::System::Threading::ResetEvent(u64_to_handle(handle)) };
         if ret == 0 {
-            return Err(errno_err(vm));
+            return Err(vm.new_last_os_error());
         }
         Ok(())
     }

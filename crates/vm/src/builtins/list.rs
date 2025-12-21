@@ -15,7 +15,7 @@ use crate::{
     sliceable::{SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Initializer, IterNext, Iterable,
-        PyComparisonOp, Representable, SelfIter, Unconstructible,
+        PyComparisonOp, Representable, SelfIter,
     },
     utils::collection_repr,
     vm::VirtualMachine,
@@ -367,8 +367,8 @@ where
 impl MutObjectSequenceOp for PyList {
     type Inner = [PyObjectRef];
 
-    fn do_get(index: usize, inner: &[PyObjectRef]) -> Option<&PyObjectRef> {
-        inner.get(index)
+    fn do_get(index: usize, inner: &[PyObjectRef]) -> Option<&PyObject> {
+        inner.get(index).map(|r| r.as_ref())
     }
 
     fn do_lock(&self) -> impl std::ops::Deref<Target = [PyObjectRef]> {
@@ -379,8 +379,8 @@ impl MutObjectSequenceOp for PyList {
 impl Constructor for PyList {
     type Args = FuncArgs;
 
-    fn py_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        Self::default().into_ref_with_type(vm, cls).map(Into::into)
+    fn py_new(_cls: &Py<PyType>, _args: FuncArgs, _vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(Self::default())
     }
 }
 
@@ -544,7 +544,7 @@ impl PyPayload for PyListIterator {
     }
 }
 
-#[pyclass(with(Unconstructible, IterNext, Iterable))]
+#[pyclass(flags(DISALLOW_INSTANTIATION), with(IterNext, Iterable))]
 impl PyListIterator {
     #[pymethod]
     fn __length_hint__(&self) -> usize {
@@ -565,7 +565,6 @@ impl PyListIterator {
             .builtins_iter_reduce(|x| x.clone().into(), vm)
     }
 }
-impl Unconstructible for PyListIterator {}
 
 impl SelfIter for PyListIterator {}
 impl IterNext for PyListIterator {
@@ -590,7 +589,7 @@ impl PyPayload for PyListReverseIterator {
     }
 }
 
-#[pyclass(with(Unconstructible, IterNext, Iterable))]
+#[pyclass(flags(DISALLOW_INSTANTIATION), with(IterNext, Iterable))]
 impl PyListReverseIterator {
     #[pymethod]
     fn __length_hint__(&self) -> usize {
@@ -611,7 +610,6 @@ impl PyListReverseIterator {
             .builtins_reversed_reduce(|x| x.clone().into(), vm)
     }
 }
-impl Unconstructible for PyListReverseIterator {}
 
 impl SelfIter for PyListReverseIterator {}
 impl IterNext for PyListReverseIterator {

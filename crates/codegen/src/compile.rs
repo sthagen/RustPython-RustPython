@@ -122,7 +122,7 @@ pub struct CompileOpts {
 
 #[derive(Debug, Clone, Copy)]
 struct CompileContext {
-    loop_data: Option<(ir::BlockIdx, ir::BlockIdx)>,
+    loop_data: Option<(BlockIdx, BlockIdx)>,
     in_class: bool,
     func: FunctionContext,
 }
@@ -356,7 +356,7 @@ impl Compiler {
             source_path: source_file.name().to_owned(),
             private: None,
             blocks: vec![ir::Block::default()],
-            current_block: ir::BlockIdx(0),
+            current_block: BlockIdx::new(0),
             metadata: ir::CodeUnitMetadata {
                 name: code_name.clone(),
                 qualname: Some(code_name),
@@ -557,11 +557,9 @@ impl Compiler {
 
     /// Get the SymbolTable for the current scope.
     fn current_symbol_table(&self) -> &SymbolTable {
-        if self.symbol_table_stack.is_empty() {
-            panic!("symbol_table_stack is empty! This is a compiler bug.");
-        }
-        let index = self.symbol_table_stack.len() - 1;
-        &self.symbol_table_stack[index]
+        self.symbol_table_stack
+            .last()
+            .expect("symbol_table_stack is empty! This is a compiler bug.")
     }
 
     /// Get the index of a free variable.
@@ -626,9 +624,8 @@ impl Compiler {
         let table = current_table.sub_tables.remove(0);
 
         // Push the next table onto the stack
-        let last_idx = self.symbol_table_stack.len();
         self.symbol_table_stack.push(table);
-        &self.symbol_table_stack[last_idx]
+        self.current_symbol_table()
     }
 
     /// Pop the current symbol table off the stack
@@ -657,12 +654,13 @@ impl Compiler {
         let source_path = self.source_file.name().to_owned();
 
         // Lookup symbol table entry using key (_PySymtable_Lookup)
-        let ste = if key < self.symbol_table_stack.len() {
-            &self.symbol_table_stack[key]
-        } else {
-            return Err(self.error(CodegenErrorType::SyntaxError(
-                "unknown symbol table entry".to_owned(),
-            )));
+        let ste = match self.symbol_table_stack.get(key) {
+            Some(v) => v,
+            None => {
+                return Err(self.error(CodegenErrorType::SyntaxError(
+                    "unknown symbol table entry".to_owned(),
+                )));
+            }
         };
 
         // Use varnames from symbol table (already collected in definition order)
@@ -747,7 +745,7 @@ impl Compiler {
             source_path: source_path.clone(),
             private,
             blocks: vec![ir::Block::default()],
-            current_block: BlockIdx(0),
+            current_block: BlockIdx::new(0),
             metadata: ir::CodeUnitMetadata {
                 name: name.to_owned(),
                 qualname: None, // Will be set below
@@ -1057,7 +1055,14 @@ impl Compiler {
             for statement in body {
                 if let Stmt::Expr(StmtExpr { value, .. }) = &statement {
                     self.compile_expression(value)?;
-                    emit!(self, Instruction::PrintExpr);
+                    emit!(
+                        self,
+                        Instruction::CallIntrinsic1 {
+                            func: bytecode::IntrinsicFunction1::Print
+                        }
+                    );
+
+                    emit!(self, Instruction::Pop);
                 } else {
                     self.compile_statement(statement)?;
                 }
@@ -1066,7 +1071,14 @@ impl Compiler {
             if let Stmt::Expr(StmtExpr { value, .. }) = &last {
                 self.compile_expression(value)?;
                 emit!(self, Instruction::CopyItem { index: 1_u32 });
-                emit!(self, Instruction::PrintExpr);
+                emit!(
+                    self,
+                    Instruction::CallIntrinsic1 {
+                        func: bytecode::IntrinsicFunction1::Print
+                    }
+                );
+
+                emit!(self, Instruction::Pop);
             } else {
                 self.compile_statement(last)?;
                 self.emit_load_const(ConstantData::None);
@@ -1185,12 +1197,10 @@ impl Compiler {
 
             // If not found and we're in TypeParams scope, try parent scope
             let symbol = if symbol.is_none() && is_typeparams {
-                if self.symbol_table_stack.len() > 1 {
-                    let parent_idx = self.symbol_table_stack.len() - 2;
-                    self.symbol_table_stack[parent_idx].lookup(name.as_ref())
-                } else {
-                    None
-                }
+                self.symbol_table_stack
+                    .get(self.symbol_table_stack.len() - 2) // Try to get parent index
+                    .expect("Symbol has no parent! This is a compiler bug.")
+                    .lookup(name.as_ref())
             } else {
                 symbol
             };
@@ -2669,10 +2679,12 @@ impl Compiler {
         let qualname_name = self.name("__qualname__");
         emit!(self, Instruction::StoreLocal(qualname_name));
 
-        // Store __doc__
-        self.load_docstring(doc_str);
-        let doc = self.name("__doc__");
-        emit!(self, Instruction::StoreLocal(doc));
+        // Store __doc__ only if there's an explicit docstring
+        if let Some(doc) = doc_str {
+            self.emit_load_const(ConstantData::Str { value: doc.into() });
+            let doc_name = self.name("__doc__");
+            emit!(self, Instruction::StoreLocal(doc_name));
+        }
 
         // Store __firstlineno__ (new in Python 3.12+)
         self.emit_load_const(ConstantData::Integer {
@@ -2864,17 +2876,6 @@ impl Compiler {
         // Step 4: Apply decorators and store (common to both paths)
         self.apply_decorators(decorator_list);
         self.store_name(name)
-    }
-
-    fn load_docstring(&mut self, doc_str: Option<String>) {
-        // TODO: __doc__ must be default None and no bytecode unless it is Some
-        // Duplicate top of stack (the function or class object)
-
-        // Doc string value:
-        self.emit_load_const(match doc_str {
-            Some(doc) => ConstantData::Str { value: doc.into() },
-            None => ConstantData::None, // set docstring None if not declared
-        });
     }
 
     fn compile_while(&mut self, test: &Expr, body: &[Stmt], orelse: &[Stmt]) -> CompileResult<()> {
@@ -4369,7 +4370,7 @@ impl Compiler {
         &mut self,
         expression: &Expr,
         condition: bool,
-        target_block: ir::BlockIdx,
+        target_block: BlockIdx,
     ) -> CompileResult<()> {
         // Compile expression for test, and jump to label if false
         match &expression {
@@ -5186,7 +5187,7 @@ impl Compiler {
         let return_none = init_collection.is_none();
         // Create empty object of proper type:
         if let Some(init_collection) = init_collection {
-            self._emit(init_collection, OpArg(0), ir::BlockIdx::NULL)
+            self._emit(init_collection, OpArg(0), BlockIdx::NULL)
         }
 
         let mut loop_labels = vec![];
@@ -5327,7 +5328,7 @@ impl Compiler {
     }
 
     // Low level helper functions:
-    fn _emit(&mut self, instr: Instruction, arg: OpArg, target: ir::BlockIdx) {
+    fn _emit(&mut self, instr: Instruction, arg: OpArg, target: BlockIdx) {
         let range = self.current_source_range;
         let location = self
             .source_file
@@ -5344,7 +5345,7 @@ impl Compiler {
     }
 
     fn emit_no_arg(&mut self, ins: Instruction) {
-        self._emit(ins, OpArg::null(), ir::BlockIdx::NULL)
+        self._emit(ins, OpArg::null(), BlockIdx::NULL)
     }
 
     fn emit_arg<A: OpArgType, T: EmitArg<A>>(
@@ -5392,25 +5393,25 @@ impl Compiler {
         &mut info.blocks[info.current_block]
     }
 
-    fn new_block(&mut self) -> ir::BlockIdx {
+    fn new_block(&mut self) -> BlockIdx {
         let code = self.current_code_info();
-        let idx = ir::BlockIdx(code.blocks.len().to_u32());
+        let idx = BlockIdx::new(code.blocks.len().to_u32());
         code.blocks.push(ir::Block::default());
         idx
     }
 
-    fn switch_to_block(&mut self, block: ir::BlockIdx) {
+    fn switch_to_block(&mut self, block: BlockIdx) {
         let code = self.current_code_info();
         let prev = code.current_block;
         assert_ne!(prev, block, "recursive switching {prev:?} -> {block:?}");
         assert_eq!(
             code.blocks[block].next,
-            ir::BlockIdx::NULL,
+            BlockIdx::NULL,
             "switching {prev:?} -> {block:?} to completed block"
         );
-        let prev_block = &mut code.blocks[prev.0 as usize];
+        let prev_block = &mut code.blocks[prev.idx()];
         assert_eq!(
-            prev_block.next.0,
+            u32::from(prev_block.next),
             u32::MAX,
             "switching {prev:?} -> {block:?} from block that's already got a next"
         );
@@ -5707,22 +5708,19 @@ trait EmitArg<Arg: OpArgType> {
     fn emit(
         self,
         f: impl FnOnce(OpArgMarker<Arg>) -> Instruction,
-    ) -> (Instruction, OpArg, ir::BlockIdx);
+    ) -> (Instruction, OpArg, BlockIdx);
 }
 impl<T: OpArgType> EmitArg<T> for T {
-    fn emit(
-        self,
-        f: impl FnOnce(OpArgMarker<T>) -> Instruction,
-    ) -> (Instruction, OpArg, ir::BlockIdx) {
+    fn emit(self, f: impl FnOnce(OpArgMarker<T>) -> Instruction) -> (Instruction, OpArg, BlockIdx) {
         let (marker, arg) = OpArgMarker::new(self);
-        (f(marker), arg, ir::BlockIdx::NULL)
+        (f(marker), arg, BlockIdx::NULL)
     }
 }
-impl EmitArg<bytecode::Label> for ir::BlockIdx {
+impl EmitArg<bytecode::Label> for BlockIdx {
     fn emit(
         self,
         f: impl FnOnce(OpArgMarker<bytecode::Label>) -> Instruction,
-    ) -> (Instruction, OpArg, ir::BlockIdx) {
+    ) -> (Instruction, OpArg, BlockIdx) {
         (f(OpArgMarker::marker()), OpArg::null(), self)
     }
 }

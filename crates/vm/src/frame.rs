@@ -918,6 +918,8 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             bytecode::Instruction::GetAwaitable => {
+                use crate::protocol::PyIter;
+
                 let awaited_obj = self.pop_value();
                 let awaitable = if awaited_obj.downcastable::<PyCoroutine>() {
                     awaited_obj
@@ -932,7 +934,15 @@ impl ExecutingFrame<'_> {
                             )
                         },
                     )?;
-                    await_method.call((), vm)?
+                    let result = await_method.call((), vm)?;
+                    // Check that __await__ returned an iterator
+                    if !PyIter::check(&result) {
+                        return Err(vm.new_type_error(format!(
+                            "__await__() returned non-iterator of type '{}'",
+                            result.class().name()
+                        )));
+                    }
+                    result
                 };
                 self.push_value(awaitable);
                 Ok(None)
@@ -1351,8 +1361,6 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::PopJumpIfTrue { target } => {
                 self.pop_jump_if(vm, target.get(arg), true)
             }
-            bytecode::Instruction::PrintExpr => self.print_expr(vm),
-
             bytecode::Instruction::Raise { kind } => self.execute_raise(vm, kind.get(arg)),
             bytecode::Instruction::Resume { arg: resume_arg } => {
                 // Resume execution after yield, await, or at function start
@@ -1858,14 +1866,14 @@ impl ExecutingFrame<'_> {
     /// This ensures proper order preservation for OrderedDict and other custom mappings.
     fn iterate_mapping_keys<F>(
         vm: &VirtualMachine,
-        mapping: &PyObjectRef,
+        mapping: &PyObject,
         error_prefix: &str,
         mut key_handler: F,
     ) -> PyResult<()>
     where
         F: FnMut(PyObjectRef) -> PyResult<()>,
     {
-        let Some(keys_method) = vm.get_method(mapping.clone(), vm.ctx.intern_str("keys")) else {
+        let Some(keys_method) = vm.get_method(mapping.to_owned(), vm.ctx.intern_str("keys")) else {
             return Err(vm.new_type_error(format!("{error_prefix} must be a mapping")));
         };
 
@@ -2208,18 +2216,6 @@ impl ExecutingFrame<'_> {
         Ok(None)
     }
 
-    fn print_expr(&mut self, vm: &VirtualMachine) -> FrameResult {
-        let expr = self.pop_value();
-
-        let displayhook = vm
-            .sys_module
-            .get_attr("displayhook", vm)
-            .map_err(|_| vm.new_runtime_error("lost sys.displayhook"))?;
-        displayhook.call((expr,), vm)?;
-
-        Ok(None)
-    }
-
     fn unpack_sequence(&mut self, size: u32, vm: &VirtualMachine) -> FrameResult {
         let value = self.pop_value();
         let elements: Vec<_> = value.try_to_value(vm).map_err(|e| {
@@ -2390,6 +2386,13 @@ impl ExecutingFrame<'_> {
         vm: &VirtualMachine,
     ) -> PyResult {
         match func {
+            bytecode::IntrinsicFunction1::Print => {
+                let displayhook = vm
+                    .sys_module
+                    .get_attr("displayhook", vm)
+                    .map_err(|_| vm.new_runtime_error("lost sys.displayhook"))?;
+                displayhook.call((arg,), vm)
+            }
             bytecode::IntrinsicFunction1::ImportStar => {
                 // arg is the module object
                 self.push_value(arg); // Push module back on stack for import_star

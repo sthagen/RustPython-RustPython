@@ -10,7 +10,7 @@ use crate::{
     frame::FrameRef,
     function::OptionalArg,
     protocol::PyIterReturn,
-    types::{IterNext, Iterable, Representable, SelfIter, Unconstructible},
+    types::{IterNext, Iterable, Representable, SelfIter},
 };
 
 #[pyclass(module = false, name = "generator")]
@@ -26,15 +26,15 @@ impl PyPayload for PyGenerator {
     }
 }
 
-#[pyclass(with(Py, Unconstructible, IterNext, Iterable))]
+#[pyclass(flags(DISALLOW_INSTANTIATION), with(Py, IterNext, Iterable))]
 impl PyGenerator {
     pub const fn as_coro(&self) -> &Coro {
         &self.inner
     }
 
-    pub fn new(frame: FrameRef, name: PyStrRef) -> Self {
+    pub fn new(frame: FrameRef, name: PyStrRef, qualname: PyStrRef) -> Self {
         Self {
-            inner: Coro::new(frame, name),
+            inner: Coro::new(frame, name, qualname),
         }
     }
 
@@ -46,6 +46,16 @@ impl PyGenerator {
     #[pygetset(setter)]
     fn set___name__(&self, name: PyStrRef) {
         self.inner.set_name(name)
+    }
+
+    #[pygetset]
+    fn __qualname__(&self) -> PyStrRef {
+        self.inner.qualname()
+    }
+
+    #[pygetset(setter)]
+    fn set___qualname__(&self, qualname: PyStrRef) {
+        self.inner.set_qualname(qualname)
     }
 
     #[pygetset]
@@ -103,8 +113,6 @@ impl Py<PyGenerator> {
         self.inner.close(self.as_object(), vm)
     }
 }
-
-impl Unconstructible for PyGenerator {}
 
 impl Representable for PyGenerator {
     #[inline]

@@ -50,7 +50,7 @@ jobs:
 #            target: aarch64-pc-windows-msvc
       fail-fast: false
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: cargo-bins/cargo-binstall@main
 
@@ -83,7 +83,7 @@ jobs:
         if: runner.os == 'Windows'
 
       - name: Upload Binary Artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: rustpython-release-${{ runner.os }}-${{ matrix.platform.target }}
           path: target/rustpython-release-${{ runner.os }}-${{ matrix.platform.target }}*
@@ -93,7 +93,7 @@ jobs:
     # Disable this scheduled job when running on a fork.
     if: ${{ github.repository == 'RustPython/RustPython' || github.event_name != 'schedule' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
@@ -105,7 +105,7 @@ jobs:
         run: cp target/wasm32-wasip1/release/rustpython.wasm target/rustpython-release-wasm32-wasip1.wasm
 
       - name: Upload Binary Artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: rustpython-release-wasm32-wasip1
           path: target/rustpython-release-wasm32-wasip1.wasm
@@ -145,7 +145,7 @@ jobs:
     needs: [build, build-wasm]
     steps:
       - name: Download Binary Artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7.0.0
         with:
           path: bin
           pattern: rustpython-*

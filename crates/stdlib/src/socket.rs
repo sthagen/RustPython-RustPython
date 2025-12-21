@@ -15,7 +15,7 @@ mod _socket {
     use crate::common::lock::{PyMappedRwLockReadGuard, PyRwLock, PyRwLockReadGuard};
     use crate::vm::{
         AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
-        builtins::{PyBaseExceptionRef, PyListRef, PyStrRef, PyTupleRef, PyTypeRef},
+        builtins::{PyBaseExceptionRef, PyListRef, PyOSError, PyStrRef, PyTupleRef, PyTypeRef},
         common::os::ErrorExt,
         convert::{IntoPyException, ToPyObject, TryFromBorrowedObject, TryFromObject},
         function::{ArgBytesLike, ArgMemoryBuffer, Either, FsPath, OptionalArg, OptionalOption},
@@ -1065,8 +1065,7 @@ mod _socket {
         fn repr_str(zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<String> {
             Ok(format!(
                 "<socket object, fd={}, family={}, type={}, proto={}>",
-                // cast because INVALID_SOCKET is unsigned, so would show usize::MAX instead of -1
-                zelf.fileno() as i64,
+                zelf.fileno(),
                 zelf.family.load(),
                 zelf.kind.load(),
                 zelf.proto.load(),
@@ -1462,25 +1461,25 @@ mod _socket {
         #[pymethod]
         fn close(&self) -> io::Result<()> {
             let sock = self.detach();
-            if sock != INVALID_SOCKET {
-                close_inner(sock)?;
+            if sock != INVALID_SOCKET as i64 {
+                close_inner(sock as RawSocket)?;
             }
             Ok(())
         }
 
         #[pymethod]
         #[inline]
-        fn detach(&self) -> RawSocket {
+        fn detach(&self) -> i64 {
             let sock = self.sock.write().take();
-            sock.map_or(INVALID_SOCKET, into_sock_fileno)
+            sock.map_or(INVALID_SOCKET as i64, |s| into_sock_fileno(s) as i64)
         }
 
         #[pymethod]
-        fn fileno(&self) -> RawSocket {
+        fn fileno(&self) -> i64 {
             self.sock
                 .read()
                 .as_ref()
-                .map_or(INVALID_SOCKET, sock_fileno)
+                .map_or(INVALID_SOCKET as i64, |s| sock_fileno(s) as i64)
         }
 
         #[pymethod]
@@ -1547,7 +1546,7 @@ mod _socket {
                     )
                 };
                 if ret < 0 {
-                    return Err(crate::common::os::last_os_error().into());
+                    return Err(crate::common::os::errno_io_error().into());
                 }
                 Ok(vm.ctx.new_int(flag).into())
             } else {
@@ -1568,7 +1567,7 @@ mod _socket {
                     )
                 };
                 if ret < 0 {
-                    return Err(crate::common::os::last_os_error().into());
+                    return Err(crate::common::os::errno_io_error().into());
                 }
                 buf.truncate(buflen as usize);
                 Ok(vm.ctx.new_bytes(buf).into())
@@ -1609,7 +1608,7 @@ mod _socket {
                 }
             };
             if ret < 0 {
-                Err(crate::common::os::last_os_error().into())
+                Err(crate::common::os::errno_io_error().into())
             } else {
                 Ok(())
             }
@@ -1827,6 +1826,11 @@ mod _socket {
             Self::Py(exc)
         }
     }
+    impl From<PyRef<PyOSError>> for IoOrPyException {
+        fn from(exc: PyRef<PyOSError>) -> Self {
+            Self::Py(exc.upcast())
+        }
+    }
     impl From<io::Error> for IoOrPyException {
         fn from(err: io::Error) -> Self {
             Self::Io(err)
@@ -1845,7 +1849,7 @@ mod _socket {
         #[inline]
         fn into_pyexception(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
             match self {
-                Self::Timeout => timeout_error(vm),
+                Self::Timeout => timeout_error(vm).upcast(),
                 Self::Py(exc) => exc,
                 Self::Io(err) => err.into_pyexception(vm),
             }
@@ -2143,10 +2147,11 @@ mod _socket {
     #[pyfunction]
     fn if_nametoindex(name: FsPath, vm: &VirtualMachine) -> PyResult<IfIndex> {
         let name = name.to_cstring(vm)?;
-
+        // in case 'if_nametoindex' does not set errno
+        crate::common::os::set_errno(libc::ENODEV);
         let ret = unsafe { c::if_nametoindex(name.as_ptr() as _) };
         if ret == 0 {
-            Err(vm.new_os_error("no interface with this name".to_owned()))
+            Err(vm.new_last_errno_error())
         } else {
             Ok(ret)
         }
@@ -2156,9 +2161,11 @@ mod _socket {
     #[pyfunction]
     fn if_indextoname(index: IfIndex, vm: &VirtualMachine) -> PyResult<String> {
         let mut buf = [0; c::IF_NAMESIZE + 1];
+        // in case 'if_indextoname' does not set errno
+        crate::common::os::set_errno(libc::ENXIO);
         let ret = unsafe { c::if_indextoname(index, buf.as_mut_ptr()) };
         if ret.is_null() {
-            Err(crate::vm::stdlib::os::errno_err(vm))
+            Err(vm.new_last_errno_error())
         } else {
             let buf = unsafe { ffi::CStr::from_ptr(buf.as_ptr() as _) };
             Ok(buf.to_string_lossy().into_owned())
@@ -2410,18 +2417,15 @@ mod _socket {
             SocketError::GaiError => gaierror(vm),
             SocketError::HError => herror(vm),
         };
-        vm.new_exception(
-            exception_cls,
-            vec![vm.new_pyobj(err.error_num()), vm.ctx.new_str(strerr).into()],
-        )
-        .into()
+        vm.new_os_subtype_error(exception_cls, Some(err.error_num()), strerr)
+            .into()
     }
 
-    fn timeout_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
+    fn timeout_error(vm: &VirtualMachine) -> PyRef<PyOSError> {
         timeout_error_msg(vm, "timed out".to_owned())
     }
-    pub(crate) fn timeout_error_msg(vm: &VirtualMachine, msg: String) -> PyBaseExceptionRef {
-        vm.new_exception_msg(timeout(vm), msg)
+    pub(crate) fn timeout_error_msg(vm: &VirtualMachine, msg: String) -> PyRef<PyOSError> {
+        vm.new_os_subtype_error(timeout(vm), None, msg)
     }
 
     fn get_ipv6_addr_str(ipv6: Ipv6Addr) -> String {
@@ -2488,7 +2492,7 @@ mod _socket {
         use windows_sys::Win32::Networking::WinSock::closesocket as close;
         let ret = unsafe { close(x as _) };
         if ret < 0 {
-            let err = crate::common::os::last_os_error();
+            let err = std::io::Error::last_os_error();
             if err.raw_os_error() != Some(errcode!(ECONNRESET)) {
                 return Err(err);
             }

@@ -22,6 +22,8 @@ use std::{
     io::{self, BufRead, BufReader},
 };
 
+pub use super::exception_group::exception_group;
+
 unsafe impl Traverse for PyBaseException {
     fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
         self.traceback.traverse(tracer_fn);
@@ -77,7 +79,7 @@ impl VirtualMachine {
     pub fn write_exception<W: Write>(
         &self,
         output: &mut W,
-        exc: &PyBaseExceptionRef,
+        exc: &Py<PyBaseException>,
     ) -> Result<(), W::Error> {
         let seen = &mut HashSet::<usize>::new();
         self.write_exception_recursive(output, exc, seen)
@@ -86,7 +88,7 @@ impl VirtualMachine {
     fn write_exception_recursive<W: Write>(
         &self,
         output: &mut W,
-        exc: &PyBaseExceptionRef,
+        exc: &Py<PyBaseException>,
         seen: &mut HashSet<usize>,
     ) -> Result<(), W::Error> {
         // This function should not be called directly,
@@ -130,7 +132,7 @@ impl VirtualMachine {
     pub fn write_exception_inner<W: Write>(
         &self,
         output: &mut W,
-        exc: &PyBaseExceptionRef,
+        exc: &Py<PyBaseException>,
     ) -> Result<(), W::Error> {
         let vm = self;
         if let Some(tb) = exc.traceback.read().clone() {
@@ -175,7 +177,7 @@ impl VirtualMachine {
     fn write_syntaxerror<W: Write>(
         &self,
         output: &mut W,
-        exc: &PyBaseExceptionRef,
+        exc: &Py<PyBaseException>,
         exc_type: &Py<PyType>,
         args_repr: &[PyRef<PyStr>],
     ) -> Result<(), W::Error> {
@@ -367,7 +369,7 @@ fn print_source_line<W: Write>(
 /// Print exception occurrence location from traceback element
 fn write_traceback_entry<W: Write>(
     output: &mut W,
-    tb_entry: &PyTracebackRef,
+    tb_entry: &Py<PyTraceback>,
 ) -> Result<(), W::Error> {
     let filename = tb_entry.frame.code.source_path.as_str();
     writeln!(
@@ -445,11 +447,10 @@ impl ExceptionCtor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ExceptionZoo {
     pub base_exception_type: &'static Py<PyType>,
     pub base_exception_group: &'static Py<PyType>,
-    pub exception_group: &'static Py<PyType>,
     pub system_exit: &'static Py<PyType>,
     pub keyboard_interrupt: &'static Py<PyType>,
     pub generator_exit: &'static Py<PyType>,
@@ -623,8 +624,8 @@ impl PyBaseException {
         *self.context.write() = context;
     }
 
-    #[pygetset(name = "__suppress_context__")]
-    pub(super) fn get_suppress_context(&self) -> bool {
+    #[pygetset]
+    pub(super) fn __suppress_context__(&self) -> bool {
         self.suppress_context.load()
     }
 
@@ -706,13 +707,17 @@ impl PyRef<PyBaseException> {
 impl Constructor for PyBaseException {
     type Args = FuncArgs;
 
-    fn py_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         if cls.is(Self::class(&vm.ctx)) && !args.kwargs.is_empty() {
             return Err(vm.new_type_error("BaseException() takes no keyword arguments"));
         }
         Self::new(args.args, vm)
             .into_ref_with_type(vm, cls)
             .map(Into::into)
+    }
+
+    fn py_new(_cls: &Py<PyType>, _args: FuncArgs, _vm: &VirtualMachine) -> PyResult<Self> {
+        unimplemented!("use slot_new")
     }
 }
 
@@ -742,7 +747,6 @@ impl ExceptionZoo {
 
         // Sorted By Hierarchy then alphabetized.
         let base_exception_group = PyBaseExceptionGroup::init_builtin_type();
-        let exception_group = PyExceptionGroup::init_builtin_type();
         let system_exit = PySystemExit::init_builtin_type();
         let keyboard_interrupt = PyKeyboardInterrupt::init_builtin_type();
         let generator_exit = PyGeneratorExit::init_builtin_type();
@@ -830,7 +834,6 @@ impl ExceptionZoo {
         Self {
             base_exception_type,
             base_exception_group,
-            exception_group,
             system_exit,
             keyboard_interrupt,
             generator_exit,
@@ -917,7 +920,7 @@ impl ExceptionZoo {
             "message" => ctx.new_readonly_getset("message", excs.base_exception_group, make_arg_getter(0)),
             "exceptions" => ctx.new_readonly_getset("exceptions", excs.base_exception_group, make_arg_getter(1)),
         });
-        extend_exception!(PyExceptionGroup, ctx, excs.exception_group);
+
         extend_exception!(PySystemExit, ctx, excs.system_exit, {
             "code" => ctx.new_readonly_getset("code", excs.system_exit, system_exit_code),
         });
@@ -961,32 +964,8 @@ impl ExceptionZoo {
         extend_exception!(PyUnboundLocalError, ctx, excs.unbound_local_error);
 
         // os errors:
-        let errno_getter =
-            ctx.new_readonly_getset("errno", excs.os_error, |exc: PyBaseExceptionRef| {
-                let args = exc.args();
-                args.first()
-                    .filter(|_| args.len() > 1 && args.len() <= 5)
-                    .cloned()
-            });
-        let strerror_getter =
-            ctx.new_readonly_getset("strerror", excs.os_error, |exc: PyBaseExceptionRef| {
-                let args = exc.args();
-                args.get(1)
-                    .filter(|_| args.len() >= 2 && args.len() <= 5)
-                    .cloned()
-            });
-        extend_exception!(PyOSError, ctx, excs.os_error, {
-            // POSIX exception code
-            "errno" => errno_getter.clone(),
-            // exception strerror
-            "strerror" => strerror_getter.clone(),
-            // exception filename
-            "filename" => ctx.none(),
-            // second exception filename
-            "filename2" => ctx.none(),
-        });
-        #[cfg(windows)]
-        excs.os_error.set_str_attr("winerror", ctx.none(), ctx);
+        // PyOSError now uses struct fields with pygetset, no need for dynamic attributes
+        extend_exception!(PyOSError, ctx, excs.os_error);
 
         extend_exception!(PyBlockingIOError, ctx, excs.blocking_io_error);
         extend_exception!(PyChildProcessError, ctx, excs.child_process_error);
@@ -1074,12 +1053,12 @@ fn system_exit_code(exc: PyBaseExceptionRef) -> Option<PyObjectRef> {
 #[cfg(feature = "serde")]
 pub struct SerializeException<'vm, 's> {
     vm: &'vm VirtualMachine,
-    exc: &'s PyBaseExceptionRef,
+    exc: &'s Py<PyBaseException>,
 }
 
 #[cfg(feature = "serde")]
 impl<'vm, 's> SerializeException<'vm, 's> {
-    pub fn new(vm: &'vm VirtualMachine, exc: &'s PyBaseExceptionRef) -> Self {
+    pub fn new(vm: &'vm VirtualMachine, exc: &'s Py<PyBaseException>) -> Self {
         SerializeException { vm, exc }
     }
 }
@@ -1133,7 +1112,7 @@ impl serde::Serialize for SerializeException<'_, '_> {
                 .__context__()
                 .map(|exc| SerializeExceptionOwned { vm: self.vm, exc }),
         )?;
-        struc.serialize_field("suppress_context", &self.exc.get_suppress_context())?;
+        struc.serialize_field("suppress_context", &self.exc.__suppress_context__())?;
 
         let args = {
             struct Args<'vm>(&'vm VirtualMachine, PyTupleRef);
@@ -1214,15 +1193,20 @@ pub(crate) fn errno_to_exc_type(_errno: i32, _vm: &VirtualMachine) -> Option<&'s
     None
 }
 
+pub(crate) use types::{OSErrorBuilder, ToOSErrorBuilder};
+
 pub(super) mod types {
     use crate::common::lock::PyRwLock;
+    use crate::object::{MaybeTraverse, Traverse, TraverseFn};
     #[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
     use crate::{
-        AsObject, PyObjectRef, PyRef, PyResult, VirtualMachine,
+        AsObject, Py, PyAtomicRef, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
+        VirtualMachine,
         builtins::{
-            PyGenericAlias, PyInt, PyStrRef, PyTupleRef, PyTypeRef, traceback::PyTracebackRef,
+            PyInt, PyStrRef, PyTupleRef, PyType, PyTypeRef, traceback::PyTracebackRef,
             tuple::IntoPyTuple,
         },
+        convert::ToPyObject,
         convert::ToPyResult,
         function::{ArgBytesLike, FuncArgs},
         types::{Constructor, Initializer},
@@ -1230,6 +1214,120 @@ pub(super) mod types {
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
     use rustpython_common::str::UnicodeEscapeCodepoint;
+
+    pub(crate) trait ToOSErrorBuilder {
+        fn to_os_error_builder(&self, vm: &VirtualMachine) -> OSErrorBuilder;
+    }
+
+    pub struct OSErrorBuilder {
+        exc_type: PyTypeRef,
+        errno: Option<i32>,
+        strerror: Option<PyObjectRef>,
+        filename: Option<PyObjectRef>,
+        #[cfg(windows)]
+        winerror: Option<PyObjectRef>,
+        filename2: Option<PyObjectRef>,
+    }
+
+    impl OSErrorBuilder {
+        #[must_use]
+        pub fn with_subtype(
+            exc_type: PyTypeRef,
+            errno: Option<i32>,
+            strerror: impl ToPyObject,
+            vm: &VirtualMachine,
+        ) -> Self {
+            let strerror = strerror.to_pyobject(vm);
+            Self {
+                exc_type,
+                errno,
+                strerror: Some(strerror),
+                filename: None,
+                #[cfg(windows)]
+                winerror: None,
+                filename2: None,
+            }
+        }
+        #[must_use]
+        pub fn with_errno(errno: i32, strerror: impl ToPyObject, vm: &VirtualMachine) -> Self {
+            let exc_type = crate::exceptions::errno_to_exc_type(errno, vm)
+                .unwrap_or(vm.ctx.exceptions.os_error)
+                .to_owned();
+            Self::with_subtype(exc_type, Some(errno), strerror, vm)
+        }
+
+        // #[must_use]
+        // pub(crate) fn errno(mut self, errno: i32) -> Self {
+        //     self.errno.replace(errno);
+        //     self
+        // }
+
+        #[must_use]
+        pub(crate) fn filename(mut self, filename: PyObjectRef) -> Self {
+            self.filename.replace(filename);
+            self
+        }
+
+        #[must_use]
+        pub(crate) fn filename2(mut self, filename: PyObjectRef) -> Self {
+            self.filename2.replace(filename);
+            self
+        }
+
+        #[must_use]
+        #[cfg(windows)]
+        pub(crate) fn winerror(mut self, winerror: PyObjectRef) -> Self {
+            self.winerror.replace(winerror);
+            self
+        }
+
+        pub fn build(self, vm: &VirtualMachine) -> PyRef<PyOSError> {
+            let OSErrorBuilder {
+                exc_type,
+                errno,
+                strerror,
+                filename,
+                #[cfg(windows)]
+                winerror,
+                filename2,
+            } = self;
+
+            let args = if let Some(errno) = errno {
+                #[cfg(windows)]
+                let winerror = winerror.to_pyobject(vm);
+                #[cfg(not(windows))]
+                let winerror = vm.ctx.none();
+
+                vec![
+                    errno.to_pyobject(vm),
+                    strerror.to_pyobject(vm),
+                    filename.to_pyobject(vm),
+                    winerror,
+                    filename2.to_pyobject(vm),
+                ]
+            } else {
+                vec![strerror.to_pyobject(vm)]
+            };
+
+            let payload = PyOSError::py_new(&exc_type, args.clone().into(), vm)
+                .expect("new_os_error usage error");
+            let os_error = payload
+                .into_ref_with_type(vm, exc_type)
+                .expect("new_os_error usage error");
+            PyOSError::slot_init(os_error.as_object().to_owned(), args.into(), vm)
+                .expect("new_os_error usage error");
+            os_error
+        }
+    }
+
+    impl crate::convert::IntoPyException for OSErrorBuilder {
+        fn into_pyexception(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+            self.build(vm).upcast()
+        }
+    }
+
+    // Re-export exception group types from dedicated module
+    pub use crate::exception_group::types::PyBaseExceptionGroup;
 
     // This module is designed to be used as `use builtins::*;`.
     // Do not add any pub symbols not included in builtins module.
@@ -1250,43 +1348,28 @@ pub(super) mod types {
 
     #[pyexception(name, base = PyBaseException, ctx = "system_exit", impl)]
     #[derive(Debug)]
-    pub struct PySystemExit {}
-
-    #[pyexception(name, base = PyBaseException, ctx = "base_exception_group")]
-    #[derive(Debug)]
-    pub struct PyBaseExceptionGroup {}
-
-    #[pyexception]
-    impl PyBaseExceptionGroup {
-        #[pyclassmethod]
-        fn __class_getitem__(
-            cls: PyTypeRef,
-            args: PyObjectRef,
-            vm: &VirtualMachine,
-        ) -> PyGenericAlias {
-            PyGenericAlias::from_args(cls, args, vm)
-        }
-    }
-
-    #[pyexception(name, base = PyBaseExceptionGroup, ctx = "exception_group", impl)]
-    #[derive(Debug)]
-    pub struct PyExceptionGroup {}
+    #[repr(transparent)]
+    pub struct PySystemExit(PyBaseException);
 
     #[pyexception(name, base = PyBaseException, ctx = "generator_exit", impl)]
     #[derive(Debug)]
-    pub struct PyGeneratorExit {}
+    #[repr(transparent)]
+    pub struct PyGeneratorExit(PyBaseException);
 
     #[pyexception(name, base = PyBaseException, ctx = "keyboard_interrupt", impl)]
     #[derive(Debug)]
-    pub struct PyKeyboardInterrupt {}
+    #[repr(transparent)]
+    pub struct PyKeyboardInterrupt(PyBaseException);
 
     #[pyexception(name, base = PyBaseException, ctx = "exception_type", impl)]
     #[derive(Debug)]
-    pub struct PyException {}
+    #[repr(transparent)]
+    pub struct PyException(PyBaseException);
 
     #[pyexception(name, base = PyException, ctx = "stop_iteration")]
     #[derive(Debug)]
-    pub struct PyStopIteration {}
+    #[repr(transparent)]
+    pub struct PyStopIteration(PyException);
 
     #[pyexception]
     impl PyStopIteration {
@@ -1304,31 +1387,37 @@ pub(super) mod types {
 
     #[pyexception(name, base = PyException, ctx = "stop_async_iteration", impl)]
     #[derive(Debug)]
-    pub struct PyStopAsyncIteration {}
+    #[repr(transparent)]
+    pub struct PyStopAsyncIteration(PyException);
 
     #[pyexception(name, base = PyException, ctx = "arithmetic_error", impl)]
     #[derive(Debug)]
-    pub struct PyArithmeticError {}
+    #[repr(transparent)]
+    pub struct PyArithmeticError(PyException);
 
     #[pyexception(name, base = PyArithmeticError, ctx = "floating_point_error", impl)]
     #[derive(Debug)]
-    pub struct PyFloatingPointError {}
-
+    #[repr(transparent)]
+    pub struct PyFloatingPointError(PyArithmeticError);
     #[pyexception(name, base = PyArithmeticError, ctx = "overflow_error", impl)]
     #[derive(Debug)]
-    pub struct PyOverflowError {}
+    #[repr(transparent)]
+    pub struct PyOverflowError(PyArithmeticError);
 
     #[pyexception(name, base = PyArithmeticError, ctx = "zero_division_error", impl)]
     #[derive(Debug)]
-    pub struct PyZeroDivisionError {}
+    #[repr(transparent)]
+    pub struct PyZeroDivisionError(PyArithmeticError);
 
     #[pyexception(name, base = PyException, ctx = "assertion_error", impl)]
     #[derive(Debug)]
-    pub struct PyAssertionError {}
+    #[repr(transparent)]
+    pub struct PyAssertionError(PyException);
 
     #[pyexception(name, base = PyException, ctx = "attribute_error")]
     #[derive(Debug)]
-    pub struct PyAttributeError {}
+    #[repr(transparent)]
+    pub struct PyAttributeError(PyException);
 
     #[pyexception]
     impl PyAttributeError {
@@ -1355,15 +1444,18 @@ pub(super) mod types {
 
     #[pyexception(name, base = PyException, ctx = "buffer_error", impl)]
     #[derive(Debug)]
-    pub struct PyBufferError {}
+    #[repr(transparent)]
+    pub struct PyBufferError(PyException);
 
     #[pyexception(name, base = PyException, ctx = "eof_error", impl)]
     #[derive(Debug)]
-    pub struct PyEOFError {}
+    #[repr(transparent)]
+    pub struct PyEOFError(PyException);
 
     #[pyexception(name, base = PyException, ctx = "import_error")]
     #[derive(Debug)]
-    pub struct PyImportError {}
+    #[repr(transparent)]
+    pub struct PyImportError(PyException);
 
     #[pyexception]
     impl PyImportError {
@@ -1408,19 +1500,23 @@ pub(super) mod types {
 
     #[pyexception(name, base = PyImportError, ctx = "module_not_found_error", impl)]
     #[derive(Debug)]
-    pub struct PyModuleNotFoundError {}
+    #[repr(transparent)]
+    pub struct PyModuleNotFoundError(PyImportError);
 
     #[pyexception(name, base = PyException, ctx = "lookup_error", impl)]
     #[derive(Debug)]
-    pub struct PyLookupError {}
+    #[repr(transparent)]
+    pub struct PyLookupError(PyException);
 
     #[pyexception(name, base = PyLookupError, ctx = "index_error", impl)]
     #[derive(Debug)]
-    pub struct PyIndexError {}
+    #[repr(transparent)]
+    pub struct PyIndexError(PyLookupError);
 
     #[pyexception(name, base = PyLookupError, ctx = "key_error")]
     #[derive(Debug)]
-    pub struct PyKeyError {}
+    #[repr(transparent)]
+    pub struct PyKeyError(PyLookupError);
 
     #[pyexception]
     impl PyKeyError {
@@ -1440,72 +1536,183 @@ pub(super) mod types {
 
     #[pyexception(name, base = PyException, ctx = "memory_error", impl)]
     #[derive(Debug)]
-    pub struct PyMemoryError {}
+    #[repr(transparent)]
+    pub struct PyMemoryError(PyException);
 
     #[pyexception(name, base = PyException, ctx = "name_error", impl)]
     #[derive(Debug)]
-    pub struct PyNameError {}
+    #[repr(transparent)]
+    pub struct PyNameError(PyException);
 
     #[pyexception(name, base = PyNameError, ctx = "unbound_local_error", impl)]
     #[derive(Debug)]
-    pub struct PyUnboundLocalError {}
+    #[repr(transparent)]
+    pub struct PyUnboundLocalError(PyNameError);
 
     #[pyexception(name, base = PyException, ctx = "os_error")]
-    #[derive(Debug)]
-    pub struct PyOSError {}
+    #[repr(C)]
+    pub struct PyOSError {
+        base: PyException,
+        errno: PyAtomicRef<Option<PyObject>>,
+        strerror: PyAtomicRef<Option<PyObject>>,
+        filename: PyAtomicRef<Option<PyObject>>,
+        filename2: PyAtomicRef<Option<PyObject>>,
+        #[cfg(windows)]
+        winerror: PyAtomicRef<Option<PyObject>>,
+    }
 
-    // OS Errors:
-    #[pyexception]
-    impl PyOSError {
-        #[cfg(not(target_arch = "wasm32"))]
-        fn optional_new(args: Vec<PyObjectRef>, vm: &VirtualMachine) -> Option<PyBaseExceptionRef> {
-            let len = args.len();
-            if (2..=5).contains(&len) {
-                let errno = &args[0];
-                errno
-                    .downcast_ref::<PyInt>()
-                    .and_then(|errno| errno.try_to_primitive::<i32>(vm).ok())
-                    .and_then(|errno| super::errno_to_exc_type(errno, vm))
-                    .and_then(|typ| vm.invoke_exception(typ.to_owned(), args.to_vec()).ok())
-            } else {
-                None
+    impl crate::class::PySubclass for PyOSError {
+        type Base = PyException;
+        fn as_base(&self) -> &Self::Base {
+            &self.base
+        }
+    }
+
+    impl std::fmt::Debug for PyOSError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("PyOSError").finish_non_exhaustive()
+        }
+    }
+
+    unsafe impl Traverse for PyOSError {
+        fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
+            self.base.try_traverse(tracer_fn);
+            if let Some(obj) = self.errno.deref() {
+                tracer_fn(obj);
+            }
+            if let Some(obj) = self.strerror.deref() {
+                tracer_fn(obj);
+            }
+            if let Some(obj) = self.filename.deref() {
+                tracer_fn(obj);
+            }
+            if let Some(obj) = self.filename2.deref() {
+                tracer_fn(obj);
+            }
+            #[cfg(windows)]
+            if let Some(obj) = self.winerror.deref() {
+                tracer_fn(obj);
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        #[pyslot]
-        pub fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    }
+
+    // OS Errors:
+    impl Constructor for PyOSError {
+        type Args = FuncArgs;
+
+        fn py_new(_cls: &Py<PyType>, args: FuncArgs, vm: &VirtualMachine) -> PyResult<Self> {
+            let len = args.args.len();
+            // CPython only sets errno/strerror when args len is 2-5
+            let (errno, strerror) = if (2..=5).contains(&len) {
+                (Some(args.args[0].clone()), Some(args.args[1].clone()))
+            } else {
+                (None, None)
+            };
+            let filename = if (3..=5).contains(&len) {
+                Some(args.args[2].clone())
+            } else {
+                None
+            };
+            let filename2 = if len == 5 {
+                args.args.get(4).cloned()
+            } else {
+                None
+            };
+            // Truncate args for base exception when 3-5 args
+            let base_args = if (3..=5).contains(&len) {
+                args.args[..2].to_vec()
+            } else {
+                args.args.to_vec()
+            };
+            let base_exception = PyBaseException::new(base_args, vm);
+            Ok(Self {
+                base: PyException(base_exception),
+                errno: errno.into(),
+                strerror: strerror.into(),
+                filename: filename.into(),
+                filename2: filename2.into(),
+                #[cfg(windows)]
+                winerror: None.into(),
+            })
+        }
+
+        fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             // We need this method, because of how `CPython` copies `init`
             // from `BaseException` in `SimpleExtendsException` macro.
             // See: `BaseException_new`
             if *cls.name() == *vm.ctx.exceptions.os_error.name() {
-                match Self::optional_new(args.args.to_vec(), vm) {
-                    Some(error) => error.to_pyresult(vm),
-                    None => PyBaseException::slot_new(cls, args, vm),
+                let args_vec = args.args.to_vec();
+                let len = args_vec.len();
+                if (2..=5).contains(&len) {
+                    let errno = &args_vec[0];
+                    if let Some(error) = errno
+                        .downcast_ref::<PyInt>()
+                        .and_then(|errno| errno.try_to_primitive::<i32>(vm).ok())
+                        .and_then(|errno| super::errno_to_exc_type(errno, vm))
+                        .and_then(|typ| vm.invoke_exception(typ.to_owned(), args_vec).ok())
+                    {
+                        return error.to_pyresult(vm);
+                    }
                 }
-            } else {
-                PyBaseException::slot_new(cls, args, vm)
             }
+            let payload = Self::py_new(&cls, args, vm)?;
+            payload.into_ref_with_type(vm, cls).map(Into::into)
         }
-        #[cfg(target_arch = "wasm32")]
-        #[pyslot]
-        pub fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            PyBaseException::slot_new(cls, args, vm)
-        }
+    }
+
+    #[pyexception(with(Constructor))]
+    impl PyOSError {
         #[pyslot]
         #[pymethod(name = "__init__")]
         pub fn slot_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
             let len = args.args.len();
             let mut new_args = args;
-            if (3..=5).contains(&len) {
-                zelf.set_attr("filename", new_args.args[2].clone(), vm)?;
-                #[cfg(windows)]
-                if let Some(winerror) = new_args.args.get(3) {
-                    zelf.set_attr("winerror", winerror.clone(), vm)?;
-                }
-                if let Some(filename2) = new_args.args.get(4) {
-                    zelf.set_attr("filename2", filename2.clone(), vm)?;
-                }
 
+            // All OSError subclasses use #[repr(transparent)] wrapping PyOSError,
+            // so we can safely access the PyOSError fields through pointer cast
+            // SAFETY: All OSError subclasses (FileNotFoundError, etc.) are
+            // #[repr(transparent)] wrappers around PyOSError with identical memory layout
+            #[allow(deprecated)]
+            let exc: &Py<PyOSError> = zelf.downcast_ref::<PyOSError>().unwrap();
+
+            // SAFETY: slot_init is called during object initialization,
+            // so fields are None and swap result can be safely ignored
+            if len <= 5 {
+                // Only set errno/strerror when args len is 2-5
+                if 2 <= len {
+                    let _ = unsafe { exc.errno.swap(Some(new_args.args[0].clone())) };
+                    let _ = unsafe { exc.strerror.swap(Some(new_args.args[1].clone())) };
+                }
+                if 3 <= len {
+                    let _ = unsafe { exc.filename.swap(Some(new_args.args[2].clone())) };
+                }
+                #[cfg(windows)]
+                if 4 <= len {
+                    let winerror = new_args.args.get(3).cloned();
+                    // Store original winerror
+                    let _ = unsafe { exc.winerror.swap(winerror.clone()) };
+
+                    // Convert winerror to errno and update errno + args[0]
+                    if let Some(errno) = winerror
+                        .as_ref()
+                        .and_then(|w| w.downcast_ref::<crate::builtins::PyInt>())
+                        .and_then(|w| w.try_to_primitive::<i32>(vm).ok())
+                        .map(crate::common::os::winerror_to_errno)
+                    {
+                        let errno_obj = vm.new_pyobj(errno);
+                        let _ = unsafe { exc.errno.swap(Some(errno_obj.clone())) };
+                        new_args.args[0] = errno_obj;
+                    }
+                }
+                if len == 5 {
+                    let _ = unsafe { exc.filename2.swap(new_args.args.get(4).cloned()) };
+                }
+            }
+
+            // args are truncated to 2 for compatibility (only when 2-5 args and filename is not None)
+            // truncation happens inside "if (filename && filename != Py_None)" block
+            let has_filename = exc.filename.to_owned().filter(|f| !vm.is_none(f)).is_some();
+            if (3..=5).contains(&len) && has_filename {
                 new_args.args.truncate(2);
             }
             PyBaseException::slot_init(zelf, new_args, vm)
@@ -1513,34 +1720,94 @@ pub(super) mod types {
 
         #[pymethod]
         fn __str__(exc: PyBaseExceptionRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
-            let args = exc.args();
             let obj = exc.as_object().to_owned();
 
-            let str = if args.len() == 2 {
-                // SAFETY: len() == 2 is checked so get_arg 1 or 2 won't panic
-                let errno = exc.get_arg(0).unwrap().str(vm)?;
-                let msg = exc.get_arg(1).unwrap().str(vm)?;
+            // Get OSError fields directly
+            let errno_field = obj.get_attr("errno", vm).ok().filter(|v| !vm.is_none(v));
+            let strerror = obj.get_attr("strerror", vm).ok().filter(|v| !vm.is_none(v));
+            let filename = obj.get_attr("filename", vm).ok().filter(|v| !vm.is_none(v));
+            let filename2 = obj
+                .get_attr("filename2", vm)
+                .ok()
+                .filter(|v| !vm.is_none(v));
+            #[cfg(windows)]
+            let winerror = obj.get_attr("winerror", vm).ok().filter(|v| !vm.is_none(v));
 
-                let s = match obj.get_attr("filename", vm) {
-                    Ok(filename) if !vm.is_none(&filename) => match obj.get_attr("filename2", vm) {
-                        Ok(filename2) if !vm.is_none(&filename2) => format!(
-                            "[Errno {}] {}: '{}' -> '{}'",
-                            errno,
+            // Windows: winerror takes priority over errno
+            #[cfg(windows)]
+            if let Some(ref win_err) = winerror {
+                let code = win_err.str(vm)?;
+                if let Some(ref f) = filename {
+                    let msg = strerror
+                        .as_ref()
+                        .map(|s| s.str(vm))
+                        .transpose()?
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "None".to_owned());
+                    if let Some(ref f2) = filename2 {
+                        return Ok(vm.ctx.new_str(format!(
+                            "[WinError {}] {}: {} -> {}",
+                            code,
                             msg,
-                            filename.str(vm)?,
-                            filename2.str(vm)?
-                        ),
-                        _ => format!("[Errno {}] {}: '{}'", errno, msg, filename.str(vm)?),
-                    },
-                    _ => {
-                        format!("[Errno {errno}] {msg}")
+                            f.repr(vm)?,
+                            f2.repr(vm)?
+                        )));
                     }
-                };
-                vm.ctx.new_str(s)
-            } else {
-                exc.__str__(vm)
-            };
-            Ok(str)
+                    return Ok(vm.ctx.new_str(format!(
+                        "[WinError {}] {}: {}",
+                        code,
+                        msg,
+                        f.repr(vm)?
+                    )));
+                }
+                // winerror && strerror (no filename)
+                if let Some(ref s) = strerror {
+                    return Ok(vm
+                        .ctx
+                        .new_str(format!("[WinError {}] {}", code, s.str(vm)?)));
+                }
+            }
+
+            // Non-Windows or fallback: use errno
+            if let Some(ref f) = filename {
+                let errno_str = errno_field
+                    .as_ref()
+                    .map(|e| e.str(vm))
+                    .transpose()?
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "None".to_owned());
+                let msg = strerror
+                    .as_ref()
+                    .map(|s| s.str(vm))
+                    .transpose()?
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "None".to_owned());
+                if let Some(ref f2) = filename2 {
+                    return Ok(vm.ctx.new_str(format!(
+                        "[Errno {}] {}: {} -> {}",
+                        errno_str,
+                        msg,
+                        f.repr(vm)?,
+                        f2.repr(vm)?
+                    )));
+                }
+                return Ok(vm.ctx.new_str(format!(
+                    "[Errno {}] {}: {}",
+                    errno_str,
+                    msg,
+                    f.repr(vm)?
+                )));
+            }
+
+            // errno && strerror (no filename)
+            if let (Some(e), Some(s)) = (&errno_field, &strerror) {
+                return Ok(vm
+                    .ctx
+                    .new_str(format!("[Errno {}] {}", e.str(vm)?, s.str(vm)?)));
+            }
+
+            // fallback to BaseException.__str__
+            Ok(exc.__str__(vm))
         }
 
         #[pymethod]
@@ -1579,23 +1846,80 @@ pub(super) mod types {
             }
             result.into_pytuple(vm)
         }
+
+        // Getters and setters for OSError fields
+        #[pygetset]
+        fn errno(&self) -> Option<PyObjectRef> {
+            self.errno.to_owned()
+        }
+
+        #[pygetset(setter)]
+        fn set_errno(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) {
+            self.errno.swap_to_temporary_refs(value, vm);
+        }
+
+        #[pygetset]
+        fn strerror(&self) -> Option<PyObjectRef> {
+            self.strerror.to_owned()
+        }
+
+        #[pygetset(setter, name = "strerror")]
+        fn set_strerror(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) {
+            self.strerror.swap_to_temporary_refs(value, vm);
+        }
+
+        #[pygetset]
+        fn filename(&self) -> Option<PyObjectRef> {
+            self.filename.to_owned()
+        }
+
+        #[pygetset(setter)]
+        fn set_filename(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) {
+            self.filename.swap_to_temporary_refs(value, vm);
+        }
+
+        #[pygetset]
+        fn filename2(&self) -> Option<PyObjectRef> {
+            self.filename2.to_owned()
+        }
+
+        #[pygetset(setter)]
+        fn set_filename2(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) {
+            self.filename2.swap_to_temporary_refs(value, vm);
+        }
+
+        #[cfg(windows)]
+        #[pygetset]
+        fn winerror(&self) -> Option<PyObjectRef> {
+            self.winerror.to_owned()
+        }
+
+        #[cfg(windows)]
+        #[pygetset(setter)]
+        fn set_winerror(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) {
+            self.winerror.swap_to_temporary_refs(value, vm);
+        }
     }
 
     #[pyexception(name, base = PyOSError, ctx = "blocking_io_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyBlockingIOError {}
+    pub struct PyBlockingIOError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "child_process_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyChildProcessError {}
+    pub struct PyChildProcessError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "connection_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyConnectionError {}
+    pub struct PyConnectionError(PyOSError);
 
     #[pyexception(name, base = PyConnectionError, ctx = "broken_pipe_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyBrokenPipeError {}
+    pub struct PyBrokenPipeError(PyConnectionError);
 
     #[pyexception(
         name,
@@ -1603,8 +1927,9 @@ pub(super) mod types {
         ctx = "connection_aborted_error",
         impl
     )]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyConnectionAbortedError {}
+    pub struct PyConnectionAbortedError(PyConnectionError);
 
     #[pyexception(
         name,
@@ -1612,64 +1937,79 @@ pub(super) mod types {
         ctx = "connection_refused_error",
         impl
     )]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyConnectionRefusedError {}
+    pub struct PyConnectionRefusedError(PyConnectionError);
 
     #[pyexception(name, base = PyConnectionError, ctx = "connection_reset_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyConnectionResetError {}
+    pub struct PyConnectionResetError(PyConnectionError);
 
     #[pyexception(name, base = PyOSError, ctx = "file_exists_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyFileExistsError {}
+    pub struct PyFileExistsError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "file_not_found_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyFileNotFoundError {}
+    pub struct PyFileNotFoundError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "interrupted_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyInterruptedError {}
+    pub struct PyInterruptedError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "is_a_directory_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyIsADirectoryError {}
+    pub struct PyIsADirectoryError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "not_a_directory_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyNotADirectoryError {}
+    pub struct PyNotADirectoryError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "permission_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyPermissionError {}
+    pub struct PyPermissionError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "process_lookup_error", impl)]
+    #[repr(transparent)]
     #[derive(Debug)]
-    pub struct PyProcessLookupError {}
+    pub struct PyProcessLookupError(PyOSError);
 
     #[pyexception(name, base = PyOSError, ctx = "timeout_error", impl)]
     #[derive(Debug)]
-    pub struct PyTimeoutError {}
+    #[repr(transparent)]
+    pub struct PyTimeoutError(PyOSError);
 
     #[pyexception(name, base = PyException, ctx = "reference_error", impl)]
     #[derive(Debug)]
-    pub struct PyReferenceError {}
+    #[repr(transparent)]
+    pub struct PyReferenceError(PyException);
 
     #[pyexception(name, base = PyException, ctx = "runtime_error", impl)]
     #[derive(Debug)]
-    pub struct PyRuntimeError {}
+    #[repr(transparent)]
+    pub struct PyRuntimeError(PyException);
 
     #[pyexception(name, base = PyRuntimeError, ctx = "not_implemented_error", impl)]
     #[derive(Debug)]
-    pub struct PyNotImplementedError {}
+    #[repr(transparent)]
+    pub struct PyNotImplementedError(PyRuntimeError);
 
     #[pyexception(name, base = PyRuntimeError, ctx = "recursion_error", impl)]
     #[derive(Debug)]
-    pub struct PyRecursionError {}
+    #[repr(transparent)]
+    pub struct PyRecursionError(PyRuntimeError);
 
     #[pyexception(name, base = PyException, ctx = "syntax_error")]
     #[derive(Debug)]
-    pub struct PySyntaxError {}
+    #[repr(transparent)]
+    pub struct PySyntaxError(PyException);
 
     #[pyexception]
     impl PySyntaxError {
@@ -1763,7 +2103,8 @@ pub(super) mod types {
         ctx = "incomplete_input_error"
     )]
     #[derive(Debug)]
-    pub struct PyIncompleteInputError {}
+    #[repr(transparent)]
+    pub struct PyIncompleteInputError(PySyntaxError);
 
     #[pyexception]
     impl PyIncompleteInputError {
@@ -1781,31 +2122,38 @@ pub(super) mod types {
 
     #[pyexception(name, base = PySyntaxError, ctx = "indentation_error", impl)]
     #[derive(Debug)]
-    pub struct PyIndentationError {}
+    #[repr(transparent)]
+    pub struct PyIndentationError(PySyntaxError);
 
     #[pyexception(name, base = PyIndentationError, ctx = "tab_error", impl)]
     #[derive(Debug)]
-    pub struct PyTabError {}
+    #[repr(transparent)]
+    pub struct PyTabError(PyIndentationError);
 
     #[pyexception(name, base = PyException, ctx = "system_error", impl)]
     #[derive(Debug)]
-    pub struct PySystemError {}
+    #[repr(transparent)]
+    pub struct PySystemError(PyException);
 
     #[pyexception(name, base = PyException, ctx = "type_error", impl)]
     #[derive(Debug)]
-    pub struct PyTypeError {}
+    #[repr(transparent)]
+    pub struct PyTypeError(PyException);
 
     #[pyexception(name, base = PyException, ctx = "value_error", impl)]
     #[derive(Debug)]
-    pub struct PyValueError {}
+    #[repr(transparent)]
+    pub struct PyValueError(PyException);
 
     #[pyexception(name, base = PyValueError, ctx = "unicode_error", impl)]
     #[derive(Debug)]
-    pub struct PyUnicodeError {}
+    #[repr(transparent)]
+    pub struct PyUnicodeError(PyValueError);
 
     #[pyexception(name, base = PyUnicodeError, ctx = "unicode_decode_error")]
     #[derive(Debug)]
-    pub struct PyUnicodeDecodeError {}
+    #[repr(transparent)]
+    pub struct PyUnicodeDecodeError(PyUnicodeError);
 
     #[pyexception]
     impl PyUnicodeDecodeError {
@@ -1856,7 +2204,8 @@ pub(super) mod types {
 
     #[pyexception(name, base = PyUnicodeError, ctx = "unicode_encode_error")]
     #[derive(Debug)]
-    pub struct PyUnicodeEncodeError {}
+    #[repr(transparent)]
+    pub struct PyUnicodeEncodeError(PyUnicodeError);
 
     #[pyexception]
     impl PyUnicodeEncodeError {
@@ -1907,7 +2256,8 @@ pub(super) mod types {
 
     #[pyexception(name, base = PyUnicodeError, ctx = "unicode_translate_error")]
     #[derive(Debug)]
-    pub struct PyUnicodeTranslateError {}
+    #[repr(transparent)]
+    pub struct PyUnicodeTranslateError(PyUnicodeError);
 
     #[pyexception]
     impl PyUnicodeTranslateError {
@@ -1955,54 +2305,67 @@ pub(super) mod types {
     #[cfg(feature = "jit")]
     #[pyexception(name, base = PyException, ctx = "jit_error", impl)]
     #[derive(Debug)]
-    pub struct PyJitError {}
+    #[repr(transparent)]
+    pub struct PyJitError(PyException);
 
     // Warnings
     #[pyexception(name, base = PyException, ctx = "warning", impl)]
     #[derive(Debug)]
-    pub struct PyWarning {}
+    #[repr(transparent)]
+    pub struct PyWarning(PyException);
 
     #[pyexception(name, base = PyWarning, ctx = "deprecation_warning", impl)]
     #[derive(Debug)]
-    pub struct PyDeprecationWarning {}
+    #[repr(transparent)]
+    pub struct PyDeprecationWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "pending_deprecation_warning", impl)]
     #[derive(Debug)]
-    pub struct PyPendingDeprecationWarning {}
+    #[repr(transparent)]
+    pub struct PyPendingDeprecationWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "runtime_warning", impl)]
     #[derive(Debug)]
-    pub struct PyRuntimeWarning {}
+    #[repr(transparent)]
+    pub struct PyRuntimeWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "syntax_warning", impl)]
     #[derive(Debug)]
-    pub struct PySyntaxWarning {}
+    #[repr(transparent)]
+    pub struct PySyntaxWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "user_warning", impl)]
     #[derive(Debug)]
-    pub struct PyUserWarning {}
+    #[repr(transparent)]
+    pub struct PyUserWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "future_warning", impl)]
     #[derive(Debug)]
-    pub struct PyFutureWarning {}
+    #[repr(transparent)]
+    pub struct PyFutureWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "import_warning", impl)]
     #[derive(Debug)]
-    pub struct PyImportWarning {}
+    #[repr(transparent)]
+    pub struct PyImportWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "unicode_warning", impl)]
     #[derive(Debug)]
-    pub struct PyUnicodeWarning {}
+    #[repr(transparent)]
+    pub struct PyUnicodeWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "bytes_warning", impl)]
     #[derive(Debug)]
-    pub struct PyBytesWarning {}
+    #[repr(transparent)]
+    pub struct PyBytesWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "resource_warning", impl)]
     #[derive(Debug)]
-    pub struct PyResourceWarning {}
+    #[repr(transparent)]
+    pub struct PyResourceWarning(PyWarning);
 
     #[pyexception(name, base = PyWarning, ctx = "encoding_warning", impl)]
     #[derive(Debug)]
-    pub struct PyEncodingWarning {}
+    #[repr(transparent)]
+    pub struct PyEncodingWarning(PyWarning);
 }

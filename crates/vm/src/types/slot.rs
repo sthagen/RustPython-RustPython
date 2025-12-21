@@ -1,3 +1,6 @@
+use crate::common::lock::{
+    PyMappedRwLockReadGuard, PyMappedRwLockWriteGuard, PyRwLockReadGuard, PyRwLockWriteGuard,
+};
 use crate::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     builtins::{PyInt, PyStr, PyStrInterned, PyStrRef, PyType, PyTypeRef, type_::PointerSlot},
@@ -7,7 +10,6 @@ use crate::{
     function::{
         Either, FromArgs, FuncArgs, OptionalArg, PyComparisonValue, PyMethodDef, PySetterValue,
     },
-    identifier,
     protocol::{
         PyBuffer, PyIterReturn, PyMapping, PyMappingMethods, PyNumber, PyNumberMethods,
         PyNumberSlots, PySequence, PySequenceMethods,
@@ -17,7 +19,96 @@ use crate::{
 use crossbeam_utils::atomic::AtomicCell;
 use malachite_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
-use std::{borrow::Borrow, cmp::Ordering, ops::Deref};
+use std::{any::Any, any::TypeId, borrow::Borrow, cmp::Ordering, ops::Deref};
+
+/// Type-erased storage for extension module data attached to heap types.
+pub struct TypeDataSlot {
+    // PyObject_GetTypeData
+    type_id: TypeId,
+    data: Box<dyn Any + Send + Sync>,
+}
+
+impl TypeDataSlot {
+    /// Create a new type data slot with the given data.
+    pub fn new<T: Any + Send + Sync + 'static>(data: T) -> Self {
+        Self {
+            type_id: TypeId::of::<T>(),
+            data: Box::new(data),
+        }
+    }
+
+    /// Get a reference to the data if the type matches.
+    pub fn get<T: Any + 'static>(&self) -> Option<&T> {
+        if self.type_id == TypeId::of::<T>() {
+            self.data.downcast_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Get a mutable reference to the data if the type matches.
+    pub fn get_mut<T: Any + 'static>(&mut self) -> Option<&mut T> {
+        if self.type_id == TypeId::of::<T>() {
+            self.data.downcast_mut()
+        } else {
+            None
+        }
+    }
+}
+
+/// Read guard for type data access, using mapped guard for zero-cost deref.
+pub struct TypeDataRef<'a, T: 'static> {
+    guard: PyMappedRwLockReadGuard<'a, T>,
+}
+
+impl<'a, T: Any + 'static> TypeDataRef<'a, T> {
+    /// Try to create a TypeDataRef from a read guard.
+    /// Returns None if the slot is empty or contains a different type.
+    pub fn try_new(guard: PyRwLockReadGuard<'a, Option<TypeDataSlot>>) -> Option<Self> {
+        PyRwLockReadGuard::try_map(guard, |opt| opt.as_ref().and_then(|slot| slot.get::<T>()))
+            .ok()
+            .map(|guard| Self { guard })
+    }
+}
+
+impl<T: Any + 'static> std::ops::Deref for TypeDataRef<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+/// Write guard for type data access, using mapped guard for zero-cost deref.
+pub struct TypeDataRefMut<'a, T: 'static> {
+    guard: PyMappedRwLockWriteGuard<'a, T>,
+}
+
+impl<'a, T: Any + 'static> TypeDataRefMut<'a, T> {
+    /// Try to create a TypeDataRefMut from a write guard.
+    /// Returns None if the slot is empty or contains a different type.
+    pub fn try_new(guard: PyRwLockWriteGuard<'a, Option<TypeDataSlot>>) -> Option<Self> {
+        PyRwLockWriteGuard::try_map(guard, |opt| {
+            opt.as_mut().and_then(|slot| slot.get_mut::<T>())
+        })
+        .ok()
+        .map(|guard| Self { guard })
+    }
+}
+
+impl<T: Any + 'static> std::ops::Deref for TypeDataRefMut<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<T: Any + 'static> std::ops::DerefMut for TypeDataRefMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
 
 #[macro_export]
 macro_rules! atomic_func {
@@ -779,18 +870,45 @@ impl PyType {
     }
 }
 
+/// Trait for types that can be constructed via Python's `__new__` method.
+///
+/// `slot_new` corresponds to the `__new__` type slot.
+///
+/// In most cases, `__new__` simply initializes the payload and assigns a type,
+/// so you only need to override `py_new`. The default `slot_new` implementation
+/// will call `py_new` and then wrap the result with `into_ref_with_type`.
+///
+/// However, if a subtype requires more than just payload initialization
+/// (e.g., returning an existing object for optimization, setting attributes
+/// after creation, or special handling of the class type), you should override
+/// `slot_new` directly instead of `py_new`.
+///
+/// # When to use `py_new` only (most common case):
+/// - Simple payload initialization that just creates `Self`
+/// - The type doesn't need special handling for subtypes
+///
+/// # When to override `slot_new`:
+/// - Returning existing objects (e.g., `PyInt`, `PyStr`, `PyBool` for optimization)
+/// - Setting attributes or dict entries after object creation
+/// - Special class type handling (e.g., `PyType` and its metaclasses)
+/// - Post-creation mutations that require `PyRef`
 #[pyclass]
-pub trait Constructor: PyPayload {
+pub trait Constructor: PyPayload + std::fmt::Debug {
     type Args: FromArgs;
 
+    /// The type slot for `__new__`. Override this only when you need special
+    /// behavior beyond simple payload creation.
     #[inline]
     #[pyslot]
     fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         let args: Self::Args = args.bind(vm)?;
-        Self::py_new(cls, args, vm)
+        let payload = Self::py_new(&cls, args, vm)?;
+        payload.into_ref_with_type(vm, cls).map(Into::into)
     }
 
-    fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult;
+    /// Creates the payload for this type. In most cases, just implement this method
+    /// and let the default `slot_new` handle wrapping with the correct type.
+    fn py_new(cls: &Py<PyType>, args: Self::Args, vm: &VirtualMachine) -> PyResult<Self>;
 }
 
 pub trait DefaultConstructor: PyPayload + Default + std::fmt::Debug {
@@ -804,15 +922,6 @@ pub trait DefaultConstructor: PyPayload + Default + std::fmt::Debug {
     }
 }
 
-/// For types that cannot be instantiated through Python code.
-#[pyclass]
-pub trait Unconstructible: PyPayload {
-    #[pyslot]
-    fn slot_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        Err(vm.new_type_error(format!("cannot create '{}' instances", cls.slot_name())))
-    }
-}
-
 impl<T> Constructor for T
 where
     T: DefaultConstructor,
@@ -823,7 +932,7 @@ where
         Self::default().into_ref_with_type(vm, cls).map(Into::into)
     }
 
-    fn py_new(cls: PyTypeRef, _args: Self::Args, vm: &VirtualMachine) -> PyResult {
+    fn py_new(cls: &Py<PyType>, _args: Self::Args, vm: &VirtualMachine) -> PyResult<Self> {
         Err(vm.new_type_error(format!("cannot create {} instances", cls.slot_name())))
     }
 }
@@ -832,8 +941,9 @@ where
 pub trait Initializer: PyPayload {
     type Args: FromArgs;
 
-    #[pyslot]
     #[inline]
+    #[pyslot]
+    #[pymethod(name = "__init__")]
     fn slot_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
         #[cfg(debug_assertions)]
         let class_name_for_debug = zelf.class().name().to_string();
@@ -858,13 +968,6 @@ pub trait Initializer: PyPayload {
             }
         };
         let args: Self::Args = args.bind(vm)?;
-        Self::init(zelf, args, vm)
-    }
-
-    #[pymethod]
-    #[inline]
-    fn __init__(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
-        // TODO: check if this is safe. zelf may need to be `PyObjectRef`
         Self::init(zelf, args, vm)
     }
 
@@ -1222,8 +1325,8 @@ pub trait GetAttr: PyPayload {
 
     #[inline]
     #[pymethod]
-    fn __getattribute__(zelf: PyRef<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
-        Self::getattro(&zelf, &name, vm)
+    fn __getattribute__(zelf: PyObjectRef, name: PyStrRef, vm: &VirtualMachine) -> PyResult {
+        Self::slot_getattro(&zelf, &name, vm)
     }
 }
 
@@ -1253,18 +1356,18 @@ pub trait SetAttr: PyPayload {
     #[inline]
     #[pymethod]
     fn __setattr__(
-        zelf: PyRef<Self>,
+        zelf: PyObjectRef,
         name: PyStrRef,
         value: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        Self::setattro(&zelf, &name, PySetterValue::Assign(value), vm)
+        Self::slot_setattro(&zelf, &name, PySetterValue::Assign(value), vm)
     }
 
     #[inline]
     #[pymethod]
-    fn __delattr__(zelf: PyRef<Self>, name: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
-        Self::setattro(&zelf, &name, PySetterValue::Delete, vm)
+    fn __delattr__(zelf: PyObjectRef, name: PyStrRef, vm: &VirtualMachine) -> PyResult<()> {
+        Self::slot_setattro(&zelf, &name, PySetterValue::Delete, vm)
     }
 }
 

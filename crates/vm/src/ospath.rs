@@ -2,10 +2,8 @@ use rustpython_common::crt_fd;
 
 use crate::{
     PyObjectRef, PyResult, VirtualMachine,
-    builtins::PyBaseExceptionRef,
     convert::{IntoPyException, ToPyException, ToPyObject, TryFromObject},
     function::FsPath,
-    object::AsObject,
 };
 use std::path::{Path, PathBuf};
 
@@ -55,6 +53,14 @@ impl OsPath {
         Ok(Self { path, mode })
     }
 
+    /// Convert an object to OsPath using the os.fspath-style error message.
+    /// This is used by open() which should report "expected str, bytes or os.PathLike object, not"
+    /// instead of "should be string, bytes or os.PathLike, not".
+    pub(crate) fn try_from_fspath(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
+        let fspath = FsPath::try_from_path_like(obj, true, vm)?;
+        Self::from_fspath(fspath, vm)
+    }
+
     pub fn as_path(&self) -> &Path {
         Path::new(&self.path)
     }
@@ -90,7 +96,12 @@ impl AsRef<Path> for OsPath {
 impl TryFromObject for OsPath {
     // TODO: path_converter with allow_fd=0 in CPython
     fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-        let fspath = FsPath::try_from(obj, true, vm)?;
+        let fspath = FsPath::try_from(
+            obj,
+            true,
+            "should be string, bytes, os.PathLike or integer",
+            vm,
+        )?;
         Self::from_fspath(fspath, vm)
     }
 }
@@ -131,62 +142,17 @@ impl OsPathOrFd<'_> {
     }
 }
 
-// TODO: preserve the input `PyObjectRef` of filename and filename2 (Failing check `self.assertIs(err.filename, name, str(func)`)
-pub struct IOErrorBuilder<'a> {
-    error: &'a std::io::Error,
-    filename: Option<OsPathOrFd<'a>>,
-    filename2: Option<OsPathOrFd<'a>>,
-}
-
-impl<'a> IOErrorBuilder<'a> {
-    pub const fn new(error: &'a std::io::Error) -> Self {
-        Self {
-            error,
-            filename: None,
-            filename2: None,
-        }
-    }
-
-    pub(crate) fn filename(mut self, filename: impl Into<OsPathOrFd<'a>>) -> Self {
-        let filename = filename.into();
-        self.filename.replace(filename);
-        self
-    }
-
-    pub(crate) fn filename2(mut self, filename: impl Into<OsPathOrFd<'a>>) -> Self {
-        let filename = filename.into();
-        self.filename2.replace(filename);
-        self
-    }
-
-    pub(crate) fn with_filename(
-        error: &'a std::io::Error,
+impl crate::exceptions::OSErrorBuilder {
+    #[must_use]
+    pub(crate) fn with_filename<'a>(
+        error: &std::io::Error,
         filename: impl Into<OsPathOrFd<'a>>,
         vm: &VirtualMachine,
-    ) -> PyBaseExceptionRef {
-        let zelf = IOErrorBuilder {
-            error,
-            filename: Some(filename.into()),
-            filename2: None,
-        };
-        zelf.to_pyexception(vm)
-    }
-}
-
-impl ToPyException for IOErrorBuilder<'_> {
-    fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
-        let exc = self.error.to_pyexception(vm);
-
-        if let Some(filename) = &self.filename {
-            exc.as_object()
-                .set_attr("filename", filename.filename(vm), vm)
-                .unwrap();
-        }
-        if let Some(filename2) = &self.filename2 {
-            exc.as_object()
-                .set_attr("filename2", filename2.filename(vm), vm)
-                .unwrap();
-        }
-        exc
+    ) -> crate::builtins::PyBaseExceptionRef {
+        // TODO: return type to PyRef<PyOSError>
+        use crate::exceptions::ToOSErrorBuilder;
+        let builder = error.to_os_error_builder(vm);
+        let builder = builder.filename(filename.into().filename(vm));
+        builder.build(vm).upcast()
     }
 }

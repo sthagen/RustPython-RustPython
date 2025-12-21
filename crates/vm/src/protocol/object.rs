@@ -4,14 +4,13 @@
 use crate::{
     AsObject, Py, PyObject, PyObjectRef, PyRef, PyResult, TryFromObject, VirtualMachine,
     builtins::{
-        PyAsyncGen, PyBytes, PyDict, PyDictRef, PyGenericAlias, PyInt, PyList, PyStr, PyTuple,
-        PyTupleRef, PyType, PyTypeRef, PyUtf8Str, pystr::AsPyStr,
+        PyBytes, PyDict, PyDictRef, PyGenericAlias, PyInt, PyList, PyStr, PyTuple, PyTupleRef,
+        PyType, PyTypeRef, PyUtf8Str, pystr::AsPyStr,
     },
-    bytes_inner::ByteInnerNewOptions,
     common::{hash::PyHash, str::to_ascii},
     convert::{ToPyObject, ToPyResult},
     dict_inner::DictKey,
-    function::{Either, OptionalArg, PyArithmeticValue, PySetterValue},
+    function::{Either, FuncArgs, PyArithmeticValue, PySetterValue},
     object::PyPayload,
     protocol::{PyIter, PyMapping, PySequence},
     types::{Constructor, PyComparisonOp},
@@ -36,15 +35,10 @@ impl PyObjectRef {
         let bytes_type = vm.ctx.types.bytes_type;
         match self.downcast_exact::<PyInt>(vm) {
             Ok(int) => Err(vm.new_downcast_type_error(bytes_type, &int)),
-            Err(obj) => PyBytes::py_new(
-                bytes_type.to_owned(),
-                ByteInnerNewOptions {
-                    source: OptionalArg::Present(obj),
-                    encoding: OptionalArg::Missing,
-                    errors: OptionalArg::Missing,
-                },
-                vm,
-            ),
+            Err(obj) => {
+                let args = FuncArgs::from(vec![obj]);
+                <PyBytes as Constructor>::slot_new(bytes_type.to_owned(), args, vm)
+            }
         }
     }
 
@@ -93,11 +87,37 @@ impl PyObject {
 
     // PyObject *PyObject_GetAIter(PyObject *o)
     pub fn get_aiter(&self, vm: &VirtualMachine) -> PyResult {
-        if self.downcastable::<PyAsyncGen>() {
-            vm.call_special_method(self, identifier!(vm, __aiter__), ())
-        } else {
-            Err(vm.new_type_error("wrong argument type"))
+        use crate::builtins::PyCoroutine;
+
+        // Check if object has __aiter__ method
+        let aiter_method = self.class().get_attr(identifier!(vm, __aiter__));
+        let Some(_aiter_method) = aiter_method else {
+            return Err(vm.new_type_error(format!(
+                "'{}' object is not an async iterable",
+                self.class().name()
+            )));
+        };
+
+        // Call __aiter__
+        let iterator = vm.call_special_method(self, identifier!(vm, __aiter__), ())?;
+
+        // Check that __aiter__ did not return a coroutine
+        if iterator.downcast_ref::<PyCoroutine>().is_some() {
+            return Err(vm.new_type_error(
+                "'async_iterator' object cannot be interpreted as an async iterable; \
+                perhaps you forgot to call aiter()?",
+            ));
         }
+
+        // Check that the result is an async iterator (has __anext__)
+        if !iterator.class().has_attr(identifier!(vm, __anext__)) {
+            return Err(vm.new_type_error(format!(
+                "'{}' object is not an async iterator",
+                iterator.class().name()
+            )));
+        }
+
+        Ok(iterator)
     }
 
     pub fn has_attr<'a>(&self, attr_name: impl AsPyStr<'a>, vm: &VirtualMachine) -> PyResult<bool> {

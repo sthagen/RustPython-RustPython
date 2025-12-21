@@ -75,7 +75,7 @@ mod _sqlite {
         sliceable::{SaturatedSliceIter, SliceableSequenceOp},
         types::{
             AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, Hashable,
-            Initializer, IterNext, Iterable, PyComparisonOp, SelfIter, Unconstructible,
+            Initializer, IterNext, Iterable, PyComparisonOp, SelfIter,
         },
         utils::ToCString,
     };
@@ -650,7 +650,9 @@ mod _sqlite {
 
     #[pyfunction]
     fn connect(args: ConnectArgs, vm: &VirtualMachine) -> PyResult {
-        Connection::py_new(args.factory.clone(), args, vm)
+        let factory = args.factory.clone();
+        let conn = Connection::py_new(&factory, args, vm)?;
+        conn.into_ref_with_type(vm, factory).map(Into::into)
     }
 
     #[pyfunction]
@@ -851,12 +853,12 @@ mod _sqlite {
     impl Constructor for Connection {
         type Args = ConnectArgs;
 
-        fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
+        fn py_new(cls: &Py<PyType>, args: Self::Args, vm: &VirtualMachine) -> PyResult<Self> {
             let text_factory = PyStr::class(&vm.ctx).to_owned().into_object();
 
             // For non-subclassed Connection, initialize in __new__
             // For subclassed Connection, leave db as None and require __init__ to be called
-            let is_base_class = cls.is(Connection::class(&vm.ctx).as_object());
+            let is_base_class = cls.is(Connection::class(&vm.ctx));
 
             let db = if is_base_class {
                 // Initialize immediately for base class
@@ -868,7 +870,7 @@ mod _sqlite {
 
             let initialized = db.is_some();
 
-            let conn = Self {
+            Ok(Self {
                 db: PyMutex::new(db),
                 initialized: Radium::new(initialized),
                 detect_types: Radium::new(args.detect_types),
@@ -877,9 +879,7 @@ mod _sqlite {
                 thread_ident: PyMutex::new(std::thread::current().id()),
                 row_factory: PyAtomicRef::from(None),
                 text_factory: PyAtomicRef::from(text_factory),
-            };
-
-            Ok(conn.into_ref_with_type(vm, cls)?.into())
+            })
         }
     }
 
@@ -1589,24 +1589,33 @@ mod _sqlite {
             Ok(())
         }
 
-        fn inner(&self, vm: &VirtualMachine) -> PyResult<PyMappedMutexGuard<'_, CursorInner>> {
-            let guard = self.inner.lock();
-            if guard.is_some() {
-                let inner_guard =
-                    PyMutexGuard::map(guard, |x| unsafe { x.as_mut().unwrap_unchecked() });
-                if inner_guard.closed {
-                    return Err(new_programming_error(
-                        vm,
-                        "Cannot operate on a closed cursor.".to_owned(),
-                    ));
-                }
-                Ok(inner_guard)
-            } else {
-                Err(new_programming_error(
+        fn check_cursor_state(inner: Option<&CursorInner>, vm: &VirtualMachine) -> PyResult<()> {
+            match inner {
+                Some(inner) if inner.closed => Err(new_programming_error(
+                    vm,
+                    "Cannot operate on a closed cursor.".to_owned(),
+                )),
+                Some(_) => Ok(()),
+                None => Err(new_programming_error(
                     vm,
                     "Base Cursor.__init__ not called.".to_owned(),
-                ))
+                )),
             }
+        }
+
+        fn inner(&self, vm: &VirtualMachine) -> PyResult<PyMappedMutexGuard<'_, CursorInner>> {
+            let guard = self.inner.lock();
+            Self::check_cursor_state(guard.as_ref(), vm)?;
+            Ok(PyMutexGuard::map(guard, |x| unsafe {
+                x.as_mut().unwrap_unchecked()
+            }))
+        }
+
+        /// Check if cursor is valid without retaining the lock.
+        /// Use this when you only need to verify the cursor state but don't need to modify it.
+        fn check_cursor_valid(&self, vm: &VirtualMachine) -> PyResult<()> {
+            let guard = self.inner.lock();
+            Self::check_cursor_state(guard.as_ref(), vm)
         }
 
         #[pymethod]
@@ -1771,6 +1780,8 @@ mod _sqlite {
             script: PyUtf8StrRef,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
+            zelf.check_cursor_valid(vm)?;
+
             let db = zelf.connection.db_lock(vm)?;
 
             db.sql_limit(script.byte_len(), vm)?;
@@ -1829,19 +1840,19 @@ mod _sqlite {
         fn close(&self, vm: &VirtualMachine) -> PyResult<()> {
             // Check if __init__ was called
             let mut guard = self.inner.lock();
-            if guard.is_none() {
+
+            let Some(inner) = guard.as_mut() else {
                 return Err(new_programming_error(
                     vm,
                     "Base Cursor.__init__ not called.".to_owned(),
                 ));
-            }
+            };
 
-            if let Some(inner) = guard.as_mut() {
-                if let Some(stmt) = &inner.statement {
-                    stmt.lock().reset();
-                }
-                inner.closed = true;
+            if let Some(stmt) = &inner.statement {
+                stmt.lock().reset();
             }
+            inner.closed = true;
+
             Ok(())
         }
 
@@ -1929,10 +1940,12 @@ mod _sqlite {
     impl Constructor for Cursor {
         type Args = (PyRef<Connection>,);
 
-        fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
-            Self::new_uninitialized(args.0, vm)
-                .into_ref_with_type(vm, cls)
-                .map(Into::into)
+        fn py_new(
+            _cls: &Py<PyType>,
+            (connection,): Self::Args,
+            vm: &VirtualMachine,
+        ) -> PyResult<Self> {
+            Ok(Self::new_uninitialized(connection, vm))
         }
     }
 
@@ -2098,20 +2111,18 @@ mod _sqlite {
     impl Constructor for Row {
         type Args = (PyRef<Cursor>, PyTupleRef);
 
-        fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
-            let description = args
-                .0
+        fn py_new(
+            _cls: &Py<PyType>,
+            (cursor, data): Self::Args,
+            vm: &VirtualMachine,
+        ) -> PyResult<Self> {
+            let description = cursor
                 .inner(vm)?
                 .description
                 .clone()
                 .ok_or_else(|| vm.new_value_error("no description in Cursor"))?;
 
-            Self {
-                data: args.1,
-                description,
-            }
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+            Ok(Self { data, description })
         }
     }
 
@@ -2186,8 +2197,6 @@ mod _sqlite {
         inner: PyMutex<Option<BlobInner>>,
     }
 
-    impl Unconstructible for Blob {}
-
     #[derive(Debug)]
     struct BlobInner {
         blob: SqliteBlob,
@@ -2200,7 +2209,7 @@ mod _sqlite {
         }
     }
 
-    #[pyclass(with(AsMapping, Unconstructible, AsNumber, AsSequence))]
+    #[pyclass(flags(DISALLOW_INSTANTIATION), with(AsMapping, AsNumber, AsSequence))]
     impl Blob {
         #[pymethod]
         fn close(&self) {
@@ -2581,9 +2590,7 @@ mod _sqlite {
         }
     }
 
-    impl Unconstructible for Statement {}
-
-    #[pyclass(with(Unconstructible))]
+    #[pyclass(flags(DISALLOW_INSTANTIATION))]
     impl Statement {
         fn new(
             connection: &Connection,

@@ -73,8 +73,8 @@ mod _functools {
             self.inner.read().keywords.clone()
         }
 
-        #[pymethod(name = "__reduce__")]
-        fn reduce(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult {
+        #[pymethod]
+        fn __reduce__(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult {
             let inner = zelf.inner.read();
             let partial_type = zelf.class();
 
@@ -204,7 +204,11 @@ mod _functools {
     impl Constructor for PyPartial {
         type Args = FuncArgs;
 
-        fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
+        fn py_new(
+            _cls: &crate::Py<crate::builtins::PyType>,
+            args: Self::Args,
+            vm: &VirtualMachine,
+        ) -> PyResult<Self> {
             let (func, args_slice) = args
                 .args
                 .split_first()
@@ -230,15 +234,13 @@ mod _functools {
                 final_keywords.set_item(vm.ctx.intern_str(key.as_str()), value, vm)?;
             }
 
-            let partial = Self {
+            Ok(Self {
                 inner: PyRwLock::new(PyPartialInner {
                     func: final_func,
                     args: vm.ctx.new_tuple(final_args),
                     keywords: final_keywords,
                 }),
-            };
-
-            partial.into_ref_with_type(vm, cls).map(Into::into)
+            })
         }
     }
 

@@ -9,7 +9,6 @@ use crate::{
     },
     object::PyObjectPayload,
     sliceable::SequenceIndexOp,
-    types::Unconstructible,
 };
 use itertools::Itertools;
 use std::{borrow::Cow, fmt::Debug, ops::Range};
@@ -202,15 +201,26 @@ impl BufferDescriptor {
 
     #[cfg(debug_assertions)]
     pub fn validate(self) -> Self {
-        assert!(self.itemsize != 0);
-        assert!(self.ndim() != 0);
-        let mut shape_product = 1;
-        for (shape, stride, suboffset) in self.dim_desc.iter().cloned() {
-            shape_product *= shape;
-            assert!(suboffset >= 0);
-            assert!(stride != 0);
+        // ndim=0 is valid for scalar types (e.g., ctypes Structure)
+        if self.ndim() == 0 {
+            // Empty structures (len=0) can have itemsize=0
+            if self.len > 0 {
+                assert!(self.itemsize != 0);
+            }
+            assert!(self.itemsize == self.len);
+        } else {
+            let mut shape_product = 1;
+            let has_zero_dim = self.dim_desc.iter().any(|(s, _, _)| *s == 0);
+            for (shape, stride, suboffset) in self.dim_desc.iter().cloned() {
+                shape_product *= shape;
+                assert!(suboffset >= 0);
+                // For empty arrays (any dimension is 0), strides can be 0
+                if !has_zero_dim {
+                    assert!(stride != 0);
+                }
+            }
+            assert!(shape_product * self.itemsize == self.len);
         }
-        assert!(shape_product * self.itemsize == self.len);
         self
     }
 
@@ -402,7 +412,7 @@ pub struct VecBuffer {
     data: PyMutex<Vec<u8>>,
 }
 
-#[pyclass(flags(BASETYPE), with(Unconstructible))]
+#[pyclass(flags(BASETYPE, DISALLOW_INSTANTIATION))]
 impl VecBuffer {
     pub fn take(&self) -> Vec<u8> {
         std::mem::take(&mut self.data.lock())
@@ -416,8 +426,6 @@ impl From<Vec<u8>> for VecBuffer {
         }
     }
 }
-
-impl Unconstructible for VecBuffer {}
 
 impl PyRef<VecBuffer> {
     pub fn into_pybuffer(self, readonly: bool) -> PyBuffer {

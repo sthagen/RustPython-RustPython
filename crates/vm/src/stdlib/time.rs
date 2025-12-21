@@ -34,10 +34,10 @@ unsafe extern "C" {
 #[pymodule(name = "time", with(platform))]
 mod decl {
     use crate::{
-        AsObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
+        AsObject, PyObjectRef, PyResult, VirtualMachine,
         builtins::{PyStrRef, PyTypeRef, PyUtf8StrRef},
         function::{Either, FuncArgs, OptionalArg},
-        types::PyStructSequence,
+        types::{PyStructSequence, struct_sequence_new},
     };
     use chrono::{
         DateTime, Datelike, TimeZone, Timelike,
@@ -46,7 +46,7 @@ mod decl {
     use std::time::Duration;
     #[cfg(target_env = "msvc")]
     #[cfg(not(target_arch = "wasm32"))]
-    use windows::Win32::System::Time;
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
 
     #[allow(dead_code)]
     pub(super) const SEC_TO_MS: i64 = 1000;
@@ -186,10 +186,9 @@ mod decl {
 
     #[cfg(target_env = "msvc")]
     #[cfg(not(target_arch = "wasm32"))]
-    fn get_tz_info() -> Time::TIME_ZONE_INFORMATION {
-        let mut info = Time::TIME_ZONE_INFORMATION::default();
-        let info_ptr = &mut info as *mut Time::TIME_ZONE_INFORMATION;
-        let _ = unsafe { Time::GetTimeZoneInformation(info_ptr) };
+    fn get_tz_info() -> TIME_ZONE_INFORMATION {
+        let mut info: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+        unsafe { GetTimeZoneInformation(&mut info) };
         info
     }
 
@@ -280,7 +279,9 @@ mod decl {
         /// Construct a localtime from the optional seconds, or get the current local time.
         fn naive_or_local(self, vm: &VirtualMachine) -> PyResult<NaiveDateTime> {
             Ok(match self {
-                Self::Present(secs) => pyobj_to_date_time(secs, vm)?.naive_utc(),
+                Self::Present(secs) => pyobj_to_date_time(secs, vm)?
+                    .with_timezone(&chrono::Local)
+                    .naive_local(),
                 Self::Missing => chrono::offset::Local::now().naive_local(),
             })
         }
@@ -293,7 +294,7 @@ mod decl {
         }
     }
 
-    impl OptionalArg<PyStructTime> {
+    impl OptionalArg<StructTimeData> {
         fn naive_or_local(self, vm: &VirtualMachine) -> PyResult<NaiveDateTime> {
             Ok(match self {
                 Self::Present(t) => t.to_date_time(vm)?,
@@ -304,33 +305,41 @@ mod decl {
 
     /// https://docs.python.org/3/library/time.html?highlight=gmtime#time.gmtime
     #[pyfunction]
-    fn gmtime(secs: OptionalArg<Either<f64, i64>>, vm: &VirtualMachine) -> PyResult<PyStructTime> {
+    fn gmtime(
+        secs: OptionalArg<Either<f64, i64>>,
+        vm: &VirtualMachine,
+    ) -> PyResult<StructTimeData> {
         let instant = secs.naive_or_utc(vm)?;
-        Ok(PyStructTime::new(vm, instant, 0))
+        Ok(StructTimeData::new_utc(vm, instant))
     }
 
     #[pyfunction]
     fn localtime(
         secs: OptionalArg<Either<f64, i64>>,
         vm: &VirtualMachine,
-    ) -> PyResult<PyStructTime> {
+    ) -> PyResult<StructTimeData> {
         let instant = secs.naive_or_local(vm)?;
         // TODO: isdst flag must be valid value here
         // https://docs.python.org/3/library/time.html#time.localtime
-        Ok(PyStructTime::new(vm, instant, -1))
+        Ok(StructTimeData::new_local(vm, instant, -1))
     }
 
     #[pyfunction]
-    fn mktime(t: PyStructTime, vm: &VirtualMachine) -> PyResult<f64> {
+    fn mktime(t: StructTimeData, vm: &VirtualMachine) -> PyResult<f64> {
         let datetime = t.to_date_time(vm)?;
-        let seconds_since_epoch = datetime.and_utc().timestamp() as f64;
+        // mktime interprets struct_time as local time
+        let local_dt = chrono::Local
+            .from_local_datetime(&datetime)
+            .single()
+            .ok_or_else(|| vm.new_overflow_error("mktime argument out of range"))?;
+        let seconds_since_epoch = local_dt.timestamp() as f64;
         Ok(seconds_since_epoch)
     }
 
     const CFMT: &str = "%a %b %e %H:%M:%S %Y";
 
     #[pyfunction]
-    fn asctime(t: OptionalArg<PyStructTime>, vm: &VirtualMachine) -> PyResult {
+    fn asctime(t: OptionalArg<StructTimeData>, vm: &VirtualMachine) -> PyResult {
         let instant = t.naive_or_local(vm)?;
         let formatted_time = instant.format(CFMT).to_string();
         Ok(vm.ctx.new_str(formatted_time).into())
@@ -345,12 +354,20 @@ mod decl {
     #[pyfunction]
     fn strftime(
         format: PyUtf8StrRef,
-        t: OptionalArg<PyStructTime>,
+        t: OptionalArg<StructTimeData>,
         vm: &VirtualMachine,
     ) -> PyResult {
         use std::fmt::Write;
 
         let instant = t.naive_or_local(vm)?;
+
+        // On Windows/AIX/Solaris, %y format with year < 1900 is not supported
+        #[cfg(any(windows, target_os = "aix", target_os = "solaris"))]
+        if instant.year() < 1900 && format.as_str().contains("%y") {
+            let msg = "format %y requires year >= 1900 on Windows";
+            return Err(vm.new_value_error(msg.to_owned()));
+        }
+
         let mut formatted_time = String::new();
 
         /*
@@ -465,40 +482,38 @@ mod decl {
         Ok(get_process_time(vm)?.as_nanos() as u64)
     }
 
-    #[pyattr]
-    #[pyclass(name = "struct_time")]
-    #[derive(PyStructSequence, TryIntoPyStructSequence)]
-    #[allow(dead_code)]
-    struct PyStructTime {
-        tm_year: PyObjectRef,
-        tm_mon: PyObjectRef,
-        tm_mday: PyObjectRef,
-        tm_hour: PyObjectRef,
-        tm_min: PyObjectRef,
-        tm_sec: PyObjectRef,
-        tm_wday: PyObjectRef,
-        tm_yday: PyObjectRef,
-        tm_isdst: PyObjectRef,
-        #[pystruct(skip)]
-        tm_gmtoff: PyObjectRef,
-        #[pystruct(skip)]
-        tm_zone: PyObjectRef,
+    /// Data struct for struct_time
+    #[pystruct_sequence_data(try_from_object)]
+    pub struct StructTimeData {
+        pub tm_year: PyObjectRef,
+        pub tm_mon: PyObjectRef,
+        pub tm_mday: PyObjectRef,
+        pub tm_hour: PyObjectRef,
+        pub tm_min: PyObjectRef,
+        pub tm_sec: PyObjectRef,
+        pub tm_wday: PyObjectRef,
+        pub tm_yday: PyObjectRef,
+        pub tm_isdst: PyObjectRef,
+        #[pystruct_sequence(skip)]
+        pub tm_gmtoff: PyObjectRef,
+        #[pystruct_sequence(skip)]
+        pub tm_zone: PyObjectRef,
     }
 
-    impl std::fmt::Debug for PyStructTime {
+    impl std::fmt::Debug for StructTimeData {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "struct_time()")
         }
     }
 
-    #[pyclass(with(PyStructSequence))]
-    impl PyStructTime {
-        fn new(vm: &VirtualMachine, tm: NaiveDateTime, isdst: i32) -> Self {
-            let local_time = chrono::Local.from_local_datetime(&tm).unwrap();
-            let offset_seconds =
-                local_time.offset().local_minus_utc() + if isdst == 1 { 3600 } else { 0 };
-            let tz_abbr = local_time.format("%Z").to_string();
-
+    impl StructTimeData {
+        fn new_inner(
+            vm: &VirtualMachine,
+            tm: NaiveDateTime,
+            isdst: i32,
+            gmtoff: i32,
+            zone: &str,
+        ) -> Self {
             Self {
                 tm_year: vm.ctx.new_int(tm.year()).into(),
                 tm_mon: vm.ctx.new_int(tm.month()).into(),
@@ -509,9 +524,23 @@ mod decl {
                 tm_wday: vm.ctx.new_int(tm.weekday().num_days_from_monday()).into(),
                 tm_yday: vm.ctx.new_int(tm.ordinal()).into(),
                 tm_isdst: vm.ctx.new_int(isdst).into(),
-                tm_gmtoff: vm.ctx.new_int(offset_seconds).into(),
-                tm_zone: vm.ctx.new_str(tz_abbr).into(),
+                tm_gmtoff: vm.ctx.new_int(gmtoff).into(),
+                tm_zone: vm.ctx.new_str(zone).into(),
             }
+        }
+
+        /// Create struct_time for UTC (gmtime)
+        fn new_utc(vm: &VirtualMachine, tm: NaiveDateTime) -> Self {
+            Self::new_inner(vm, tm, 0, 0, "UTC")
+        }
+
+        /// Create struct_time for local timezone (localtime)
+        fn new_local(vm: &VirtualMachine, tm: NaiveDateTime, isdst: i32) -> Self {
+            let local_time = chrono::Local.from_local_datetime(&tm).unwrap();
+            let offset_seconds =
+                local_time.offset().local_minus_utc() + if isdst == 1 { 3600 } else { 0 };
+            let tz_abbr = local_time.format("%Z").to_string();
+            Self::new_inner(vm, tm, isdst, offset_seconds, &tz_abbr)
         }
 
         fn to_date_time(&self, vm: &VirtualMachine) -> PyResult<NaiveDateTime> {
@@ -531,12 +560,18 @@ mod decl {
             );
             Ok(dt)
         }
+    }
 
+    #[pyattr]
+    #[pystruct_sequence(name = "struct_time", module = "time", data = "StructTimeData")]
+    pub struct PyStructTime;
+
+    #[pyclass(with(PyStructSequence))]
+    impl PyStructTime {
         #[pyslot]
-        fn slot_new(_cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-            // cls is ignorable because this is not a basetype
-            let seq = args.bind(vm)?;
-            Ok(vm.new_pyobj(Self::try_from_object(vm, seq)?))
+        fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            let seq: PyObjectRef = args.bind(vm)?;
+            struct_sequence_new(cls, seq, vm)
         }
     }
 
@@ -772,7 +807,6 @@ mod platform {
     use crate::{
         PyRef, PyResult, VirtualMachine,
         builtins::{PyNamespace, PyStrRef},
-        stdlib::os::errno_err,
     };
     use std::time::Duration;
     use windows_sys::Win32::{
@@ -791,7 +825,7 @@ mod platform {
         let frequency = unsafe {
             let mut freq = std::mem::MaybeUninit::uninit();
             if QueryPerformanceFrequency(freq.as_mut_ptr()) == 0 {
-                return Err(errno_err(vm));
+                return Err(vm.new_last_os_error());
             }
             freq.assume_init()
         };
@@ -839,7 +873,7 @@ mod platform {
                 _is_time_adjustment_disabled.as_mut_ptr(),
             ) == 0
             {
-                return Err(errno_err(vm));
+                return Err(vm.new_last_os_error());
             }
             time_increment.assume_init()
         };

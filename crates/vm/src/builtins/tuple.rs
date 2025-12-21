@@ -8,7 +8,7 @@ use crate::{
     atomic_func,
     class::PyClassImpl,
     convert::{ToPyObject, TransmuteFromObject},
-    function::{ArgSize, OptionalArg, PyArithmeticValue, PyComparisonValue},
+    function::{ArgSize, FuncArgs, OptionalArg, PyArithmeticValue, PyComparisonValue},
     iter::PyExactSizeIterator,
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
     recursion::ReprGuard,
@@ -16,7 +16,7 @@ use crate::{
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
         AsMapping, AsSequence, Comparable, Constructor, Hashable, IterNext, Iterable,
-        PyComparisonOp, Representable, SelfIter, Unconstructible,
+        PyComparisonOp, Representable, SelfIter,
     },
     utils::collection_repr,
     vm::VirtualMachine,
@@ -110,32 +110,45 @@ impl_from_into_pytuple!(A, B, C, D, E, F, G);
 pub type PyTupleRef = PyRef<PyTuple>;
 
 impl Constructor for PyTuple {
-    type Args = OptionalArg<PyObjectRef>;
+    type Args = Vec<PyObjectRef>;
 
-    fn py_new(cls: PyTypeRef, iterable: Self::Args, vm: &VirtualMachine) -> PyResult {
+    fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        let iterable: OptionalArg<PyObjectRef> = args.bind(vm)?;
+
+        // Optimizations for exact tuple type
+        if cls.is(vm.ctx.types.tuple_type) {
+            // Return exact tuple as-is
+            if let OptionalArg::Present(ref input) = iterable
+                && let Ok(tuple) = input.clone().downcast_exact::<PyTuple>(vm)
+            {
+                return Ok(tuple.into_pyref().into());
+            }
+
+            // Return empty tuple singleton
+            if iterable.is_missing() {
+                return Ok(vm.ctx.empty_tuple.clone().into());
+            }
+        }
+
         let elements = if let OptionalArg::Present(iterable) = iterable {
-            let iterable = if cls.is(vm.ctx.types.tuple_type) {
-                match iterable.downcast_exact::<Self>(vm) {
-                    Ok(tuple) => return Ok(tuple.into_pyref().into()),
-                    Err(iterable) => iterable,
-                }
-            } else {
-                iterable
-            };
             iterable.try_to_value(vm)?
         } else {
             vec![]
         };
-        // Return empty tuple only for exact tuple types if the iterable is empty.
+
+        // Return empty tuple singleton for exact tuple types (when iterable was empty)
         if elements.is_empty() && cls.is(vm.ctx.types.tuple_type) {
-            Ok(vm.ctx.empty_tuple.clone().into())
-        } else {
-            Self {
-                elements: elements.into_boxed_slice(),
-            }
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+            return Ok(vm.ctx.empty_tuple.clone().into());
         }
+
+        let payload = Self::py_new(&cls, elements, vm)?;
+        payload.into_ref_with_type(vm, cls).map(Into::into)
+    }
+
+    fn py_new(_cls: &Py<PyType>, elements: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(Self {
+            elements: elements.into_boxed_slice(),
+        })
     }
 }
 
@@ -520,7 +533,7 @@ impl PyPayload for PyTupleIterator {
     }
 }
 
-#[pyclass(with(Unconstructible, IterNext, Iterable))]
+#[pyclass(flags(DISALLOW_INSTANTIATION), with(IterNext, Iterable))]
 impl PyTupleIterator {
     #[pymethod]
     fn __length_hint__(&self) -> usize {
@@ -541,7 +554,6 @@ impl PyTupleIterator {
             .builtins_iter_reduce(|x| x.clone().into(), vm)
     }
 }
-impl Unconstructible for PyTupleIterator {}
 
 impl SelfIter for PyTupleIterator {}
 impl IterNext for PyTupleIterator {

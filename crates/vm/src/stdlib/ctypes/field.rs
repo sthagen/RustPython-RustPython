@@ -1,15 +1,16 @@
 use crate::builtins::PyType;
 use crate::function::PySetterValue;
-use crate::types::{GetDescriptor, Representable, Unconstructible};
-use crate::{AsObject, Py, PyObjectRef, PyResult, VirtualMachine};
+use crate::types::{GetDescriptor, Representable};
+use crate::{AsObject, Py, PyObject, PyObjectRef, PyResult, VirtualMachine};
 use num_traits::ToPrimitive;
 
 use super::structure::PyCStructure;
 use super::union::PyCUnion;
 
 #[pyclass(name = "PyCFieldType", base = PyType, module = "_ctypes")]
-#[derive(PyPayload, Debug)]
+#[derive(Debug)]
 pub struct PyCFieldType {
+    pub _base: PyType,
     #[allow(dead_code)]
     pub(super) inner: PyCField,
 }
@@ -84,8 +85,6 @@ impl Representable for PyCField {
     }
 }
 
-impl Unconstructible for PyCField {}
-
 impl GetDescriptor for PyCField {
     fn descr_get(
         zelf: PyObjectRef,
@@ -153,7 +152,7 @@ impl PyCField {
     }
 
     /// Convert a Python value to bytes
-    fn value_to_bytes(value: &PyObjectRef, size: usize, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+    fn value_to_bytes(value: &PyObject, size: usize, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
         if let Ok(int_val) = value.try_int(vm) {
             let i = int_val.as_bigint();
             match size {
@@ -183,7 +182,7 @@ impl PyCField {
 
 #[pyclass(
     flags(DISALLOW_INSTANTIATION, IMMUTABLETYPE),
-    with(Unconstructible, Representable, GetDescriptor)
+    with(Representable, GetDescriptor)
 )]
 impl PyCField {
     #[pyslot]

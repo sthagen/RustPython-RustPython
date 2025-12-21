@@ -10,7 +10,7 @@ mod builtins {
     use std::io::IsTerminal;
 
     use crate::{
-        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
+        AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
         builtins::{
             PyByteArray, PyBytes, PyDictRef, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType,
             enumerate::PyReverseSequenceIterator,
@@ -132,7 +132,7 @@ mod builtins {
 
             let optimize: i32 = args.optimize.map_or(Ok(-1), |v| v.try_to_primitive(vm))?;
             let optimize: u8 = if optimize == -1 {
-                vm.state.settings.optimize
+                vm.state.config.settings.optimize
             } else {
                 optimize
                     .try_into()
@@ -261,7 +261,7 @@ mod builtins {
             func_name: &'static str,
         ) -> PyResult<crate::scope::Scope> {
             fn validate_globals_dict(
-                globals: &PyObjectRef,
+                globals: &PyObject,
                 vm: &VirtualMachine,
                 func_name: &'static str,
             ) -> PyResult<()> {
@@ -540,12 +540,23 @@ mod builtins {
         default_value: OptionalArg<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult {
+        use crate::builtins::asyncgenerator::PyAnextAwaitable;
+
+        // Check if object is an async iterator (has __anext__ method)
+        if !aiter.class().has_attr(identifier!(vm, __anext__)) {
+            return Err(vm.new_type_error(format!(
+                "'{}' object is not an async iterator",
+                aiter.class().name()
+            )));
+        }
+
         let awaitable = vm.call_method(&aiter, "__anext__", ())?;
 
-        if default_value.is_missing() {
-            Ok(awaitable)
+        if let OptionalArg::Present(default) = default_value {
+            Ok(PyAnextAwaitable::new(awaitable, default)
+                .into_ref(&vm.ctx)
+                .into())
         } else {
-            // TODO: Implement CPython like PyAnextAwaitable to properly handle the default value.
             Ok(awaitable)
         }
     }
@@ -1069,7 +1080,10 @@ pub fn init_module(vm: &VirtualMachine, module: &Py<PyModule>) {
 
     builtins::extend_module(vm, module).unwrap();
 
-    let debug_mode: bool = vm.state.settings.optimize == 0;
+    let debug_mode: bool = vm.state.config.settings.optimize == 0;
+    // Create dynamic ExceptionGroup with multiple inheritance (BaseExceptionGroup + Exception)
+    let exception_group = crate::exception_group::exception_group();
+
     extend_module!(vm, module, {
         "__debug__" => ctx.new_bool(debug_mode),
 
@@ -1110,7 +1124,7 @@ pub fn init_module(vm: &VirtualMachine, module: &Py<PyModule>) {
         // Exceptions:
         "BaseException" => ctx.exceptions.base_exception_type.to_owned(),
         "BaseExceptionGroup" => ctx.exceptions.base_exception_group.to_owned(),
-        "ExceptionGroup" => ctx.exceptions.exception_group.to_owned(),
+        "ExceptionGroup" => exception_group.to_owned(),
         "SystemExit" => ctx.exceptions.system_exit.to_owned(),
         "KeyboardInterrupt" => ctx.exceptions.keyboard_interrupt.to_owned(),
         "GeneratorExit" => ctx.exceptions.generator_exit.to_owned(),
@@ -1186,5 +1200,11 @@ pub fn init_module(vm: &VirtualMachine, module: &Py<PyModule>) {
     #[cfg(feature = "jit")]
     extend_module!(vm, module, {
         "JitError" => ctx.exceptions.jit_error.to_owned(),
+    });
+
+    #[cfg(windows)]
+    extend_module!(vm, module, {
+        // OSError alias for Windows
+        "WindowsError" => ctx.exceptions.os_error.to_owned(),
     });
 }

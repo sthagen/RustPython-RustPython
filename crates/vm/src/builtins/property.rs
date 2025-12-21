@@ -1,7 +1,7 @@
 /*! Python `property` descriptor class.
 
 */
-use super::{PyStrRef, PyType, PyTypeRef};
+use super::{PyStrRef, PyType};
 use crate::common::lock::PyRwLock;
 use crate::function::{IntoFuncArgs, PosArgs};
 use crate::{
@@ -224,7 +224,7 @@ impl PyProperty {
         };
 
         // Create new property using py_new and init
-        let new_prop = Self::py_new(zelf.class().to_owned(), FuncArgs::default(), vm)?;
+        let new_prop = Self::slot_new(zelf.class().to_owned(), FuncArgs::default(), vm)?;
         let new_prop_ref = new_prop.downcast::<Self>().unwrap();
         Self::init(new_prop_ref.clone(), args, vm)?;
 
@@ -266,7 +266,7 @@ impl PyProperty {
     #[pygetset]
     fn __isabstractmethod__(&self, vm: &VirtualMachine) -> PyResult {
         // Helper to check if a method is abstract
-        let is_abstract = |method: &PyObjectRef| -> PyResult<bool> {
+        let is_abstract = |method: &PyObject| -> PyResult<bool> {
             match method.get_attr("__isabstractmethod__", vm) {
                 Ok(isabstract) => isabstract.try_to_bool(vm),
                 Err(_) => Ok(false),
@@ -309,7 +309,7 @@ impl PyProperty {
     #[cold]
     fn format_property_error(
         &self,
-        obj: &PyObjectRef,
+        obj: &PyObject,
         error_type: &str,
         vm: &VirtualMachine,
     ) -> PyResult<String> {
@@ -336,17 +336,15 @@ impl PyProperty {
 impl Constructor for PyProperty {
     type Args = FuncArgs;
 
-    fn py_new(cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        Self {
+    fn py_new(_cls: &Py<PyType>, _args: FuncArgs, _vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(Self {
             getter: PyRwLock::new(None),
             setter: PyRwLock::new(None),
             deleter: PyRwLock::new(None),
             doc: PyRwLock::new(None),
             name: PyRwLock::new(None),
             getter_doc: AtomicBool::new(false),
-        }
-        .into_ref_with_type(vm, cls)
-        .map(Into::into)
+        })
     }
 }
 
@@ -358,7 +356,7 @@ impl Initializer for PyProperty {
         let mut getter_doc = false;
 
         // Helper to get doc from getter
-        let get_getter_doc = |fget: &PyObjectRef| -> Option<PyObjectRef> {
+        let get_getter_doc = |fget: &PyObject| -> Option<PyObjectRef> {
             fget.get_attr("__doc__", vm)
                 .ok()
                 .filter(|doc| !vm.is_none(doc))

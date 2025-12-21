@@ -15,7 +15,6 @@ use super::{
     ext::{AsObject, PyRefExact, PyResult},
     payload::PyPayload,
 };
-use crate::object::traverse::{MaybeTraverse, Traverse, TraverseFn};
 use crate::object::traverse_object::PyObjVTable;
 use crate::{
     builtins::{PyDictRef, PyType, PyTypeRef},
@@ -26,6 +25,10 @@ use crate::{
         refcount::RefCount,
     },
     vm::VirtualMachine,
+};
+use crate::{
+    class::StaticType,
+    object::traverse::{MaybeTraverse, Traverse, TraverseFn},
 };
 use itertools::Itertools;
 use std::{
@@ -1067,6 +1070,57 @@ impl<T: PyPayload + std::fmt::Debug> PyRef<T> {
         Self {
             ptr: unsafe { NonNull::new_unchecked(inner.cast::<Py<T>>()) },
         }
+    }
+}
+
+impl<T: crate::class::PySubclass + std::fmt::Debug> PyRef<T>
+where
+    T::Base: std::fmt::Debug,
+{
+    /// Converts this reference to the base type (ownership transfer).
+    /// # Safety
+    /// T and T::Base must have compatible layouts in size_of::<T::Base>() bytes.
+    #[inline]
+    pub fn into_base(self) -> PyRef<T::Base> {
+        let obj: PyObjectRef = self.into();
+        match obj.downcast() {
+            Ok(base_ref) => base_ref,
+            Err(_) => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+    #[inline]
+    pub fn upcast<U: PyPayload + StaticType>(self) -> PyRef<U>
+    where
+        T: StaticType,
+    {
+        debug_assert!(T::static_type().is_subtype(U::static_type()));
+        let obj: PyObjectRef = self.into();
+        match obj.downcast::<U>() {
+            Ok(upcast_ref) => upcast_ref,
+            Err(_) => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+}
+
+impl<T: crate::class::PySubclass> Py<T> {
+    /// Converts `&Py<T>` to `&Py<T::Base>`.
+    #[inline]
+    pub fn to_base(&self) -> &Py<T::Base> {
+        debug_assert!(self.as_object().downcast_ref::<T::Base>().is_some());
+        // SAFETY: T is #[repr(transparent)] over T::Base,
+        // so Py<T> and Py<T::Base> have the same layout.
+        unsafe { &*(self as *const Py<T> as *const Py<T::Base>) }
+    }
+
+    /// Converts `&Py<T>` to `&Py<U>` where U is an ancestor type.
+    #[inline]
+    pub fn upcast_ref<U: PyPayload + StaticType>(&self) -> &Py<U>
+    where
+        T: StaticType,
+    {
+        debug_assert!(T::static_type().is_subtype(U::static_type()));
+        // SAFETY: T is a subtype of U, so Py<T> can be viewed as Py<U>.
+        unsafe { &*(self as *const Py<T> as *const Py<U>) }
     }
 }
 

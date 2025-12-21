@@ -55,10 +55,12 @@ mod dict_inner;
 #[cfg(feature = "rustpython-compiler")]
 pub mod eval;
 
+mod exception_group;
 pub mod exceptions;
 pub mod format;
 pub mod frame;
 pub mod function;
+pub mod getpath;
 pub mod import;
 mod intern;
 pub mod iter;

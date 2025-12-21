@@ -1,6 +1,6 @@
 use crate::{Py, PyResult, VirtualMachine, builtins::PyModule, convert::ToPyObject};
 
-pub(crate) use sys::{__module_def, DOC, MAXSIZE, MULTIARCH, UnraisableHookArgs};
+pub(crate) use sys::{__module_def, DOC, MAXSIZE, MULTIARCH, UnraisableHookArgsData};
 
 #[pymodule]
 mod sys {
@@ -15,19 +15,16 @@ mod sys {
         },
         convert::ToPyObject,
         frame::FrameRef,
-        function::{FuncArgs, OptionalArg, PosArgs},
+        function::{FuncArgs, KwArgs, OptionalArg, PosArgs},
         stdlib::{builtins, warnings::warn},
         types::PyStructSequence,
         version,
         vm::{Settings, VirtualMachine},
     };
     use num_traits::ToPrimitive;
-    #[cfg(windows)]
-    use std::os::windows::ffi::OsStrExt;
     use std::{
         env::{self, VarError},
         io::Read,
-        path,
         sync::atomic::Ordering,
     };
 
@@ -98,25 +95,20 @@ mod sys {
     const DLLHANDLE: usize = 0;
 
     #[pyattr]
-    const fn default_prefix(_vm: &VirtualMachine) -> &'static str {
-        // TODO: the windows one doesn't really make sense
-        if cfg!(windows) { "C:" } else { "/usr/local" }
+    fn prefix(vm: &VirtualMachine) -> String {
+        vm.state.config.paths.prefix.clone()
     }
     #[pyattr]
-    fn prefix(vm: &VirtualMachine) -> &'static str {
-        option_env!("RUSTPYTHON_PREFIX").unwrap_or_else(|| default_prefix(vm))
+    fn base_prefix(vm: &VirtualMachine) -> String {
+        vm.state.config.paths.base_prefix.clone()
     }
     #[pyattr]
-    fn base_prefix(vm: &VirtualMachine) -> &'static str {
-        option_env!("RUSTPYTHON_BASEPREFIX").unwrap_or_else(|| prefix(vm))
+    fn exec_prefix(vm: &VirtualMachine) -> String {
+        vm.state.config.paths.exec_prefix.clone()
     }
     #[pyattr]
-    fn exec_prefix(vm: &VirtualMachine) -> &'static str {
-        option_env!("RUSTPYTHON_BASEPREFIX").unwrap_or_else(|| prefix(vm))
-    }
-    #[pyattr]
-    fn base_exec_prefix(vm: &VirtualMachine) -> &'static str {
-        option_env!("RUSTPYTHON_BASEPREFIX").unwrap_or_else(|| exec_prefix(vm))
+    fn base_exec_prefix(vm: &VirtualMachine) -> String {
+        vm.state.config.paths.base_exec_prefix.clone()
     }
     #[pyattr]
     fn platlibdir(_vm: &VirtualMachine) -> &'static str {
@@ -128,6 +120,7 @@ mod sys {
     #[pyattr]
     fn argv(vm: &VirtualMachine) -> Vec<PyObjectRef> {
         vm.state
+            .config
             .settings
             .argv
             .iter()
@@ -164,58 +157,18 @@ mod sys {
     }
 
     #[pyattr]
-    fn _base_executable(vm: &VirtualMachine) -> PyObjectRef {
-        let ctx = &vm.ctx;
-        if let Ok(var) = env::var("__PYVENV_LAUNCHER__") {
-            ctx.new_str(var).into()
-        } else {
-            executable(vm)
-        }
+    fn _base_executable(vm: &VirtualMachine) -> String {
+        vm.state.config.paths.base_executable.clone()
     }
 
     #[pyattr]
     fn dont_write_bytecode(vm: &VirtualMachine) -> bool {
-        !vm.state.settings.write_bytecode
+        !vm.state.config.settings.write_bytecode
     }
 
     #[pyattr]
-    fn executable(vm: &VirtualMachine) -> PyObjectRef {
-        let ctx = &vm.ctx;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(exec_path) = env::args_os().next()
-                && let Ok(path) = which::which(exec_path)
-            {
-                return ctx
-                    .new_str(
-                        path.into_os_string()
-                            .into_string()
-                            .unwrap_or_else(|p| p.to_string_lossy().into_owned()),
-                    )
-                    .into();
-            }
-        }
-        if let Some(exec_path) = env::args().next() {
-            let path = path::Path::new(&exec_path);
-            if !path.exists() {
-                return ctx.new_str(ascii!("")).into();
-            }
-            if path.is_absolute() {
-                return ctx.new_str(exec_path).into();
-            }
-            if let Ok(dir) = env::current_dir()
-                && let Ok(dir) = dir.into_os_string().into_string()
-            {
-                return ctx
-                    .new_str(format!(
-                        "{}/{}",
-                        dir,
-                        exec_path.strip_prefix("./").unwrap_or(&exec_path)
-                    ))
-                    .into();
-            }
-        }
-        ctx.none()
+    fn executable(vm: &VirtualMachine) -> String {
+        vm.state.config.paths.executable.clone()
     }
 
     #[pyattr]
@@ -255,8 +208,9 @@ mod sys {
     #[pyattr]
     fn path(vm: &VirtualMachine) -> Vec<PyObjectRef> {
         vm.state
-            .settings
-            .path_list
+            .config
+            .paths
+            .module_search_paths
             .iter()
             .map(|path| vm.ctx.new_str(path.clone()).into())
             .collect()
@@ -293,7 +247,7 @@ mod sys {
     fn _xoptions(vm: &VirtualMachine) -> PyDictRef {
         let ctx = &vm.ctx;
         let xopts = ctx.new_dict();
-        for (key, value) in &vm.state.settings.xoptions {
+        for (key, value) in &vm.state.config.settings.xoptions {
             let value = value.as_ref().map_or_else(
                 || ctx.new_bool(true).into(),
                 |s| ctx.new_str(s.clone()).into(),
@@ -306,6 +260,7 @@ mod sys {
     #[pyattr]
     fn warnoptions(vm: &VirtualMachine) -> Vec<PyObjectRef> {
         vm.state
+            .config
             .settings
             .warnoptions
             .iter()
@@ -450,12 +405,12 @@ mod sys {
 
     #[pyattr]
     fn flags(vm: &VirtualMachine) -> PyTupleRef {
-        Flags::from_settings(&vm.state.settings).into_struct_sequence(vm)
+        PyFlags::from_data(FlagsData::from_settings(&vm.state.config.settings), vm)
     }
 
     #[pyattr]
     fn float_info(vm: &VirtualMachine) -> PyTupleRef {
-        PyFloatInfo::INFO.into_struct_sequence(vm)
+        PyFloatInfo::from_data(FloatInfoData::INFO, vm)
     }
 
     #[pyfunction]
@@ -551,12 +506,10 @@ mod sys {
 
     #[cfg(windows)]
     fn get_kernel32_version() -> std::io::Result<(u32, u32, u32)> {
+        use crate::common::windows::ToWideString;
         unsafe {
             // Create a wide string for "kernel32.dll"
-            let module_name: Vec<u16> = std::ffi::OsStr::new("kernel32.dll")
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
+            let module_name: Vec<u16> = std::ffi::OsStr::new("kernel32.dll").to_wide_with_nul();
             let h_kernel32 = GetModuleHandleW(module_name.as_ptr());
             if h_kernel32.is_null() {
                 return Err(std::io::Error::last_os_error());
@@ -593,10 +546,7 @@ mod sys {
             }
 
             // Prepare an empty sub-block string (L"") as required by VerQueryValueW
-            let sub_block: Vec<u16> = std::ffi::OsStr::new("")
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
+            let sub_block: Vec<u16> = std::ffi::OsStr::new("").to_wide_with_nul();
 
             let mut ffi_ptr: *mut VS_FIXEDFILEINFO = std::ptr::null_mut();
             let mut ffi_len: u32 = 0;
@@ -656,7 +606,7 @@ mod sys {
                 .map_err(|_| vm.new_os_error("service pack is not ASCII".to_owned()))?
         };
         let real_version = get_kernel32_version().map_err(|e| vm.new_os_error(e.to_string()))?;
-        Ok(WindowsVersion {
+        let winver = WindowsVersionData {
             major: real_version.0,
             minor: real_version.1,
             build: real_version.2,
@@ -667,11 +617,11 @@ mod sys {
             suite_mask: version.wSuiteMask,
             product_type: version.wProductType,
             platform_version: (real_version.0, real_version.1, real_version.2), // TODO Provide accurate version, like CPython impl
-        }
-        .into_struct_sequence(vm))
+        };
+        Ok(PyWindowsVersion::from_data(winver, vm))
     }
 
-    fn _unraisablehook(unraisable: UnraisableHookArgs, vm: &VirtualMachine) -> PyResult<()> {
+    fn _unraisablehook(unraisable: UnraisableHookArgsData, vm: &VirtualMachine) -> PyResult<()> {
         use super::PyStderr;
 
         let stderr = PyStderr(vm);
@@ -695,13 +645,21 @@ mod sys {
             writeln!(stderr, "{}:", unraisable.err_msg.str(vm)?);
         }
 
-        // TODO: print received unraisable.exc_traceback
-        let tb_module = vm.import("traceback", 0)?;
-        let print_stack = tb_module.get_attr("print_stack", vm)?;
-        print_stack.call((), vm)?;
+        // Print traceback (using actual exc_traceback, not current stack)
+        if !vm.is_none(&unraisable.exc_traceback) {
+            let tb_module = vm.import("traceback", 0)?;
+            let print_tb = tb_module.get_attr("print_tb", vm)?;
+            let stderr_obj = super::get_stderr(vm)?;
+            let kwargs: KwArgs = [("file".to_string(), stderr_obj)].into_iter().collect();
+            let _ = print_tb.call(
+                FuncArgs::new(vec![unraisable.exc_traceback.clone()], kwargs),
+                vm,
+            );
+        }
 
+        // Check exc_type
         if vm.is_none(unraisable.exc_type.as_object()) {
-            // TODO: early return, but with what error?
+            return Ok(());
         }
         assert!(
             unraisable
@@ -709,10 +667,28 @@ mod sys {
                 .fast_issubclass(vm.ctx.exceptions.base_exception_type)
         );
 
-        // TODO: print module name and qualname
+        // Print module name (if not builtins or __main__)
+        let module_name = unraisable.exc_type.__module__(vm);
+        if let Ok(module_str) = module_name.downcast::<PyStr>() {
+            let module = module_str.as_str();
+            if module != "builtins" && module != "__main__" {
+                write!(stderr, "{}.", module);
+            }
+        } else {
+            write!(stderr, "<unknown>.");
+        }
 
+        // Print qualname
+        let qualname = unraisable.exc_type.__qualname__(vm);
+        if let Ok(qualname_str) = qualname.downcast::<PyStr>() {
+            write!(stderr, "{}", qualname_str.as_str());
+        } else {
+            write!(stderr, "{}", unraisable.exc_type.name());
+        }
+
+        // Print exception value
         if !vm.is_none(&unraisable.exc_value) {
-            write!(stderr, "{}: ", unraisable.exc_type);
+            write!(stderr, ": ");
             if let Ok(str) = unraisable.exc_value.str(vm) {
                 write!(stderr, "{}", str.to_str().unwrap_or("<str with surrogate>"));
             } else {
@@ -720,14 +696,20 @@ mod sys {
             }
         }
         writeln!(stderr);
-        // TODO: call file.flush()
+
+        // Flush stderr
+        if let Ok(stderr_obj) = super::get_stderr(vm)
+            && let Ok(flush) = stderr_obj.get_attr("flush", vm)
+        {
+            let _ = flush.call((), vm);
+        }
 
         Ok(())
     }
 
     #[pyattr]
     #[pyfunction(name = "__unraisablehook__")]
-    fn unraisablehook(unraisable: UnraisableHookArgs, vm: &VirtualMachine) {
+    fn unraisablehook(unraisable: UnraisableHookArgsData, vm: &VirtualMachine) {
         if let Err(e) = _unraisablehook(unraisable, vm) {
             let stderr = super::PyStderr(vm);
             writeln!(
@@ -742,7 +724,7 @@ mod sys {
 
     #[pyattr]
     fn hash_info(vm: &VirtualMachine) -> PyTupleRef {
-        PyHashInfo::INFO.into_struct_sequence(vm)
+        PyHashInfo::from_data(HashInfoData::INFO, vm)
     }
 
     #[pyfunction]
@@ -752,7 +734,7 @@ mod sys {
 
     #[pyattr]
     fn int_info(vm: &VirtualMachine) -> PyTupleRef {
-        PyIntInfo::INFO.into_struct_sequence(vm)
+        PyIntInfo::from_data(IntInfoData::INFO, vm)
     }
 
     #[pyfunction]
@@ -762,7 +744,7 @@ mod sys {
 
     #[pyfunction]
     fn set_int_max_str_digits(maxdigits: usize, vm: &VirtualMachine) -> PyResult<()> {
-        let threshold = PyIntInfo::INFO.str_digits_check_threshold;
+        let threshold = IntInfoData::INFO.str_digits_check_threshold;
         if maxdigits == 0 || maxdigits >= threshold {
             vm.state.int_max_str_digits.store(maxdigits);
             Ok(())
@@ -812,12 +794,12 @@ mod sys {
     #[cfg(feature = "threading")]
     #[pyattr]
     fn thread_info(vm: &VirtualMachine) -> PyTupleRef {
-        PyThreadInfo::INFO.into_struct_sequence(vm)
+        PyThreadInfo::from_data(ThreadInfoData::INFO, vm)
     }
 
     #[pyattr]
     fn version_info(vm: &VirtualMachine) -> PyTupleRef {
-        VersionInfo::VERSION.into_struct_sequence(vm)
+        PyVersionInfo::from_data(VersionInfoData::VERSION, vm)
     }
 
     fn update_use_tracing(vm: &VirtualMachine) {
@@ -898,19 +880,22 @@ mod sys {
         Ok(())
     }
 
-    #[pyclass(no_attr, name = "asyncgen_hooks")]
-    #[derive(PyStructSequence)]
-    pub(super) struct PyAsyncgenHooks {
+    #[pystruct_sequence_data]
+    pub(super) struct AsyncgenHooksData {
         firstiter: PyObjectRef,
         finalizer: PyObjectRef,
     }
+
+    #[pyattr]
+    #[pystruct_sequence(name = "asyncgen_hooks", data = "AsyncgenHooksData")]
+    pub(super) struct PyAsyncgenHooks;
 
     #[pyclass(with(PyStructSequence))]
     impl PyAsyncgenHooks {}
 
     #[pyfunction]
-    fn get_asyncgen_hooks(vm: &VirtualMachine) -> PyAsyncgenHooks {
-        PyAsyncgenHooks {
+    fn get_asyncgen_hooks(vm: &VirtualMachine) -> AsyncgenHooksData {
+        AsyncgenHooksData {
             firstiter: crate::vm::thread::ASYNC_GEN_FIRSTITER
                 .with_borrow(Clone::clone)
                 .to_pyobject(vm),
@@ -923,9 +908,9 @@ mod sys {
     /// sys.flags
     ///
     /// Flags provided through command line arguments or environment vars.
-    #[pyclass(no_attr, name = "flags", module = "sys")]
-    #[derive(Debug, PyStructSequence)]
-    pub(super) struct Flags {
+    #[derive(Debug)]
+    #[pystruct_sequence_data]
+    pub(super) struct FlagsData {
         /// -d
         debug: u8,
         /// -i
@@ -964,8 +949,7 @@ mod sys {
         warn_default_encoding: u8,
     }
 
-    #[pyclass(with(PyStructSequence))]
-    impl Flags {
+    impl FlagsData {
         const fn from_settings(settings: &Settings) -> Self {
             Self {
                 debug: settings.debug,
@@ -988,7 +972,13 @@ mod sys {
                 warn_default_encoding: settings.warn_default_encoding as u8,
             }
         }
+    }
 
+    #[pystruct_sequence(name = "flags", module = "sys", data = "FlagsData", no_attr)]
+    pub(super) struct PyFlags;
+
+    #[pyclass(with(PyStructSequence))]
+    impl PyFlags {
         #[pyslot]
         fn slot_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Err(vm.new_type_error("cannot create 'sys.flags' instances"))
@@ -996,17 +986,15 @@ mod sys {
     }
 
     #[cfg(feature = "threading")]
-    #[pyclass(no_attr, name = "thread_info")]
-    #[derive(PyStructSequence)]
-    pub(super) struct PyThreadInfo {
+    #[pystruct_sequence_data]
+    pub(super) struct ThreadInfoData {
         name: Option<&'static str>,
         lock: Option<&'static str>,
         version: Option<&'static str>,
     }
 
     #[cfg(feature = "threading")]
-    #[pyclass(with(PyStructSequence))]
-    impl PyThreadInfo {
+    impl ThreadInfoData {
         const INFO: Self = Self {
             name: crate::stdlib::thread::_thread::PYTHREAD_NAME,
             // As I know, there's only way to use lock as "Mutex" in Rust
@@ -1016,9 +1004,16 @@ mod sys {
         };
     }
 
-    #[pyclass(no_attr, name = "float_info")]
-    #[derive(PyStructSequence)]
-    pub(super) struct PyFloatInfo {
+    #[cfg(feature = "threading")]
+    #[pystruct_sequence(name = "thread_info", data = "ThreadInfoData", no_attr)]
+    pub(super) struct PyThreadInfo;
+
+    #[cfg(feature = "threading")]
+    #[pyclass(with(PyStructSequence))]
+    impl PyThreadInfo {}
+
+    #[pystruct_sequence_data]
+    pub(super) struct FloatInfoData {
         max: f64,
         max_exp: i32,
         max_10_exp: i32,
@@ -1032,8 +1027,7 @@ mod sys {
         rounds: i32,
     }
 
-    #[pyclass(with(PyStructSequence))]
-    impl PyFloatInfo {
+    impl FloatInfoData {
         const INFO: Self = Self {
             max: f64::MAX,
             max_exp: f64::MAX_EXP,
@@ -1049,9 +1043,14 @@ mod sys {
         };
     }
 
-    #[pyclass(no_attr, name = "hash_info")]
-    #[derive(PyStructSequence)]
-    pub(super) struct PyHashInfo {
+    #[pystruct_sequence(name = "float_info", data = "FloatInfoData", no_attr)]
+    pub(super) struct PyFloatInfo;
+
+    #[pyclass(with(PyStructSequence))]
+    impl PyFloatInfo {}
+
+    #[pystruct_sequence_data]
+    pub(super) struct HashInfoData {
         width: usize,
         modulus: PyUHash,
         inf: PyHash,
@@ -1063,8 +1062,7 @@ mod sys {
         cutoff: usize,
     }
 
-    #[pyclass(with(PyStructSequence))]
-    impl PyHashInfo {
+    impl HashInfoData {
         const INFO: Self = {
             use rustpython_common::hash::*;
             Self {
@@ -1081,17 +1079,21 @@ mod sys {
         };
     }
 
-    #[pyclass(no_attr, name = "int_info")]
-    #[derive(PyStructSequence)]
-    pub(super) struct PyIntInfo {
+    #[pystruct_sequence(name = "hash_info", data = "HashInfoData", no_attr)]
+    pub(super) struct PyHashInfo;
+
+    #[pyclass(with(PyStructSequence))]
+    impl PyHashInfo {}
+
+    #[pystruct_sequence_data]
+    pub(super) struct IntInfoData {
         bits_per_digit: usize,
         sizeof_digit: usize,
         default_max_str_digits: usize,
         str_digits_check_threshold: usize,
     }
 
-    #[pyclass(with(PyStructSequence))]
-    impl PyIntInfo {
+    impl IntInfoData {
         const INFO: Self = Self {
             bits_per_digit: 30, //?
             sizeof_digit: std::mem::size_of::<u32>(),
@@ -1100,9 +1102,15 @@ mod sys {
         };
     }
 
-    #[pyclass(no_attr, name = "version_info")]
-    #[derive(Default, Debug, PyStructSequence)]
-    pub struct VersionInfo {
+    #[pystruct_sequence(name = "int_info", data = "IntInfoData", no_attr)]
+    pub(super) struct PyIntInfo;
+
+    #[pyclass(with(PyStructSequence))]
+    impl PyIntInfo {}
+
+    #[derive(Default, Debug)]
+    #[pystruct_sequence_data]
+    pub struct VersionInfoData {
         major: usize,
         minor: usize,
         micro: usize,
@@ -1110,8 +1118,7 @@ mod sys {
         serial: usize,
     }
 
-    #[pyclass(with(PyStructSequence))]
-    impl VersionInfo {
+    impl VersionInfoData {
         pub const VERSION: Self = Self {
             major: version::MAJOR,
             minor: version::MINOR,
@@ -1119,6 +1126,13 @@ mod sys {
             releaselevel: version::RELEASELEVEL,
             serial: version::SERIAL,
         };
+    }
+
+    #[pystruct_sequence(name = "version_info", data = "VersionInfoData", no_attr)]
+    pub struct PyVersionInfo;
+
+    #[pyclass(with(PyStructSequence))]
+    impl PyVersionInfo {
         #[pyslot]
         fn slot_new(
             _cls: crate::builtins::type_::PyTypeRef,
@@ -1130,9 +1144,9 @@ mod sys {
     }
 
     #[cfg(windows)]
-    #[pyclass(no_attr, name = "getwindowsversion")]
-    #[derive(Default, Debug, PyStructSequence)]
-    pub(super) struct WindowsVersion {
+    #[derive(Default, Debug)]
+    #[pystruct_sequence_data]
+    pub(super) struct WindowsVersionData {
         major: u32,
         minor: u32,
         build: u32,
@@ -1146,12 +1160,16 @@ mod sys {
     }
 
     #[cfg(windows)]
-    #[pyclass(with(PyStructSequence))]
-    impl WindowsVersion {}
+    #[pystruct_sequence(name = "getwindowsversion", data = "WindowsVersionData", no_attr)]
+    pub(super) struct PyWindowsVersion;
 
-    #[pyclass(no_attr, name = "UnraisableHookArgs")]
-    #[derive(Debug, PyStructSequence, TryIntoPyStructSequence)]
-    pub struct UnraisableHookArgs {
+    #[cfg(windows)]
+    #[pyclass(with(PyStructSequence))]
+    impl PyWindowsVersion {}
+
+    #[derive(Debug)]
+    #[pystruct_sequence_data(try_from_object)]
+    pub struct UnraisableHookArgsData {
         pub exc_type: PyTypeRef,
         pub exc_value: PyObjectRef,
         pub exc_traceback: PyObjectRef,
@@ -1159,8 +1177,11 @@ mod sys {
         pub object: PyObjectRef,
     }
 
+    #[pystruct_sequence(name = "UnraisableHookArgs", data = "UnraisableHookArgsData", no_attr)]
+    pub struct PyUnraisableHookArgs;
+
     #[pyclass(with(PyStructSequence))]
-    impl UnraisableHookArgs {}
+    impl PyUnraisableHookArgs {}
 }
 
 pub(crate) fn init_module(vm: &VirtualMachine, module: &Py<PyModule>, builtins: &Py<PyModule>) {

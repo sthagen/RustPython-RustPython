@@ -857,7 +857,6 @@ class ProcessTestCase(BaseTestCase):
             self.assertEqual(p.returncode, 0)
             self.assertEqual(stdout.strip(), b"fruit=orange")
 
-    @unittest.expectedFailureIfWindows("TODO: RUSTPYTHON, null byte is not checked")
     def test_invalid_cmd(self):
         # null character in the command name
         cmd = sys.executable + '\0'
@@ -1016,7 +1015,6 @@ class ProcessTestCase(BaseTestCase):
         self.assertEqual(stdout, None)
         self.assertEqual(stderr, None)
 
-    @unittest.expectedFailureIfWindows("TODO: RUSTPYTHON")
     def test_communicate_pipe_buf(self):
         # communicate() with writes larger than pipe_buf
         # This test will probably deadlock rather than fail, if
@@ -1337,7 +1335,6 @@ class ProcessTestCase(BaseTestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(read_line, expected)
 
-    @unittest.expectedFailureIfWindows("TODO: RUSTPYTHON")
     def test_bufsize_equal_one_text_mode(self):
         # line is flushed in text mode with bufsize=1.
         # we should get the full line in return
@@ -1773,8 +1770,7 @@ class RunFuncTestCase(BaseTestCase):
         res = subprocess.run(args)
         self.assertEqual(res.returncode, 57)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
+    @unittest.skipIf(mswindows, 'TODO: RUSTPYTHON; Flakey')
     @unittest.skipUnless(mswindows, "Maybe test trigger a leak on Ubuntu")
     def test_run_with_an_empty_env(self):
         # gh-105436: fix subprocess.run(..., env={}) broken on Windows
@@ -1835,8 +1831,6 @@ class RunFuncTestCase(BaseTestCase):
                         msg="TimeoutExpired was delayed! Bad traceback:\n```\n"
                         f"{stacks}```")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_encoding_warning(self):
         code = textwrap.dedent("""\
             from subprocess import *
@@ -1883,8 +1877,6 @@ class POSIXProcessTestCase(BaseTestCase):
                       self._nonexistent_dir)
         return desired_exception
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_exception_cwd(self):
         """Test error in the child raised in the parent for a bad cwd."""
         desired_exception = self._get_chdir_exception()
@@ -1900,8 +1892,6 @@ class POSIXProcessTestCase(BaseTestCase):
         else:
             self.fail("Expected OSError: %s" % desired_exception)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_exception_bad_executable(self):
         """Test error in the child raised in the parent for a bad executable."""
         desired_exception = self._get_chdir_exception()
@@ -1917,8 +1907,6 @@ class POSIXProcessTestCase(BaseTestCase):
         else:
             self.fail("Expected OSError: %s" % desired_exception)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_exception_bad_args_0(self):
         """Test error in the child raised in the parent for a bad args[0]."""
         desired_exception = self._get_chdir_exception()
@@ -3565,8 +3553,6 @@ class Win32ProcessTestCase(BaseTestCase):
                               close_fds=True)
         self.assertEqual(rc, 47)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_close_fds_with_stdio(self):
         import msvcrt
 
@@ -3649,8 +3635,6 @@ class Win32ProcessTestCase(BaseTestCase):
         with p:
             self.assertIn(b"physalis", p.stdout.read())
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_shell_encodings(self):
         # Run command through the shell (string)
         for enc in ['ansi', 'oem']:
@@ -3869,28 +3853,20 @@ class CommandsWithSpaces (BaseTestCase):
               "2 [%r, 'ab cd']" % self.fname
             )
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_shell_string_with_spaces(self):
         # call() function with string argument with spaces on Windows
         self.with_spaces('"%s" "%s" "%s"' % (sys.executable, self.fname,
                                              "ab cd"), shell=1)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_shell_sequence_with_spaces(self):
         # call() function with sequence argument with spaces on Windows
         self.with_spaces([sys.executable, self.fname, "ab cd"], shell=1)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_noshell_string_with_spaces(self):
         # call() function with string argument with spaces on Windows
         self.with_spaces('"%s" "%s" "%s"' % (sys.executable, self.fname,
                              "ab cd"))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_noshell_sequence_with_spaces(self):
         # call() function with sequence argument with spaces on Windows
         self.with_spaces([sys.executable, self.fname, "ab cd"])

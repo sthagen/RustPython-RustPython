@@ -7,7 +7,7 @@ mod _collections {
         atomic_func,
         builtins::{
             IterStatus::{Active, Exhausted},
-            PositionIterInternal, PyGenericAlias, PyInt, PyTypeRef,
+            PositionIterInternal, PyGenericAlias, PyInt, PyType, PyTypeRef,
         },
         common::lock::{PyMutex, PyRwLock, PyRwLockReadGuard, PyRwLockWriteGuard},
         function::{KwArgs, OptionalArg, PyComparisonValue},
@@ -422,8 +422,8 @@ mod _collections {
     impl MutObjectSequenceOp for PyDeque {
         type Inner = VecDeque<PyObjectRef>;
 
-        fn do_get(index: usize, inner: &Self::Inner) -> Option<&PyObjectRef> {
-            inner.get(index)
+        fn do_get(index: usize, inner: &Self::Inner) -> Option<&PyObject> {
+            inner.get(index).map(|r| r.as_ref())
         }
 
         fn do_lock(&self) -> impl std::ops::Deref<Target = Self::Inner> {
@@ -606,16 +606,16 @@ mod _collections {
         type Args = (DequeIterArgs, KwArgs);
 
         fn py_new(
-            cls: PyTypeRef,
+            _cls: &Py<PyType>,
             (DequeIterArgs { deque, index }, _kwargs): Self::Args,
-            vm: &VirtualMachine,
-        ) -> PyResult {
+            _vm: &VirtualMachine,
+        ) -> PyResult<Self> {
             let iter = Self::new(deque);
             if let OptionalArg::Present(index) = index {
                 let index = max(index, 0) as usize;
                 iter.internal.lock().position = index;
             }
-            iter.into_ref_with_type(vm, cls).map(Into::into)
+            Ok(iter)
         }
     }
 
@@ -678,17 +678,16 @@ mod _collections {
         type Args = (DequeIterArgs, KwArgs);
 
         fn py_new(
-            cls: PyTypeRef,
-
+            _cls: &Py<PyType>,
             (DequeIterArgs { deque, index }, _kwargs): Self::Args,
-            vm: &VirtualMachine,
-        ) -> PyResult {
+            _vm: &VirtualMachine,
+        ) -> PyResult<Self> {
             let iter = PyDeque::__reversed__(deque)?;
             if let OptionalArg::Present(index) = index {
                 let index = max(index, 0) as usize;
                 iter.internal.lock().position = index;
             }
-            iter.into_ref_with_type(vm, cls).map(Into::into)
+            Ok(iter)
         }
     }
 

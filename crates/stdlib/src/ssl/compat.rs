@@ -23,16 +23,20 @@ use rustls::server::ResolvesServerCert;
 use rustls::server::ServerConfig;
 use rustls::server::ServerConnection;
 use rustls::sign::CertifiedKey;
-use rustpython_vm::builtins::PyBaseExceptionRef;
+use rustpython_vm::builtins::{PyBaseException, PyBaseExceptionRef};
+use rustpython_vm::convert::IntoPyException;
 use rustpython_vm::function::ArgBytesLike;
-use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyResult, TryFromObject};
+use rustpython_vm::{AsObject, Py, PyObjectRef, PyPayload, PyResult, TryFromObject};
 use std::io::Read;
 use std::sync::{Arc, Once};
 
-// Import PySSLSocket and helper functions from parent module
-use super::_ssl::{
-    PySSLCertVerificationError, PySSLError, PySSLSocket, create_ssl_eof_error,
-    create_ssl_want_read_error, create_ssl_want_write_error, create_ssl_zero_return_error,
+// Import PySSLSocket from parent module
+use super::_ssl::PySSLSocket;
+
+// Import error types and helper functions from error module
+use super::error::{
+    PySSLCertVerificationError, PySSLError, create_ssl_eof_error, create_ssl_want_read_error,
+    create_ssl_want_write_error, create_ssl_zero_return_error,
 };
 
 // SSL Verification Flags
@@ -221,7 +225,11 @@ pub(super) fn create_ssl_cert_verification_error(
     let msg =
         format!("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: {verify_message}",);
 
-    let exc = vm.new_exception_msg(PySSLCertVerificationError::class(&vm.ctx).to_owned(), msg);
+    let exc = vm.new_os_subtype_error(
+        PySSLCertVerificationError::class(&vm.ctx).to_owned(),
+        None,
+        msg,
+    );
 
     // Set verify_code and verify_message attributes
     // Ignore errors as they're extremely rare (e.g., out of memory)
@@ -247,7 +255,7 @@ pub(super) fn create_ssl_cert_verification_error(
         vm,
     )?;
 
-    Ok(exc)
+    Ok(exc.upcast())
 }
 
 /// Unified TLS connection type (client or server)
@@ -473,24 +481,27 @@ impl SslError {
     /// If attribute setting fails (extremely rare), returns the exception without attributes
     pub(super) fn create_ssl_error_with_reason(
         vm: &VirtualMachine,
-        library: &str,
+        library: Option<&str>,
         reason: &str,
         message: impl Into<String>,
     ) -> PyBaseExceptionRef {
-        let exc = vm.new_exception_msg(PySSLError::class(&vm.ctx).to_owned(), message.into());
+        let msg = message.into();
+        // SSLError args should be (errno, message) format
+        // FIXME: Use 1 as generic SSL error code
+        let exc = vm.new_os_subtype_error(PySSLError::class(&vm.ctx).to_owned(), Some(1), msg);
 
         // Set library and reason attributes
         // Ignore errors as they're extremely rare (e.g., out of memory)
-        let _ = exc.as_object().set_attr(
-            "library",
-            vm.ctx.new_str(library).as_object().to_owned(),
-            vm,
-        );
+        let library_obj = match library {
+            Some(lib) => vm.ctx.new_str(lib).as_object().to_owned(),
+            None => vm.ctx.none(),
+        };
+        let _ = exc.as_object().set_attr("library", library_obj, vm);
         let _ =
             exc.as_object()
                 .set_attr("reason", vm.ctx.new_str(reason).as_object().to_owned(), vm);
 
-        exc
+        exc.upcast()
     }
 
     /// Create SSLError with library and reason from ssl_data codes
@@ -524,27 +535,38 @@ impl SslError {
             .unwrap_or("UNKNOWN");
 
         // Delegate to create_ssl_error_with_reason for actual exception creation
-        Self::create_ssl_error_with_reason(vm, lib_str, reason_str, format!("[SSL] {reason_str}"))
+        Self::create_ssl_error_with_reason(
+            vm,
+            Some(lib_str),
+            reason_str,
+            format!("[SSL] {reason_str}"),
+        )
     }
 
     /// Convert to Python exception
     pub fn into_py_err(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
         match self {
-            SslError::WantRead => create_ssl_want_read_error(vm),
-            SslError::WantWrite => create_ssl_want_write_error(vm),
-            SslError::Timeout(msg) => timeout_error_msg(vm, msg),
-            SslError::Syscall(msg) => vm.new_os_error(msg),
-            SslError::Ssl(msg) => vm.new_exception_msg(
-                PySSLError::class(&vm.ctx).to_owned(),
-                format!("SSL error: {msg}"),
-            ),
-            SslError::ZeroReturn => create_ssl_zero_return_error(vm),
-            SslError::Eof => create_ssl_eof_error(vm),
+            SslError::WantRead => create_ssl_want_read_error(vm).upcast(),
+            SslError::WantWrite => create_ssl_want_write_error(vm).upcast(),
+            SslError::Timeout(msg) => timeout_error_msg(vm, msg).upcast(),
+            SslError::Syscall(msg) => {
+                // Create SSLError with library=None for syscall errors during SSL operations
+                Self::create_ssl_error_with_reason(vm, None, &msg, msg.clone())
+            }
+            SslError::Ssl(msg) => vm
+                .new_os_subtype_error(
+                    PySSLError::class(&vm.ctx).to_owned(),
+                    None,
+                    format!("SSL error: {msg}"),
+                )
+                .upcast(),
+            SslError::ZeroReturn => create_ssl_zero_return_error(vm).upcast(),
+            SslError::Eof => create_ssl_eof_error(vm).upcast(),
             SslError::CertVerification(cert_err) => {
                 // Use the proper cert verification error creator
                 create_ssl_cert_verification_error(vm, &cert_err).expect("unlikely to happen")
             }
-            SslError::Io(err) => vm.new_os_error(format!("I/O error: {err}")),
+            SslError::Io(err) => err.into_pyexception(vm),
             SslError::SniCallbackRestart => {
                 // This should be handled at PySSLSocket level
                 unreachable!("SniCallbackRestart should not reach Python layer")
@@ -965,7 +987,7 @@ pub(super) fn create_client_config(options: ClientConfigOptions) -> Result<Clien
 }
 
 /// Helper function - check if error is BlockingIOError
-pub(super) fn is_blocking_io_error(err: &PyBaseExceptionRef, vm: &VirtualMachine) -> bool {
+pub(super) fn is_blocking_io_error(err: &Py<PyBaseException>, vm: &VirtualMachine) -> bool {
     err.fast_isinstance(vm.ctx.exceptions.blocking_io_error)
 }
 
@@ -1375,8 +1397,21 @@ pub(super) fn ssl_read(
             return Ok(n);
         }
 
-        // No plaintext available and cannot read more TLS records
+        // No plaintext available and rustls doesn't want to read more TLS records
         if !needs_more_tls {
+            // Check if connection needs to write data first (e.g., TLS key update, renegotiation)
+            // This mirrors the handshake logic which checks both wants_read() and wants_write()
+            if conn.wants_write() && !is_bio {
+                // Flush pending TLS data before continuing
+                let tls_data = ssl_write_tls_records(conn)?;
+                if !tls_data.is_empty() {
+                    socket.sock_send(tls_data, vm).map_err(SslError::Py)?;
+                }
+                // After flushing, rustls may want to read again - continue loop
+                continue;
+            }
+
+            // BIO mode: check for EOF
             if is_bio && let Some(bio_obj) = socket.incoming_bio() {
                 let is_eof = bio_obj
                     .get_attr("eof", vm)
@@ -1513,6 +1548,29 @@ fn ssl_read_tls_records(
     Ok(())
 }
 
+/// Check if an exception is a connection closed error
+/// In SSL context, these errors indicate unexpected connection termination without proper TLS shutdown
+fn is_connection_closed_error(exc: &Py<PyBaseException>, vm: &VirtualMachine) -> bool {
+    use rustpython_vm::stdlib::errno::errors;
+
+    // Check for ConnectionAbortedError, ConnectionResetError (Python exception types)
+    if exc.fast_isinstance(vm.ctx.exceptions.connection_aborted_error)
+        || exc.fast_isinstance(vm.ctx.exceptions.connection_reset_error)
+    {
+        return true;
+    }
+
+    // Also check OSError with specific errno values (ECONNABORTED, ECONNRESET)
+    if exc.fast_isinstance(vm.ctx.exceptions.os_error)
+        && let Ok(errno) = exc.as_object().get_attr("errno", vm)
+        && let Ok(errno_int) = errno.try_int(vm)
+        && let Ok(errno_val) = errno_int.try_to_primitive::<i32>(vm)
+    {
+        return errno_val == errors::ECONNABORTED || errno_val == errors::ECONNRESET;
+    }
+    false
+}
+
 /// Ensure TLS data is available for reading
 /// Returns the number of bytes read from the socket
 fn ssl_ensure_data_available(
@@ -1548,7 +1606,27 @@ fn ssl_ensure_data_available(
             // else: non-blocking socket (timeout=0) or blocking socket (timeout=None) - skip select
         }
 
-        let data = socket.sock_recv(2048, vm).map_err(SslError::Py)?;
+        let data = match socket.sock_recv(2048, vm) {
+            Ok(data) => data,
+            Err(e) => {
+                // Before returning socket error, check if rustls already has a queued TLS alert
+                // This mirrors CPython/OpenSSL behavior: SSL errors take precedence over socket errors
+                // On Windows, TCP RST may arrive before we read the alert, but rustls may have
+                // already received and buffered the alert from a previous read
+                if let Err(rustls_err) = conn.process_new_packets() {
+                    return Err(SslError::from_rustls(rustls_err));
+                }
+                // In SSL context, connection closed errors (ECONNABORTED, ECONNRESET) indicate
+                // unexpected connection termination - the peer closed without proper TLS shutdown.
+                // This is semantically equivalent to "EOF occurred in violation of protocol"
+                // because no close_notify alert was received.
+                // On Windows, TCP RST can arrive before we read the TLS alert, causing these errors.
+                if is_connection_closed_error(&e, vm) {
+                    return Err(SslError::Eof);
+                }
+                return Err(SslError::Py(e));
+            }
+        };
 
         // Get the size of received data
         let bytes_read = data

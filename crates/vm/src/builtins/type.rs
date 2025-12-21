@@ -22,17 +22,17 @@ use crate::{
     },
     convert::ToPyResult,
     function::{FuncArgs, KwArgs, OptionalArg, PyMethodDef, PySetterValue},
-    identifier,
     object::{Traverse, TraverseFn},
     protocol::{PyIterReturn, PyMappingMethods, PyNumberMethods, PySequenceMethods},
     types::{
         AsNumber, Callable, Constructor, GetAttr, PyTypeFlags, PyTypeSlots, Representable, SetAttr,
+        TypeDataRef, TypeDataRefMut, TypeDataSlot,
     },
 };
 use indexmap::{IndexMap, map::Entry};
 use itertools::Itertools;
 use num_traits::ToPrimitive;
-use std::{borrow::Borrow, collections::HashSet, ops::Deref, pin::Pin, ptr::NonNull};
+use std::{any::Any, borrow::Borrow, collections::HashSet, ops::Deref, pin::Pin, ptr::NonNull};
 
 #[pyclass(module = false, name = "type", traverse = "manual")]
 pub struct PyType {
@@ -66,6 +66,7 @@ pub struct HeapTypeExt {
     pub slots: Option<PyRef<PyTuple<PyStrRef>>>,
     pub sequence_methods: PySequenceMethods,
     pub mapping_methods: PyMappingMethods,
+    pub type_data: PyRwLock<Option<TypeDataSlot>>,
 }
 
 pub struct PointerSlot<T>(NonNull<T>);
@@ -174,12 +175,12 @@ fn is_subtype_with_mro(a_mro: &[PyTypeRef], a: &Py<PyType>, b: &Py<PyType>) -> b
 impl PyType {
     pub fn new_simple_heap(
         name: &str,
-        base: &PyTypeRef,
+        base: &Py<PyType>,
         ctx: &Context,
     ) -> Result<PyRef<Self>, String> {
         Self::new_heap(
             name,
-            vec![base.clone()],
+            vec![base.to_owned()],
             Default::default(),
             Default::default(),
             Self::static_type().to_owned(),
@@ -190,12 +191,15 @@ impl PyType {
         name: &str,
         bases: Vec<PyRef<Self>>,
         attrs: PyAttributes,
-        slots: PyTypeSlots,
+        mut slots: PyTypeSlots,
         metaclass: PyRef<Self>,
         ctx: &Context,
     ) -> Result<PyRef<Self>, String> {
         // TODO: ensure clean slot name
         // assert_eq!(slots.name.borrow(), "");
+
+        // Set HEAPTYPE flag for heap-allocated types
+        slots.flags |= PyTypeFlags::HEAPTYPE;
 
         let name = ctx.new_str(name);
         let heaptype_ext = HeapTypeExt {
@@ -204,6 +208,7 @@ impl PyType {
             slots: None,
             sequence_methods: PySequenceMethods::default(),
             mapping_methods: PyMappingMethods::default(),
+            type_data: PyRwLock::new(None),
         };
         let base = bases[0].clone();
 
@@ -307,7 +312,12 @@ impl PyType {
     ) -> Result<PyRef<Self>, String> {
         let mro = Self::resolve_mro(&bases)?;
 
-        if base.slots.flags.has_feature(PyTypeFlags::HAS_DICT) {
+        // Inherit HAS_DICT from any base in MRO that has it
+        // (not just the first base, as any base with __dict__ means subclass needs it too)
+        if mro
+            .iter()
+            .any(|b| b.slots.flags.has_feature(PyTypeFlags::HAS_DICT))
+        {
             slots.flags |= PyTypeFlags::HAS_DICT
         }
 
@@ -394,6 +404,8 @@ impl PyType {
             None,
         );
 
+        Self::set_new(&new_type.slots, &new_type.base);
+
         let weakref_type = super::PyWeak::static_type();
         for base in new_type.bases.read().iter() {
             base.subclasses.write().push(
@@ -413,9 +425,6 @@ impl PyType {
 
         for cls in self.mro.read().iter() {
             for &name in cls.attributes.read().keys() {
-                if name == identifier!(ctx, __new__) {
-                    continue;
-                }
                 if name.as_bytes().starts_with(b"__") && name.as_bytes().ends_with(b"__") {
                     slot_name_set.insert(name);
                 }
@@ -428,6 +437,20 @@ impl PyType {
         }
         for attr_name in slot_name_set {
             self.update_slot::<true>(attr_name, ctx);
+        }
+
+        Self::set_new(&self.slots, &self.base);
+    }
+
+    fn set_new(slots: &PyTypeSlots, base: &Option<PyTypeRef>) {
+        if slots.flags.contains(PyTypeFlags::DISALLOW_INSTANTIATION) {
+            slots.new.store(None)
+        } else if slots.new.load().is_none() {
+            slots.new.store(
+                base.as_ref()
+                    .map(|base| base.slots.new.load())
+                    .unwrap_or(None),
+            )
         }
     }
 
@@ -558,6 +581,50 @@ impl PyType {
             |name| name.rsplit_once('.').map_or(name, |(_, name)| name).into(),
             |ext| PyRwLockReadGuard::map(ext.name.read(), |name| name.as_str()).into(),
         )
+    }
+
+    // Type Data Slot API - CPython's PyObject_GetTypeData equivalent
+
+    /// Initialize type data for this type. Can only be called once.
+    /// Returns an error if the type is not a heap type or if data is already initialized.
+    pub fn init_type_data<T: Any + Send + Sync + 'static>(&self, data: T) -> Result<(), String> {
+        let ext = self
+            .heaptype_ext
+            .as_ref()
+            .ok_or_else(|| "Cannot set type data on non-heap types".to_string())?;
+
+        let mut type_data = ext.type_data.write();
+        if type_data.is_some() {
+            return Err("Type data already initialized".to_string());
+        }
+        *type_data = Some(TypeDataSlot::new(data));
+        Ok(())
+    }
+
+    /// Get a read guard to the type data.
+    /// Returns None if the type is not a heap type, has no data, or the data type doesn't match.
+    pub fn get_type_data<T: Any + 'static>(&self) -> Option<TypeDataRef<'_, T>> {
+        self.heaptype_ext
+            .as_ref()
+            .and_then(|ext| TypeDataRef::try_new(ext.type_data.read()))
+    }
+
+    /// Get a write guard to the type data.
+    /// Returns None if the type is not a heap type, has no data, or the data type doesn't match.
+    pub fn get_type_data_mut<T: Any + 'static>(&self) -> Option<TypeDataRefMut<'_, T>> {
+        self.heaptype_ext
+            .as_ref()
+            .and_then(|ext| TypeDataRefMut::try_new(ext.type_data.write()))
+    }
+
+    /// Check if this type has type data of the given type.
+    pub fn has_type_data<T: Any + 'static>(&self) -> bool {
+        self.heaptype_ext.as_ref().is_some_and(|ext| {
+            ext.type_data
+                .read()
+                .as_ref()
+                .is_some_and(|slot| slot.get::<T>().is_some())
+        })
     }
 }
 
@@ -986,7 +1053,7 @@ impl PyType {
 impl Constructor for PyType {
     type Args = FuncArgs;
 
-    fn py_new(metatype: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+    fn slot_new(metatype: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         vm_trace!("type.__new__ {:?}", args);
 
         let is_type_type = metatype.is(vm.ctx.types.type_type);
@@ -1163,6 +1230,7 @@ impl Constructor for PyType {
                 slots: heaptype_slots.clone(),
                 sequence_methods: PySequenceMethods::default(),
                 mapping_methods: PyMappingMethods::default(),
+                type_data: PyRwLock::new(None),
             };
             (slots, heaptype_ext)
         };
@@ -1180,29 +1248,30 @@ impl Constructor for PyType {
 
         if let Some(ref slots) = heaptype_slots {
             let mut offset = base_member_count;
+            let class_name = typ.name().to_string();
             for member in slots.as_slice() {
+                // Apply name mangling for private attributes (__x -> _ClassName__x)
+                let mangled_name = mangle_name(&class_name, member.as_str());
                 let member_def = PyMemberDef {
-                    name: member.to_string(),
+                    name: mangled_name.clone(),
                     kind: MemberKind::ObjectEx,
                     getter: MemberGetter::Offset(offset),
                     setter: MemberSetter::Offset(offset),
                     doc: None,
                 };
+                let attr_name = vm.ctx.intern_str(mangled_name.as_str());
                 let member_descriptor: PyRef<PyMemberDescriptor> =
                     vm.ctx.new_pyref(PyMemberDescriptor {
                         common: PyDescriptorOwned {
                             typ: typ.clone(),
-                            name: vm.ctx.intern_str(member.as_str()),
+                            name: attr_name,
                             qualname: PyRwLock::new(None),
                         },
                         member: member_def,
                     });
-
-                let attr_name = vm.ctx.intern_str(member.to_string());
-                if !typ.has_attr(attr_name) {
-                    typ.set_attr(attr_name, member_descriptor.into());
-                }
-
+                // __slots__ attributes always get a member descriptor
+                // (this overrides any inherited attribute from MRO)
+                typ.set_attr(attr_name, member_descriptor.into());
                 offset += 1;
             }
         }
@@ -1224,7 +1293,10 @@ impl Constructor for PyType {
         // since they inherit it from type
 
         // Add __dict__ descriptor after type creation to ensure correct __objclass__
-        if !base_is_type {
+        // Only add if:
+        // 1. base is not type (type subclasses inherit __dict__ from type)
+        // 2. the class has HAS_DICT flag (i.e., __slots__ was not defined or __dict__ is in __slots__)
+        if !base_is_type && typ.slots.flags.has_feature(PyTypeFlags::HAS_DICT) {
             let __dict__ = identifier!(vm, __dict__);
             if !typ.attributes.read().contains_key(&__dict__) {
                 unsafe {
@@ -1233,6 +1305,16 @@ impl Constructor for PyType {
                             .new_getset("__dict__", &typ, subtype_get_dict, subtype_set_dict);
                     typ.attributes.write().insert(__dict__, descriptor.into());
                 }
+            }
+        }
+
+        // Set __doc__ to None if not already present in the type's dict
+        // This matches CPython's behavior in type_dict_set_doc (typeobject.c)
+        // which ensures every type has a __doc__ entry in its dict
+        {
+            let __doc__ = identifier!(vm, __doc__);
+            if !typ.attributes.read().contains_key(&__doc__) {
+                typ.attributes.write().insert(__doc__, vm.ctx.none());
             }
         }
 
@@ -1267,6 +1349,10 @@ impl Constructor for PyType {
         };
 
         Ok(typ.into())
+    }
+
+    fn py_new(_cls: &Py<PyType>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
+        unimplemented!("use slot_new")
     }
 }
 
@@ -1359,8 +1445,8 @@ impl GetAttr for PyType {
 
 #[pyclass]
 impl Py<PyType> {
-    #[pygetset(name = "__mro__")]
-    fn get_mro(&self) -> PyTuple {
+    #[pygetset]
+    fn __mro__(&self) -> PyTuple {
         let elements: Vec<PyObjectRef> = self.mro_map_collect(|x| x.as_object().to_owned());
         PyTuple::new_unchecked(elements.into_boxed_slice())
     }
@@ -1377,8 +1463,9 @@ impl Py<PyType> {
             return Ok(vm.ctx.new_str(doc_str).into());
         }
 
-        // Check if there's a __doc__ in the type's dict
-        if let Some(doc_attr) = self.get_attr(vm.ctx.intern_str("__doc__")) {
+        // Check if there's a __doc__ in THIS type's dict only (not MRO)
+        // CPython returns None if __doc__ is not in the type's own dict
+        if let Some(doc_attr) = self.get_direct_attr(vm.ctx.intern_str("__doc__")) {
             // If it's a descriptor, call its __get__ method
             let descr_get = doc_attr
                 .class()
@@ -1492,15 +1579,28 @@ impl Callable for PyType {
     type Args = FuncArgs;
     fn call(zelf: &Py<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         vm_trace!("type_call: {:?}", zelf);
-        let obj = call_slot_new(zelf.to_owned(), zelf.to_owned(), args.clone(), vm)?;
 
-        if (zelf.is(vm.ctx.types.type_type) && args.kwargs.is_empty()) || !obj.fast_isinstance(zelf)
-        {
+        if zelf.is(vm.ctx.types.type_type) {
+            let num_args = args.args.len();
+            if num_args == 1 && args.kwargs.is_empty() {
+                return Ok(args.args[0].obj_type());
+            }
+            if num_args != 3 {
+                return Err(vm.new_type_error("type() takes 1 or 3 arguments".to_owned()));
+            }
+        }
+
+        let obj = if let Some(slot_new) = zelf.slots.new.load() {
+            slot_new(zelf.to_owned(), args.clone(), vm)?
+        } else {
+            return Err(vm.new_type_error(format!("cannot create '{}' instances", zelf.slots.name)));
+        };
+
+        if !obj.class().fast_issubclass(zelf) {
             return Ok(obj);
         }
 
-        let init = obj.class().mro_find_map(|cls| cls.slots.init.load());
-        if let Some(init_method) = init {
+        if let Some(init_method) = obj.class().slots.init.load() {
             init_method(obj.clone(), args, vm)?;
         }
         Ok(obj)
@@ -1629,6 +1729,40 @@ pub(crate) fn call_slot_new(
     args: FuncArgs,
     vm: &VirtualMachine,
 ) -> PyResult {
+    // Check DISALLOW_INSTANTIATION flag on subtype (the type being instantiated)
+    if subtype
+        .slots
+        .flags
+        .has_feature(PyTypeFlags::DISALLOW_INSTANTIATION)
+    {
+        return Err(vm.new_type_error(format!("cannot create '{}' instances", subtype.slot_name())));
+    }
+
+    // "is not safe" check (tp_new_wrapper logic)
+    // Check that the user doesn't do something silly and unsafe like
+    // object.__new__(dict). To do this, we check that the most derived base
+    // that's not a heap type is this type.
+    let mut staticbase = subtype.clone();
+    while staticbase.slots.flags.has_feature(PyTypeFlags::HEAPTYPE) {
+        if let Some(base) = staticbase.base.as_ref() {
+            staticbase = base.clone();
+        } else {
+            break;
+        }
+    }
+
+    // Check if staticbase's tp_new differs from typ's tp_new
+    let typ_new = typ.slots.new.load();
+    let staticbase_new = staticbase.slots.new.load();
+    if typ_new.map(|f| f as usize) != staticbase_new.map(|f| f as usize) {
+        return Err(vm.new_type_error(format!(
+            "{}.__new__({}) is not safe, use {}.__new__()",
+            typ.slot_name(),
+            subtype.slot_name(),
+            staticbase.slot_name()
+        )));
+    }
+
     let slot_new = typ
         .deref()
         .mro_find_map(|cls| cls.slots.new.load())
@@ -1773,6 +1907,18 @@ fn best_base<'a>(bases: &'a [PyTypeRef], vm: &VirtualMachine) -> PyResult<&'a Py
 
     debug_assert!(base.is_some());
     Ok(base.unwrap())
+}
+
+/// Apply Python name mangling for private attributes.
+/// `__x` becomes `_ClassName__x` if inside a class.
+fn mangle_name(class_name: &str, name: &str) -> String {
+    // Only mangle names starting with __ and not ending with __
+    if !name.starts_with("__") || name.ends_with("__") || name.contains('.') {
+        return name.to_string();
+    }
+    // Strip leading underscores from class name
+    let class_name = class_name.trim_start_matches('_');
+    format!("_{}{}", class_name, name)
 }
 
 #[cfg(test)]

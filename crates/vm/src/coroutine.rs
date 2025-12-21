@@ -1,7 +1,8 @@
 use crate::{
-    AsObject, PyObject, PyObjectRef, PyResult, VirtualMachine,
+    AsObject, Py, PyObject, PyObjectRef, PyResult, VirtualMachine,
     builtins::{PyBaseExceptionRef, PyStrRef},
     common::lock::PyMutex,
+    exceptions::types::PyBaseException,
     frame::{ExecutionResult, FrameRef},
     protocol::PyIterReturn,
 };
@@ -32,7 +33,7 @@ pub struct Coro {
     // code
     // _weakreflist
     name: PyMutex<PyStrRef>,
-    // qualname
+    qualname: PyMutex<PyStrRef>,
     exception: PyMutex<Option<PyBaseExceptionRef>>, // exc_state
 }
 
@@ -48,13 +49,14 @@ fn gen_name(jen: &PyObject, vm: &VirtualMachine) -> &'static str {
 }
 
 impl Coro {
-    pub fn new(frame: FrameRef, name: PyStrRef) -> Self {
+    pub fn new(frame: FrameRef, name: PyStrRef, qualname: PyStrRef) -> Self {
         Self {
             frame,
             closed: AtomicCell::new(false),
             running: AtomicCell::new(false),
             exception: PyMutex::default(),
             name: PyMutex::new(name),
+            qualname: PyMutex::new(qualname),
         }
     }
 
@@ -188,6 +190,14 @@ impl Coro {
         *self.name.lock() = name;
     }
 
+    pub fn qualname(&self) -> PyStrRef {
+        self.qualname.lock().clone()
+    }
+
+    pub fn set_qualname(&self, qualname: PyStrRef) {
+        *self.qualname.lock() = qualname;
+    }
+
     pub fn repr(&self, jen: &PyObject, id: usize, vm: &VirtualMachine) -> String {
         format!(
             "<{} object {} at {:#x}>",
@@ -198,6 +208,6 @@ impl Coro {
     }
 }
 
-pub fn is_gen_exit(exc: &PyBaseExceptionRef, vm: &VirtualMachine) -> bool {
+pub fn is_gen_exit(exc: &Py<PyBaseException>, vm: &VirtualMachine) -> bool {
     exc.fast_isinstance(vm.ctx.exceptions.generator_exit)
 }

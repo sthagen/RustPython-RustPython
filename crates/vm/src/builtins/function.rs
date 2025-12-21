@@ -3,7 +3,7 @@ mod jit;
 
 use super::{
     PyAsyncGen, PyCode, PyCoroutine, PyDictRef, PyGenerator, PyStr, PyStrRef, PyTuple, PyTupleRef,
-    PyType, PyTypeRef,
+    PyType,
 };
 #[cfg(feature = "jit")]
 use crate::common::lock::OnceCell;
@@ -425,9 +425,15 @@ impl Py<PyFunction> {
         let is_gen = code.flags.contains(bytecode::CodeFlags::IS_GENERATOR);
         let is_coro = code.flags.contains(bytecode::CodeFlags::IS_COROUTINE);
         match (is_gen, is_coro) {
-            (true, false) => Ok(PyGenerator::new(frame, self.__name__()).into_pyobject(vm)),
-            (false, true) => Ok(PyCoroutine::new(frame, self.__name__()).into_pyobject(vm)),
-            (true, true) => Ok(PyAsyncGen::new(frame, self.__name__()).into_pyobject(vm)),
+            (true, false) => {
+                Ok(PyGenerator::new(frame, self.__name__(), self.__qualname__()).into_pyobject(vm))
+            }
+            (false, true) => {
+                Ok(PyCoroutine::new(frame, self.__name__(), self.__qualname__()).into_pyobject(vm))
+            }
+            (true, true) => {
+                Ok(PyAsyncGen::new(frame, self.__name__(), self.__qualname__()).into_pyobject(vm))
+            }
             (false, false) => vm.run_frame(frame),
         }
     }
@@ -623,12 +629,11 @@ impl GetDescriptor for PyFunction {
         vm: &VirtualMachine,
     ) -> PyResult {
         let (_zelf, obj) = Self::_unwrap(&zelf, obj, vm)?;
-        let obj = if vm.is_none(&obj) && !Self::_cls_is(&cls, obj.class()) {
+        Ok(if vm.is_none(&obj) && !Self::_cls_is(&cls, obj.class()) {
             zelf
         } else {
             PyBoundMethod::new(obj, zelf).into_ref(&vm.ctx).into()
-        };
-        Ok(obj)
+        })
     }
 }
 
@@ -670,7 +675,7 @@ pub struct PyFunctionNewArgs {
 impl Constructor for PyFunction {
     type Args = PyFunctionNewArgs;
 
-    fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
+    fn py_new(_cls: &Py<PyType>, args: Self::Args, vm: &VirtualMachine) -> PyResult<Self> {
         // Handle closure - must be a tuple of cells
         let closure = if let Some(closure_tuple) = args.closure.into_option() {
             // Check that closure length matches code's free variables
@@ -710,7 +715,7 @@ impl Constructor for PyFunction {
             func.defaults_and_kwdefaults.lock().1 = Some(kwdefaults);
         }
 
-        func.into_ref_with_type(vm, cls).map(Into::into)
+        Ok(func)
     }
 }
 
@@ -771,13 +776,11 @@ impl Constructor for PyBoundMethod {
     type Args = PyBoundMethodNewArgs;
 
     fn py_new(
-        cls: PyTypeRef,
+        _cls: &Py<PyType>,
         Self::Args { function, object }: Self::Args,
-        vm: &VirtualMachine,
-    ) -> PyResult {
-        Self::new(object, function)
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+        _vm: &VirtualMachine,
+    ) -> PyResult<Self> {
+        Ok(Self::new(object, function))
     }
 }
 
@@ -897,10 +900,8 @@ impl PyPayload for PyCell {
 impl Constructor for PyCell {
     type Args = OptionalArg;
 
-    fn py_new(cls: PyTypeRef, value: Self::Args, vm: &VirtualMachine) -> PyResult {
-        Self::new(value.into_option())
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+    fn py_new(_cls: &Py<PyType>, value: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(Self::new(value.into_option()))
     }
 }
 

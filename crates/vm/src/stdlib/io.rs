@@ -14,31 +14,63 @@ use crate::{
     builtins::{PyBaseExceptionRef, PyModule},
     common::os::ErrorExt,
     convert::{IntoPyException, ToPyException},
+    exceptions::{OSErrorBuilder, ToOSErrorBuilder},
 };
 pub use _io::{OpenArgs, io_open as open};
 
-impl ToPyException for std::io::Error {
-    fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+impl ToOSErrorBuilder for std::io::Error {
+    fn to_os_error_builder(&self, vm: &VirtualMachine) -> OSErrorBuilder {
         let errno = self.posix_errno();
+        #[cfg(windows)]
+        let msg = 'msg: {
+            // On Windows, use C runtime's strerror for POSIX errno values
+            // For Windows-specific error codes, fall back to FormatMessage
+
+            // UCRT's strerror returns "Unknown error" for invalid errno values
+            // Windows UCRT defines errno values 1-42 plus some more up to ~127
+            const MAX_POSIX_ERRNO: i32 = 127;
+            if errno > 0 && errno <= MAX_POSIX_ERRNO {
+                let ptr = unsafe { libc::strerror(errno) };
+                if !ptr.is_null() {
+                    let s = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy();
+                    if !s.starts_with("Unknown error") {
+                        break 'msg s.into_owned();
+                    }
+                }
+            }
+            self.to_string()
+        };
+        #[cfg(unix)]
+        let msg = {
+            let ptr = unsafe { libc::strerror(errno) };
+            if !ptr.is_null() {
+                unsafe { std::ffi::CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                self.to_string()
+            }
+        };
+        #[cfg(not(any(windows, unix)))]
         let msg = self.to_string();
-        #[allow(clippy::let_and_return)]
-        let exc = vm.new_errno_error(errno, msg);
+
+        #[allow(unused_mut)]
+        let mut builder = OSErrorBuilder::with_errno(errno, msg, vm);
 
         #[cfg(windows)]
-        {
-            use crate::object::AsObject;
-            let winerror = if let Some(winerror) = self.raw_os_error() {
-                vm.new_pyobj(winerror)
-            } else {
-                vm.ctx.none()
-            };
-
-            // FIXME: manual setup winerror due to lack of OSError.__init__ support
-            exc.as_object()
-                .set_attr("winerror", vm.new_pyobj(winerror), vm)
-                .unwrap();
+        if let Some(winerror) = self.raw_os_error() {
+            use crate::convert::ToPyObject;
+            builder = builder.winerror(winerror.to_pyobject(vm));
         }
-        exc
+
+        builder
+    }
+}
+
+impl ToPyException for std::io::Error {
+    fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+        let builder = self.to_os_error_builder(vm);
+        builder.into_pyexception(vm)
     }
 }
 
@@ -56,9 +88,7 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
     #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
     fileio::extend_module(vm, &module).unwrap();
 
-    let unsupported_operation = _io::UNSUPPORTED_OPERATION
-        .get_or_init(|| _io::make_unsupportedop(ctx))
-        .clone();
+    let unsupported_operation = _io::unsupported_operation().to_owned();
     extend_module!(vm, &module, {
         "UnsupportedOperation" => unsupported_operation,
         "BlockingIOError" => ctx.exceptions.blocking_io_error.to_owned(),
@@ -119,7 +149,7 @@ mod _io {
         AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
         TryFromBorrowedObject, TryFromObject,
         builtins::{
-            PyBaseExceptionRef, PyByteArray, PyBytes, PyBytesRef, PyIntRef, PyMemoryView, PyStr,
+            PyBaseExceptionRef, PyBool, PyByteArray, PyBytes, PyBytesRef, PyMemoryView, PyStr,
             PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef, PyUtf8StrRef,
         },
         class::StaticType,
@@ -144,7 +174,7 @@ mod _io {
     };
     use bstr::ByteSlice;
     use crossbeam_utils::atomic::AtomicCell;
-    use malachite_bigint::{BigInt, BigUint};
+    use malachite_bigint::BigInt;
     use num_traits::ToPrimitive;
     use std::{
         borrow::Cow,
@@ -173,7 +203,8 @@ mod _io {
     }
 
     pub fn new_unsupported_operation(vm: &VirtualMachine, msg: String) -> PyBaseExceptionRef {
-        vm.new_exception_msg(UNSUPPORTED_OPERATION.get().unwrap().clone(), msg)
+        vm.new_os_subtype_error(unsupported_operation().to_owned(), None, msg)
+            .upcast()
     }
 
     fn _unsupported<T>(vm: &VirtualMachine, zelf: &PyObject, operation: &str) -> PyResult<T> {
@@ -394,7 +425,7 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "_IOBase")]
-    #[derive(Debug, PyPayload)]
+    #[derive(Debug, Default, PyPayload)]
     pub struct _IOBase;
 
     #[pyclass(with(IterNext, Iterable, Destructor), flags(BASETYPE, HAS_DICT))]
@@ -425,7 +456,7 @@ mod _io {
         }
 
         #[pyattr]
-        fn __closed(ctx: &Context) -> PyIntRef {
+        fn __closed(ctx: &Context) -> PyRef<PyBool> {
             ctx.new_bool(false)
         }
 
@@ -608,7 +639,9 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "_RawIOBase", base = _IOBase)]
-    pub(super) struct _RawIOBase;
+    #[derive(Debug, Default)]
+    #[repr(transparent)]
+    pub(super) struct _RawIOBase(_IOBase);
 
     #[pyclass(flags(BASETYPE, HAS_DICT))]
     impl _RawIOBase {
@@ -666,7 +699,9 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "_BufferedIOBase", base = _IOBase)]
-    struct _BufferedIOBase;
+    #[derive(Debug, Default)]
+    #[repr(transparent)]
+    struct _BufferedIOBase(_IOBase);
 
     #[pyclass(flags(BASETYPE))]
     impl _BufferedIOBase {
@@ -729,8 +764,9 @@ mod _io {
     // TextIO Base has no public constructor
     #[pyattr]
     #[pyclass(name = "_TextIOBase", base = _IOBase)]
-    #[derive(Debug, PyPayload)]
-    struct _TextIOBase;
+    #[derive(Debug, Default)]
+    #[repr(transparent)]
+    struct _TextIOBase(_IOBase);
 
     #[pyclass(flags(BASETYPE))]
     impl _TextIOBase {
@@ -1048,10 +1084,13 @@ mod _io {
                             self.write_end = buffer_size;
                             // TODO: BlockingIOError(errno, msg, written)
                             // written += self.buffer.len();
-                            return Err(vm.new_exception_msg(
-                                vm.ctx.exceptions.blocking_io_error.to_owned(),
-                                "write could not complete without blocking".to_owned(),
-                            ));
+                            return Err(vm
+                                .new_os_subtype_error(
+                                    vm.ctx.exceptions.blocking_io_error.to_owned(),
+                                    None,
+                                    "write could not complete without blocking".to_owned(),
+                                )
+                                .upcast());
                         } else {
                             break;
                         }
@@ -1729,8 +1768,9 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "BufferedReader", base = _BufferedIOBase)]
-    #[derive(Debug, Default, PyPayload)]
+    #[derive(Debug, Default)]
     struct BufferedReader {
+        _base: _BufferedIOBase,
         data: PyThreadMutex<BufferedData>,
     }
 
@@ -1753,10 +1793,22 @@ mod _io {
     }
 
     #[pyclass(
-        with(Constructor, BufferedMixin, BufferedReadable),
+        with(Constructor, BufferedMixin, BufferedReadable, Destructor),
         flags(BASETYPE, HAS_DICT)
     )]
     impl BufferedReader {}
+
+    impl Destructor for BufferedReader {
+        fn slot_del(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
+            let _ = vm.call_method(zelf, "close", ());
+            Ok(())
+        }
+
+        #[cold]
+        fn del(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<()> {
+            unreachable!("slot_del is implemented")
+        }
+    }
 
     impl DefaultConstructor for BufferedReader {}
 
@@ -1786,8 +1838,9 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "BufferedWriter", base = _BufferedIOBase)]
-    #[derive(Debug, Default, PyPayload)]
+    #[derive(Debug, Default)]
     struct BufferedWriter {
+        _base: _BufferedIOBase,
         data: PyThreadMutex<BufferedData>,
     }
 
@@ -1810,17 +1863,30 @@ mod _io {
     }
 
     #[pyclass(
-        with(Constructor, BufferedMixin, BufferedWritable),
+        with(Constructor, BufferedMixin, BufferedWritable, Destructor),
         flags(BASETYPE, HAS_DICT)
     )]
     impl BufferedWriter {}
+
+    impl Destructor for BufferedWriter {
+        fn slot_del(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
+            let _ = vm.call_method(zelf, "close", ());
+            Ok(())
+        }
+
+        #[cold]
+        fn del(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<()> {
+            unreachable!("slot_del is implemented")
+        }
+    }
 
     impl DefaultConstructor for BufferedWriter {}
 
     #[pyattr]
     #[pyclass(name = "BufferedRandom", base = _BufferedIOBase)]
-    #[derive(Debug, Default, PyPayload)]
+    #[derive(Debug, Default)]
     struct BufferedRandom {
+        _base: _BufferedIOBase,
         data: PyThreadMutex<BufferedData>,
     }
 
@@ -1852,17 +1918,36 @@ mod _io {
     }
 
     #[pyclass(
-        with(Constructor, BufferedMixin, BufferedReadable, BufferedWritable),
+        with(
+            Constructor,
+            BufferedMixin,
+            BufferedReadable,
+            BufferedWritable,
+            Destructor
+        ),
         flags(BASETYPE, HAS_DICT)
     )]
     impl BufferedRandom {}
+
+    impl Destructor for BufferedRandom {
+        fn slot_del(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
+            let _ = vm.call_method(zelf, "close", ());
+            Ok(())
+        }
+
+        #[cold]
+        fn del(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<()> {
+            unreachable!("slot_del is implemented")
+        }
+    }
 
     impl DefaultConstructor for BufferedRandom {}
 
     #[pyattr]
     #[pyclass(name = "BufferedRWPair", base = _BufferedIOBase)]
-    #[derive(Debug, Default, PyPayload)]
+    #[derive(Debug, Default)]
     struct BufferedRWPair {
+        _base: _BufferedIOBase,
         read: BufferedReader,
         write: BufferedWriter,
     }
@@ -1900,7 +1985,13 @@ mod _io {
     }
 
     #[pyclass(
-        with(Constructor, Initializer, BufferedReadable, BufferedWritable),
+        with(
+            Constructor,
+            Initializer,
+            BufferedReadable,
+            BufferedWritable,
+            Destructor
+        ),
         flags(BASETYPE, HAS_DICT)
     )]
     impl BufferedRWPair {
@@ -1939,6 +2030,18 @@ mod _io {
             let write_res = self.write.close_strict(vm).map(drop);
             let read_res = self.read.close_strict(vm);
             exception_chain(write_res, read_res)
+        }
+    }
+
+    impl Destructor for BufferedRWPair {
+        fn slot_del(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
+            let _ = vm.call_method(zelf, "close", ());
+            Ok(())
+        }
+
+        #[cold]
+        fn del(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<()> {
+            unreachable!("slot_del is implemented")
         }
     }
 
@@ -2244,7 +2347,7 @@ mod _io {
             set_field!(self.chars_to_skip, CHARS_TO_SKIP_OFF);
             set_field!(self.need_eof as u8, NEED_EOF_OFF);
             set_field!(self.bytes_to_skip, BYTES_TO_SKIP_OFF);
-            BigUint::from_bytes_le(&buf).into()
+            BigInt::from_signed_bytes_le(&buf)
         }
 
         fn set_decoder_state(&self, decoder: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
@@ -2275,8 +2378,9 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "TextIOWrapper", base = _TextIOBase)]
-    #[derive(Debug, Default, PyPayload)]
+    #[derive(Debug, Default)]
     struct TextIOWrapper {
+        _base: _TextIOBase,
         data: PyThreadMutex<Option<TextIOData>>,
     }
 
@@ -2294,7 +2398,9 @@ mod _io {
             *data = None;
 
             let encoding = match args.encoding {
-                None if vm.state.settings.utf8_mode > 0 => identifier_utf8!(vm, utf_8).to_owned(),
+                None if vm.state.config.settings.utf8_mode > 0 => {
+                    identifier_utf8!(vm, utf_8).to_owned()
+                }
                 Some(enc) if enc.as_str() != "locale" => enc,
                 _ => {
                     // None without utf8_mode or "locale" encoding
@@ -2413,7 +2519,10 @@ mod _io {
         vm.call_method(&textio.buffer, "flush", ())
     }
 
-    #[pyclass(with(Constructor, Initializer), flags(BASETYPE))]
+    #[pyclass(
+        with(Constructor, Initializer, Destructor, Iterable, IterNext),
+        flags(BASETYPE)
+    )]
     impl TextIOWrapper {
         #[pymethod]
         fn reconfigure(&self, args: TextIOWrapperArgs, vm: &VirtualMachine) -> PyResult<()> {
@@ -2728,7 +2837,7 @@ mod _io {
                     n_decoded += n;
                     cookie.bytes_to_feed += 1;
                     let (dec_buffer, dec_flags) = decoder_getstate()?;
-                    if dec_buffer.is_empty() && n_decoded.chars < num_to_skip.chars {
+                    if dec_buffer.is_empty() && n_decoded.chars <= num_to_skip.chars {
                         cookie.start_pos += cookie.bytes_to_feed as Offset;
                         num_to_skip -= n_decoded;
                         cookie.dec_flags = dec_flags;
@@ -2898,6 +3007,25 @@ mod _io {
         fn flush(&self, vm: &VirtualMachine) -> PyResult {
             let mut textio = self.lock(vm)?;
             flush_inner(&mut textio, vm)
+        }
+
+        #[pymethod]
+        fn truncate(
+            zelf: PyRef<Self>,
+            pos: OptionalArg<PyObjectRef>,
+            vm: &VirtualMachine,
+        ) -> PyResult {
+            // Implementation follows _pyio.py TextIOWrapper.truncate
+            let mut textio = zelf.lock(vm)?;
+            flush_inner(&mut textio, vm)?;
+            let buffer = textio.buffer.clone();
+            drop(textio);
+
+            let pos = match pos.into_option() {
+                Some(p) => p,
+                None => vm.call_method(zelf.as_object(), "tell", ())?,
+            };
+            vm.call_method(&buffer, "truncate", (pos,))
         }
 
         #[pymethod]
@@ -3257,6 +3385,57 @@ mod _io {
         }
     }
 
+    impl Destructor for TextIOWrapper {
+        fn slot_del(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
+            let _ = vm.call_method(zelf, "close", ());
+            Ok(())
+        }
+
+        #[cold]
+        fn del(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<()> {
+            unreachable!("slot_del is implemented")
+        }
+    }
+
+    impl Iterable for TextIOWrapper {
+        fn slot_iter(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+            check_closed(&zelf, vm)?;
+            Ok(zelf)
+        }
+
+        fn iter(_zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyResult {
+            unreachable!("slot_iter is implemented")
+        }
+    }
+
+    impl IterNext for TextIOWrapper {
+        fn slot_iternext(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+            // Set telling = false during iteration (matches CPython behavior)
+            let textio_ref: PyRef<TextIOWrapper> =
+                zelf.downcast_ref::<TextIOWrapper>().unwrap().to_owned();
+            {
+                let mut textio = textio_ref.lock(vm)?;
+                textio.telling = false;
+            }
+
+            let line = vm.call_method(zelf, "readline", ())?;
+
+            if !line.clone().try_to_bool(vm)? {
+                // Restore telling on StopIteration
+                let mut textio = textio_ref.lock(vm)?;
+                textio.snapshot = None;
+                textio.telling = textio.seekable;
+                Ok(PyIterReturn::StopIteration(None))
+            } else {
+                Ok(PyIterReturn::Return(line))
+            }
+        }
+
+        fn next(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<PyIterReturn> {
+            unreachable!("slot_iternext is implemented")
+        }
+    }
+
     #[pyattr]
     #[pyclass(name)]
     #[derive(Debug, PyPayload, Default)]
@@ -3482,8 +3661,9 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "StringIO", base = _TextIOBase)]
-    #[derive(Debug, PyPayload)]
+    #[derive(Debug)]
     struct StringIO {
+        _base: _TextIOBase,
         buffer: PyRwLock<BufferedIO>,
         closed: AtomicCell<bool>,
     }
@@ -3504,20 +3684,19 @@ mod _io {
 
         #[allow(unused_variables)]
         fn py_new(
-            cls: PyTypeRef,
+            _cls: &Py<PyType>,
             Self::Args { object, newline }: Self::Args,
-            vm: &VirtualMachine,
-        ) -> PyResult {
+            _vm: &VirtualMachine,
+        ) -> PyResult<Self> {
             let raw_bytes = object
                 .flatten()
                 .map_or_else(Vec::new, |v| v.as_bytes().to_vec());
 
-            Self {
+            Ok(Self {
+                _base: Default::default(),
                 buffer: PyRwLock::new(BufferedIO::new(Cursor::new(raw_bytes))),
                 closed: AtomicCell::new(false),
-            }
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+            })
         }
     }
 
@@ -3627,8 +3806,9 @@ mod _io {
 
     #[pyattr]
     #[pyclass(name = "BytesIO", base = _BufferedIOBase)]
-    #[derive(Debug, PyPayload)]
+    #[derive(Debug)]
     struct BytesIO {
+        _base: _BufferedIOBase,
         buffer: PyRwLock<BufferedIO>,
         closed: AtomicCell<bool>,
         exports: AtomicCell<usize>,
@@ -3637,18 +3817,17 @@ mod _io {
     impl Constructor for BytesIO {
         type Args = OptionalArg<Option<PyBytesRef>>;
 
-        fn py_new(cls: PyTypeRef, object: Self::Args, vm: &VirtualMachine) -> PyResult {
+        fn py_new(_cls: &Py<PyType>, object: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
             let raw_bytes = object
                 .flatten()
                 .map_or_else(Vec::new, |input| input.as_bytes().to_vec());
 
-            Self {
+            Ok(Self {
+                _base: Default::default(),
                 buffer: PyRwLock::new(BufferedIO::new(Cursor::new(raw_bytes))),
                 closed: AtomicCell::new(false),
                 exports: AtomicCell::new(0),
-            }
-            .into_ref_with_type(vm, cls)
-            .map(Into::into)
+            })
         }
     }
 
@@ -3991,8 +4170,7 @@ mod _io {
         // check file descriptor validity
         #[cfg(unix)]
         if let Ok(crate::ospath::OsPathOrFd::Fd(fd)) = file.clone().try_into_value(vm) {
-            nix::fcntl::fcntl(fd, nix::fcntl::F_GETFD)
-                .map_err(|_| crate::stdlib::os::errno_err(vm))?;
+            nix::fcntl::fcntl(fd, nix::fcntl::F_GETFD).map_err(|_| vm.new_last_errno_error())?;
         }
 
         // Construct a FileIO (subclass of RawIOBase)
@@ -4070,11 +4248,7 @@ mod _io {
         }
     }
 
-    rustpython_common::static_cell! {
-        pub(super) static UNSUPPORTED_OPERATION: PyTypeRef;
-    }
-
-    pub(super) fn make_unsupportedop(ctx: &Context) -> PyTypeRef {
+    fn create_unsupported_operation(ctx: &Context) -> PyTypeRef {
         use crate::types::PyTypeSlots;
         PyType::new_heap(
             "UnsupportedOperation",
@@ -4088,6 +4262,13 @@ mod _io {
             ctx,
         )
         .unwrap()
+    }
+
+    pub fn unsupported_operation() -> &'static Py<PyType> {
+        rustpython_common::static_cell! {
+            static CELL: PyTypeRef;
+        }
+        CELL.get_or_init(|| create_unsupported_operation(Context::genesis()))
     }
 
     #[pyfunction]
@@ -4148,14 +4329,16 @@ mod _io {
 mod fileio {
     use super::{_io::*, Offset};
     use crate::{
-        AsObject, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
+        AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
+        VirtualMachine,
         builtins::{PyBaseExceptionRef, PyUtf8Str, PyUtf8StrRef},
         common::crt_fd,
         convert::{IntoPyException, ToPyException},
+        exceptions::OSErrorBuilder,
         function::{ArgBytesLike, ArgMemoryBuffer, OptionalArg, OptionalOption},
-        ospath::{IOErrorBuilder, OsPath, OsPathOrFd},
+        ospath::{OsPath, OsPathOrFd},
         stdlib::os,
-        types::{Constructor, DefaultConstructor, Initializer, Representable},
+        types::{Constructor, DefaultConstructor, Destructor, Initializer, Representable},
     };
     use crossbeam_utils::atomic::AtomicCell;
     use std::io::{Read, Write};
@@ -4263,8 +4446,9 @@ mod fileio {
 
     #[pyattr]
     #[pyclass(module = "io", name, base = _RawIOBase)]
-    #[derive(Debug, PyPayload)]
+    #[derive(Debug)]
     pub(super) struct FileIO {
+        _base: _RawIOBase,
         fd: AtomicCell<i32>,
         closefd: AtomicCell<bool>,
         mode: AtomicCell<Mode>,
@@ -4286,6 +4470,7 @@ mod fileio {
     impl Default for FileIO {
         fn default() -> Self {
             Self {
+                _base: Default::default(),
                 fd: AtomicCell::new(-1),
                 closefd: AtomicCell::new(true),
                 mode: AtomicCell::new(Mode::empty()),
@@ -4340,7 +4525,7 @@ mod fileio {
                     }
                     (fd, None)
                 } else {
-                    let path = OsPath::try_from_object(vm, name.clone())?;
+                    let path = OsPath::try_from_fspath(name.clone(), vm)?;
                     #[cfg(any(unix, target_os = "wasi"))]
                     let fd = crt_fd::open(&path.clone().into_cstring(vm)?, flags, 0o666);
                     #[cfg(windows)]
@@ -4348,7 +4533,7 @@ mod fileio {
                     let filename = OsPathOrFd::Path(path);
                     match fd {
                         Ok(fd) => (fd.into_raw(), Some(filename)),
-                        Err(e) => return Err(IOErrorBuilder::with_filename(&e, filename, vm)),
+                        Err(e) => return Err(OSErrorBuilder::with_filename(&e, filename, vm)),
                     }
                 }
             };
@@ -4363,7 +4548,7 @@ mod fileio {
             #[cfg(windows)]
             {
                 if let Err(err) = fd_fstat {
-                    return Err(IOErrorBuilder::with_filename(&err, filename, vm));
+                    return Err(OSErrorBuilder::with_filename(&err, filename, vm));
                 }
             }
             #[cfg(any(unix, target_os = "wasi"))]
@@ -4372,12 +4557,12 @@ mod fileio {
                     Ok(status) => {
                         if (status.st_mode & libc::S_IFMT) == libc::S_IFDIR {
                             let err = std::io::Error::from_raw_os_error(libc::EISDIR);
-                            return Err(IOErrorBuilder::with_filename(&err, filename, vm));
+                            return Err(OSErrorBuilder::with_filename(&err, filename, vm));
                         }
                     }
                     Err(err) => {
                         if err.raw_os_error() == Some(libc::EBADF) {
-                            return Err(IOErrorBuilder::with_filename(&err, filename, vm));
+                            return Err(OSErrorBuilder::with_filename(&err, filename, vm));
                         }
                     }
                 }
@@ -4415,7 +4600,7 @@ mod fileio {
     }
 
     #[pyclass(
-        with(Constructor, Initializer, Representable),
+        with(Constructor, Initializer, Representable, Destructor),
         flags(BASETYPE, HAS_DICT)
     )]
     impl FileIO {
@@ -4629,6 +4814,18 @@ mod fileio {
         #[pymethod]
         fn __reduce__(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
             Err(vm.new_type_error(format!("cannot pickle '{}' object", zelf.class().name())))
+        }
+    }
+
+    impl Destructor for FileIO {
+        fn slot_del(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
+            let _ = vm.call_method(zelf, "close", ());
+            Ok(())
+        }
+
+        #[cold]
+        fn del(_zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<()> {
+            unreachable!("slot_del is implemented")
         }
     }
 }

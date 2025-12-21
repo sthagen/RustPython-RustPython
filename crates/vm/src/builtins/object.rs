@@ -32,7 +32,7 @@ impl Constructor for PyBaseObject {
     type Args = FuncArgs;
 
     // = object_new
-    fn py_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
+    fn slot_new(cls: PyTypeRef, args: Self::Args, vm: &VirtualMachine) -> PyResult {
         if !args.args.is_empty() || !args.kwargs.is_empty() {
             // Check if type's __new__ != object.__new__
             let tp_new = cls.get_attr(identifier!(vm, __new__));
@@ -66,10 +66,16 @@ impl Constructor for PyBaseObject {
         }
 
         // more or less __new__ operator
-        let dict = if cls.is(vm.ctx.types.object_type) {
-            None
-        } else {
+        // Only create dict if the class has HAS_DICT flag (i.e., __slots__ was not defined
+        // or __dict__ is in __slots__)
+        let dict = if cls
+            .slots
+            .flags
+            .has_feature(crate::types::PyTypeFlags::HAS_DICT)
+        {
             Some(vm.ctx.new_dict())
+        } else {
+            None
         };
 
         // Ensure that all abstract methods are implemented before instantiating instance.
@@ -102,6 +108,10 @@ impl Constructor for PyBaseObject {
         }
 
         Ok(crate::PyRef::new_ref(Self, cls, dict).into())
+    }
+
+    fn py_new(_cls: &Py<PyType>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
+        unimplemented!("use slot_new")
     }
 }
 
@@ -440,8 +450,8 @@ impl PyBaseObject {
         Ok(())
     }
 
-    #[pygetset(name = "__class__")]
-    fn get_class(obj: PyObjectRef) -> PyTypeRef {
+    #[pygetset]
+    fn __class__(obj: PyObjectRef) -> PyTypeRef {
         obj.class().to_owned()
     }
 

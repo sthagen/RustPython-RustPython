@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
@@ -38,6 +38,15 @@ jobs:
         run: |
           echo "Running cargo fmt --all on PR #${{ github.event.pull_request.number }}"
           cargo fmt --all
+
+      - name: Install ruff
+        uses: astral-sh/ruff-action@57714a7c8a2e59f32539362ba31877a1957dded1 # v3.5.1
+        with:
+          version: "0.14.9"
+          args: "--version"
+
+      - run: ruff format
+      - run: ruff check --select I --fix
 
       - name: Configure git
         run: |
