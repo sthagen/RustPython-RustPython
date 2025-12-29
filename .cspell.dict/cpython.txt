@@ -1,6 +1,7 @@
 argtypes
 asdl
 asname
+attro
 augassign
 badcert
 badsyntax
@@ -48,7 +49,9 @@ posonlyarg
 posonlyargs
 prec
 preinitialized
+pythonw
 PYTHREAD_NAME
+releasebuffer
 SA_ONSTACK
 SOABI
 stackdepth
@@ -65,6 +68,11 @@ unparse
 unparser
 VARKEYWORDS
 varkwarg
+venvlauncher
+venvlaunchert
+venvw
+venvwlauncher
+venvwlaunchert
 wbits
 weakreflist
 webpki
