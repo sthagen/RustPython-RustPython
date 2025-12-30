@@ -199,7 +199,7 @@ quote = "1.0.38"
 radium = "1.1.1"
 rand = "0.9"
 rand_core = { version = "0.9", features = ["os_rng"] }
-rustix = { version = "1.0", features = ["event"] }
+rustix = { version = "1.1", features = ["event"] }
 rustyline = "17.0.1"
 serde = { version = "1.0.225", default-features = false }
 schannel = "0.1.28"
@@ -232,6 +232,9 @@ unsafe_op_in_unsafe_fn = "deny"
 elided_lifetimes_in_paths = "warn"
 
 [workspace.lints.clippy]
+# alloc_instead_of_core = "warn"
+# std_instead_of_alloc = "warn"
+# std_instead_of_core = "warn"
 perf = "warn"
 style = "warn"
 complexity = "warn"

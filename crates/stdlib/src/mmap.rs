@@ -21,11 +21,11 @@ mod mmap {
         sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp},
         types::{AsBuffer, AsMapping, AsSequence, Constructor, Representable},
     };
+    use core::ops::{Deref, DerefMut};
     use crossbeam_utils::atomic::AtomicCell;
     use memmap2::{Mmap, MmapMut, MmapOptions};
     use num_traits::Signed;
     use std::io::{self, Write};
-    use std::ops::{Deref, DerefMut};
 
     #[cfg(unix)]
     use nix::{sys::stat::fstat, unistd};
@@ -651,9 +651,10 @@ mod mmap {
 
     impl AsBuffer for PyMmap {
         fn as_buffer(zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<PyBuffer> {
+            let readonly = matches!(zelf.access, AccessMode::Read);
             let buf = PyBuffer::new(
                 zelf.to_owned().into(),
-                BufferDescriptor::simple(zelf.__len__(), true),
+                BufferDescriptor::simple(zelf.__len__(), readonly),
                 &BUFFER_METHODS,
             );
 
@@ -1056,7 +1057,7 @@ mod mmap {
                 // 3. Replace the old mmap
 
                 let old_size = self.size.load();
-                let copy_size = std::cmp::min(old_size, newsize);
+                let copy_size = core::cmp::min(old_size, newsize);
 
                 // Create new anonymous mmap
                 let mut new_mmap_opts = MmapOptions::new();

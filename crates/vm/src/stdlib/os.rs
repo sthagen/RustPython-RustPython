@@ -171,15 +171,10 @@ pub(super) mod _os {
         utils::ToCString,
         vm::VirtualMachine,
     };
+    use core::time::Duration;
     use crossbeam_utils::atomic::AtomicCell;
     use itertools::Itertools;
-    use std::{
-        env, fs,
-        fs::OpenOptions,
-        io,
-        path::PathBuf,
-        time::{Duration, SystemTime},
-    };
+    use std::{env, fs, fs::OpenOptions, io, path::PathBuf, time::SystemTime};
 
     const OPEN_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
     pub(crate) const MKDIR_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
@@ -201,6 +196,15 @@ pub(super) mod _os {
     pub(crate) const W_OK: u8 = 1 << 1;
     #[pyattr]
     pub(crate) const X_OK: u8 = 1 << 0;
+
+    // ST_RDONLY and ST_NOSUID flags for statvfs
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[pyattr]
+    const ST_RDONLY: libc::c_ulong = libc::ST_RDONLY;
+
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[pyattr]
+    const ST_NOSUID: libc::c_ulong = libc::ST_NOSUID;
 
     #[pyfunction]
     fn close(fileno: crt_fd::Owned) -> io::Result<()> {
@@ -509,7 +513,7 @@ pub(super) mod _os {
                 22,
                 format!(
                     "Invalid argument: {}",
-                    std::str::from_utf8(key).unwrap_or("<bytes encoding failure>")
+                    core::str::from_utf8(key).unwrap_or("<bytes encoding failure>")
                 ),
             );
 
@@ -1042,12 +1046,12 @@ pub(super) mod _os {
         dir_fd: DirFd<'_, { STAT_DIR_FD as usize }>,
         follow_symlinks: FollowSymlinks,
     ) -> io::Result<Option<StatStruct>> {
-        let mut stat = std::mem::MaybeUninit::uninit();
+        let mut stat = core::mem::MaybeUninit::uninit();
         let ret = match file {
             OsPathOrFd::Path(path) => {
                 use rustpython_common::os::ffi::OsStrExt;
                 let path = path.as_ref().as_os_str().as_bytes();
-                let path = match std::ffi::CString::new(path) {
+                let path = match alloc::ffi::CString::new(path) {
                     Ok(x) => x,
                     Err(_) => return Ok(None),
                 };
@@ -1209,7 +1213,7 @@ pub(super) mod _os {
             use std::os::windows::io::AsRawHandle;
             use windows_sys::Win32::Storage::FileSystem;
             let handle = crt_fd::as_handle(fd).map_err(|e| e.into_pyexception(vm))?;
-            let mut distance_to_move: [i32; 2] = std::mem::transmute(position);
+            let mut distance_to_move: [i32; 2] = core::mem::transmute(position);
             let ret = FileSystem::SetFilePointer(
                 handle.as_raw_handle(),
                 distance_to_move[0],
@@ -1220,7 +1224,7 @@ pub(super) mod _os {
                 -1
             } else {
                 distance_to_move[0] = ret as _;
-                std::mem::transmute::<[i32; 2], i64>(distance_to_move)
+                core::mem::transmute::<[i32; 2], i64>(distance_to_move)
             }
         };
         if res < 0 {
@@ -1402,7 +1406,7 @@ pub(super) mod _os {
                 .map_err(|err| OSErrorBuilder::with_filename(&err, path.clone(), vm))?;
 
             let ret = unsafe {
-                FileSystem::SetFileTime(f.as_raw_handle() as _, std::ptr::null(), &acc, &modif)
+                FileSystem::SetFileTime(f.as_raw_handle() as _, core::ptr::null(), &acc, &modif)
             };
 
             if ret == 0 {
@@ -1523,9 +1527,9 @@ pub(super) mod _os {
     #[pyfunction]
     fn copy_file_range(args: CopyFileRangeArgs<'_>, vm: &VirtualMachine) -> PyResult<usize> {
         #[allow(clippy::unnecessary_option_map_or_else)]
-        let p_offset_src = args.offset_src.as_ref().map_or_else(std::ptr::null, |x| x);
+        let p_offset_src = args.offset_src.as_ref().map_or_else(core::ptr::null, |x| x);
         #[allow(clippy::unnecessary_option_map_or_else)]
-        let p_offset_dst = args.offset_dst.as_ref().map_or_else(std::ptr::null, |x| x);
+        let p_offset_dst = args.offset_dst.as_ref().map_or_else(core::ptr::null, |x| x);
         let count: usize = args
             .count
             .try_into()
@@ -1557,7 +1561,7 @@ pub(super) mod _os {
 
     #[pyfunction]
     fn strerror(e: i32) -> String {
-        unsafe { std::ffi::CStr::from_ptr(libc::strerror(e)) }
+        unsafe { core::ffi::CStr::from_ptr(libc::strerror(e)) }
             .to_string_lossy()
             .into_owned()
     }
@@ -1661,7 +1665,7 @@ pub(super) mod _os {
                     if encoding.is_null() || encoding.read() == '\0' as libc::c_char {
                         "UTF-8".to_owned()
                     } else {
-                        std::ffi::CStr::from_ptr(encoding).to_string_lossy().into_owned()
+                        core::ffi::CStr::from_ptr(encoding).to_string_lossy().into_owned()
                     }
                 };
 
@@ -1700,6 +1704,103 @@ pub(super) mod _os {
 
     #[pyclass(with(PyStructSequence))]
     impl PyUnameResult {}
+
+    // statvfs_result: Result from statvfs or fstatvfs.
+    // = statvfs_result_fields
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[derive(Debug)]
+    #[pystruct_sequence_data]
+    pub(crate) struct StatvfsResultData {
+        pub f_bsize: libc::c_ulong,     // filesystem block size
+        pub f_frsize: libc::c_ulong,    // fragment size
+        pub f_blocks: libc::fsblkcnt_t, // size of fs in f_frsize units
+        pub f_bfree: libc::fsblkcnt_t,  // free blocks
+        pub f_bavail: libc::fsblkcnt_t, // free blocks for unprivileged users
+        pub f_files: libc::fsfilcnt_t,  // inodes
+        pub f_ffree: libc::fsfilcnt_t,  // free inodes
+        pub f_favail: libc::fsfilcnt_t, // free inodes for unprivileged users
+        pub f_flag: libc::c_ulong,      // mount flags
+        pub f_namemax: libc::c_ulong,   // maximum filename length
+        #[pystruct_sequence(skip)]
+        pub f_fsid: libc::c_ulong, // filesystem ID (not in tuple but accessible as attribute)
+    }
+
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[pyattr]
+    #[pystruct_sequence(name = "statvfs_result", module = "os", data = "StatvfsResultData")]
+    pub(crate) struct PyStatvfsResult;
+
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[pyclass(with(PyStructSequence))]
+    impl PyStatvfsResult {
+        #[pyslot]
+        fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            let seq: PyObjectRef = args.bind(vm)?;
+            crate::types::struct_sequence_new(cls, seq, vm)
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "redox")))]
+    impl StatvfsResultData {
+        fn from_statvfs(st: libc::statvfs) -> Self {
+            // f_fsid is a struct on some platforms (e.g., Linux fsid_t) and a scalar on others.
+            // We extract raw bytes and interpret as a native-endian integer.
+            // Note: The value may differ across architectures due to endianness.
+            let f_fsid = {
+                let ptr = core::ptr::addr_of!(st.f_fsid) as *const u8;
+                let size = core::mem::size_of_val(&st.f_fsid);
+                if size >= 8 {
+                    let bytes = unsafe { core::slice::from_raw_parts(ptr, 8) };
+                    u64::from_ne_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                        bytes[7],
+                    ]) as libc::c_ulong
+                } else if size >= 4 {
+                    let bytes = unsafe { core::slice::from_raw_parts(ptr, 4) };
+                    u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as libc::c_ulong
+                } else {
+                    0
+                }
+            };
+
+            Self {
+                f_bsize: st.f_bsize,
+                f_frsize: st.f_frsize,
+                f_blocks: st.f_blocks,
+                f_bfree: st.f_bfree,
+                f_bavail: st.f_bavail,
+                f_files: st.f_files,
+                f_ffree: st.f_ffree,
+                f_favail: st.f_favail,
+                f_flag: st.f_flag,
+                f_namemax: st.f_namemax,
+                f_fsid,
+            }
+        }
+    }
+
+    /// Perform a statvfs system call on the given path.
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[pyfunction]
+    #[pyfunction(name = "fstatvfs")]
+    fn statvfs(path: OsPathOrFd<'_>, vm: &VirtualMachine) -> PyResult {
+        let mut st: libc::statvfs = unsafe { core::mem::zeroed() };
+        let ret = match &path {
+            OsPathOrFd::Path(p) => {
+                let cpath = p.clone().into_cstring(vm)?;
+                unsafe { libc::statvfs(cpath.as_ptr(), &mut st) }
+            }
+            OsPathOrFd::Fd(fd) => unsafe { libc::fstatvfs(fd.as_raw(), &mut st) },
+        };
+        if ret != 0 {
+            return Err(OSErrorBuilder::with_filename(
+                &io::Error::last_os_error(),
+                path,
+                vm,
+            ));
+        }
+        Ok(StatvfsResultData::from_statvfs(st).to_pyobject(vm))
+    }
 
     pub(super) fn support_funcs() -> Vec<SupportFunc> {
         let mut supports = super::platform::module::support_funcs();
