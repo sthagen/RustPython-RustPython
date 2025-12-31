@@ -405,8 +405,9 @@ impl SlotAccessor {
 
     /// Inherit slot value from MRO
     pub fn inherit_from_mro(&self, typ: &crate::builtins::PyType) {
-        // Note: typ.mro does NOT include typ itself
-        let mro = typ.mro.read();
+        // mro[0] is self, so skip it
+        let mro_guard = typ.mro.read();
+        let mro = &mro_guard[1..];
 
         macro_rules! inherit_main {
             ($slot:ident) => {{
@@ -986,6 +987,12 @@ pub static SLOT_DEFS: &[SlotDef] = &[
         doc: "Return getattr(self, name).",
     },
     SlotDef {
+        name: "__getattr__",
+        accessor: SlotAccessor::TpGetattro,
+        op: None,
+        doc: "Implement getattr(self, name).",
+    },
+    SlotDef {
         name: "__setattr__",
         accessor: SlotAccessor::TpSetattro,
         op: None,
@@ -1417,6 +1424,12 @@ pub static SLOT_DEFS: &[SlotDef] = &[
         accessor: SlotAccessor::SqRepeat,
         op: None,
         doc: "Return self*value.",
+    },
+    SlotDef {
+        name: "__rmul__",
+        accessor: SlotAccessor::SqRepeat,
+        op: None,
+        doc: "Return value*self.",
     },
     SlotDef {
         name: "__iadd__",

@@ -327,11 +327,17 @@ impl VirtualMachine {
                     let line_buffering = buffered_stdio && (isatty || fd == 2);
 
                     let newline = if cfg!(windows) { None } else { Some("\n") };
+                    // stderr uses backslashreplace error handler
+                    let errors: Option<&str> = if fd == 2 {
+                        Some("backslashreplace")
+                    } else {
+                        None
+                    };
 
                     let stdio = self.call_method(
                         &io,
                         "TextIOWrapper",
-                        (buf, (), (), newline, line_buffering, write_through),
+                        (buf, (), errors, newline, line_buffering, write_through),
                     )?;
                     let mode = if write { "w" } else { "r" };
                     stdio.set_attr("mode", self.ctx.new_str(mode), self)?;
@@ -853,7 +859,13 @@ impl VirtualMachine {
                 [arg] => match_class!(match arg {
                     ref i @ PyInt => {
                         use num_traits::cast::ToPrimitive;
-                        return i.as_bigint().to_u32().unwrap_or(0);
+                        // Try u32 first, then i32 (for negative values), else -1 for overflow
+                        let code = i
+                            .as_bigint()
+                            .to_u32()
+                            .or_else(|| i.as_bigint().to_i32().map(|v| v as u32))
+                            .unwrap_or(-1i32 as u32);
+                        return code;
                     }
                     arg => {
                         if self.is_none(arg) {
@@ -866,8 +878,11 @@ impl VirtualMachine {
                 _ => args.as_object().repr(self).ok(),
             };
             if let Some(msg) = msg {
-                let stderr = stdlib::sys::PyStderr(self);
-                writeln!(stderr, "{msg}");
+                // Write using Python's write() to use stderr's error handler (backslashreplace)
+                if let Ok(stderr) = stdlib::sys::get_stderr(self) {
+                    let _ = self.call_method(&stderr, "write", (msg,));
+                    let _ = self.call_method(&stderr, "write", ("\n",));
+                }
             }
             1
         } else if exc.fast_isinstance(self.ctx.exceptions.keyboard_interrupt) {
@@ -986,6 +1001,16 @@ impl AsRef<Context> for VirtualMachine {
     }
 }
 
+/// Resolve frozen module alias to its original name.
+/// Returns the original module name if an alias exists, otherwise returns the input name.
+pub fn resolve_frozen_alias(name: &str) -> &str {
+    match name {
+        "_frozen_importlib" => "importlib._bootstrap",
+        "_frozen_importlib_external" => "importlib._bootstrap_external",
+        _ => name,
+    }
+}
+
 fn core_frozen_inits() -> impl Iterator<Item = (&'static str, FrozenModule)> {
     let iter = core::iter::empty();
     macro_rules! ext_modules {
@@ -1048,4 +1073,27 @@ fn test_nested_frozen() {
             panic!();
         }
     })
+}
+
+#[test]
+fn frozen_origname_matches() {
+    use rustpython_vm as vm;
+
+    vm::Interpreter::with_init(Default::default(), |_vm| {}).enter(|vm| {
+        let check = |name, expected| {
+            let module = import::import_frozen(vm, name).unwrap();
+            let origname: PyStrRef = module
+                .get_attr("__origname__", vm)
+                .unwrap()
+                .try_into_value(vm)
+                .unwrap();
+            assert_eq!(origname.as_str(), expected);
+        };
+
+        check("_frozen_importlib", "importlib._bootstrap");
+        check(
+            "_frozen_importlib_external",
+            "importlib._bootstrap_external",
+        );
+    });
 }
