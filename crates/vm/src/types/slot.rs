@@ -438,6 +438,16 @@ fn sequence_contains_wrapper(
     contains_wrapper(seq.obj, needle, vm)
 }
 
+#[inline(never)]
+fn sequence_repeat_wrapper(seq: PySequence<'_>, n: isize, vm: &VirtualMachine) -> PyResult {
+    vm.call_special_method(seq.obj, identifier!(vm, __mul__), (n,))
+}
+
+#[inline(never)]
+fn sequence_inplace_repeat_wrapper(seq: PySequence<'_>, n: isize, vm: &VirtualMachine) -> PyResult {
+    vm.call_special_method(seq.obj, identifier!(vm, __imul__), (n,))
+}
+
 fn repr_wrapper(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyRef<PyStr>> {
     let ret = vm.call_special_method(zelf, identifier!(vm, __repr__), ())?;
     ret.downcast::<PyStr>().map_err(|obj| {
@@ -607,7 +617,9 @@ impl PyType {
         debug_assert!(name.as_str().ends_with("__"));
 
         // Find all slot_defs matching this name and update each
-        for def in find_slot_defs_by_name(name.as_str()) {
+        // NOTE: Collect into Vec first to avoid issues during iteration
+        let defs: Vec<_> = find_slot_defs_by_name(name.as_str()).collect();
+        for def in defs {
             self.update_one_slot::<ADD>(&def.accessor, name, ctx);
         }
 
@@ -676,7 +688,29 @@ impl PyType {
         macro_rules! update_sub_slot {
             ($group:ident, $slot:ident, $wrapper:expr, $variant:ident) => {{
                 if ADD {
-                    if let Some(func) = self.lookup_slot_in_mro(name, ctx, |sf| {
+                    // Check if this type defines any method that maps to this slot.
+                    // Some slots like SqAssItem/MpAssSubscript are shared by multiple
+                    // methods (__setitem__ and __delitem__). If any of those methods
+                    // is defined, we must use the wrapper to ensure Python method calls.
+                    let has_own = {
+                        let guard = self.attributes.read();
+                        // Check the current method name
+                        let mut result = guard.contains_key(name);
+                        // For ass_item/ass_subscript slots, also check the paired method
+                        // (__setitem__ and __delitem__ share the same slot)
+                        if !result
+                            && (stringify!($slot) == "ass_item"
+                                || stringify!($slot) == "ass_subscript")
+                        {
+                            let setitem = ctx.intern_str("__setitem__");
+                            let delitem = ctx.intern_str("__delitem__");
+                            result = guard.contains_key(setitem) || guard.contains_key(delitem);
+                        }
+                        result
+                    };
+                    if has_own {
+                        self.slots.$group.$slot.store(Some($wrapper));
+                    } else if let Some(func) = self.lookup_slot_in_mro(name, ctx, |sf| {
                         if let SlotFunc::$variant(f) = sf {
                             Some(*f)
                         } else {
@@ -1270,12 +1304,16 @@ impl PyType {
                     accessor.inherit_from_mro(self);
                 }
             }
-            SlotAccessor::SqRepeat | SlotAccessor::SqInplaceRepeat => {
-                // Sequence repeat uses sq_repeat slot - no generic wrapper needed
-                // (handled by number protocol fallback)
-                if !ADD {
-                    accessor.inherit_from_mro(self);
-                }
+            SlotAccessor::SqRepeat => {
+                update_sub_slot!(as_sequence, repeat, sequence_repeat_wrapper, SeqRepeat)
+            }
+            SlotAccessor::SqInplaceRepeat => {
+                update_sub_slot!(
+                    as_sequence,
+                    inplace_repeat,
+                    sequence_inplace_repeat_wrapper,
+                    SeqRepeat
+                )
             }
             SlotAccessor::SqItem => {
                 update_sub_slot!(as_sequence, item, sequence_getitem_wrapper, SeqItem)
@@ -1324,28 +1362,44 @@ impl PyType {
     ) -> Option<T> {
         use crate::builtins::descriptor::PyWrapper;
 
+        // Helper to check if a class is a subclass of another by checking MRO
+        let is_subclass_of = |subclass_mro: &[PyRef<PyType>], superclass: &Py<PyType>| -> bool {
+            subclass_mro.iter().any(|c| c.is(superclass))
+        };
+
         // Helper to extract slot from an attribute if it's a wrapper descriptor
-        let try_extract = |attr: &PyObjectRef| -> Option<T> {
+        // and the wrapper's type is compatible with the given class.
+        // bpo-37619: wrapper descriptor from wrong class should not be used directly.
+        let try_extract = |attr: &PyObjectRef, for_class_mro: &[PyRef<PyType>]| -> Option<T> {
             if attr.class().is(ctx.types.wrapper_descriptor_type) {
-                attr.downcast_ref::<PyWrapper>()
-                    .and_then(|wrapper| extract(&wrapper.wrapped))
+                attr.downcast_ref::<PyWrapper>().and_then(|wrapper| {
+                    // Only extract slot if for_class is a subclass of wrapper.typ
+                    if is_subclass_of(for_class_mro, wrapper.typ) {
+                        extract(&wrapper.wrapped)
+                    } else {
+                        None
+                    }
+                })
             } else {
                 None
             }
         };
 
+        let mro = self.mro.read();
+
         // Look up in self's dict first
         if let Some(attr) = self.attributes.read().get(name).cloned() {
-            if let Some(func) = try_extract(&attr) {
+            if let Some(func) = try_extract(&attr, &mro) {
                 return Some(func);
             }
             return None;
         }
 
         // Look up in MRO (mro[0] is self, so skip it)
-        for cls in self.mro.read()[1..].iter() {
+        for (i, cls) in mro[1..].iter().enumerate() {
             if let Some(attr) = cls.attributes.read().get(name).cloned() {
-                if let Some(func) = try_extract(&attr) {
+                // Use the slice starting from this class in MRO
+                if let Some(func) = try_extract(&attr, &mro[i + 1..]) {
                     return Some(func);
                 }
                 return None;

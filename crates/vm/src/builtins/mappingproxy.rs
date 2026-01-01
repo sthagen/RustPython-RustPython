@@ -122,7 +122,9 @@ impl PyMappingProxy {
             MappingProxyInner::Class(class) => Ok(key
                 .as_interned_str(vm)
                 .is_some_and(|key| class.attributes.read().contains_key(key))),
-            MappingProxyInner::Mapping(mapping) => mapping.sequence_unchecked().contains(key, vm),
+            MappingProxyInner::Mapping(mapping) => {
+                mapping.obj().sequence_unchecked().contains(key, vm)
+            }
         }
     }
 
@@ -161,7 +163,9 @@ impl PyMappingProxy {
     #[pymethod]
     pub fn copy(&self, vm: &VirtualMachine) -> PyResult {
         match &self.mapping {
-            MappingProxyInner::Mapping(d) => vm.call_method(d, identifier!(vm, copy).as_str(), ()),
+            MappingProxyInner::Mapping(d) => {
+                vm.call_method(d.obj(), identifier!(vm, copy).as_str(), ())
+            }
             MappingProxyInner::Class(c) => {
                 Ok(PyDict::from_attributes(c.attributes.read().clone(), vm)?.to_pyobject(vm))
             }
@@ -173,7 +177,6 @@ impl PyMappingProxy {
         PyGenericAlias::from_args(cls, args, vm)
     }
 
-    #[pymethod]
     fn __len__(&self, vm: &VirtualMachine) -> PyResult<usize> {
         let obj = self.to_object(vm)?;
         obj.length(vm)
@@ -188,7 +191,6 @@ impl PyMappingProxy {
         )
     }
 
-    #[pymethod]
     fn __ior__(&self, _args: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         Err(vm.new_type_error(format!(
             r#""'|=' is not supported by {}; use '|' instead""#,
@@ -196,8 +198,6 @@ impl PyMappingProxy {
         )))
     }
 
-    #[pymethod(name = "__ror__")]
-    #[pymethod]
     fn __or__(&self, args: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         vm._or(self.copy(vm)?.as_ref(), args.as_ref())
     }
@@ -235,6 +235,7 @@ impl AsMapping for PyMappingProxy {
 impl AsSequence for PyMappingProxy {
     fn as_sequence() -> &'static PySequenceMethods {
         static AS_SEQUENCE: LazyLock<PySequenceMethods> = LazyLock::new(|| PySequenceMethods {
+            length: atomic_func!(|seq, vm| PyMappingProxy::sequence_downcast(seq).__len__(vm)),
             contains: atomic_func!(
                 |seq, target, vm| PyMappingProxy::sequence_downcast(seq)._contains(target, vm)
             ),

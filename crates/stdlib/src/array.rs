@@ -565,11 +565,11 @@ mod array {
     }
 
     fn f32_try_into_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<f32> {
-        ArgIntoFloat::try_from_object(vm, obj).map(|x| *x as f32)
+        ArgIntoFloat::try_from_object(vm, obj).map(|x| x.into_float() as f32)
     }
 
     fn f64_try_into_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<f64> {
-        ArgIntoFloat::try_from_object(vm, obj).map(Into::into)
+        ArgIntoFloat::try_from_object(vm, obj).map(|x| x.into_float())
     }
 
     fn pyfloat_from_f32(value: f32) -> PyFloat {
@@ -1060,7 +1060,6 @@ mod array {
             self.delitem_inner(&needle, vm)
         }
 
-        #[pymethod]
         fn __add__(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             if let Some(other) = other.downcast_ref::<Self>() {
                 self.read()
@@ -1074,7 +1073,6 @@ mod array {
             }
         }
 
-        #[pymethod]
         fn __iadd__(
             zelf: PyRef<Self>,
             other: PyObjectRef,
@@ -1093,15 +1091,12 @@ mod array {
             Ok(zelf)
         }
 
-        #[pymethod(name = "__rmul__")]
-        #[pymethod]
         fn __mul__(&self, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             self.read()
                 .mul(value, vm)
                 .map(|x| Self::from(x).into_ref(&vm.ctx))
         }
 
-        #[pymethod]
         fn __imul__(zelf: PyRef<Self>, value: isize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
             zelf.try_resizable(vm)?.imul(value, vm)?;
             Ok(zelf)
