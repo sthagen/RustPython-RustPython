@@ -996,7 +996,6 @@ mod array {
             }
         }
 
-        #[pymethod]
         fn __getitem__(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
             self.getitem_inner(&needle, vm)
         }
@@ -1038,7 +1037,6 @@ mod array {
             }
         }
 
-        #[pymethod]
         fn __setitem__(
             zelf: &Py<Self>,
             needle: PyObjectRef,
@@ -1055,7 +1053,6 @@ mod array {
             }
         }
 
-        #[pymethod]
         fn __delitem__(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             self.delitem_inner(&needle, vm)
         }
@@ -1102,7 +1099,6 @@ mod array {
             Ok(zelf)
         }
 
-        #[pymethod]
         pub(crate) fn __len__(&self) -> usize {
             self.read().len()
         }
@@ -1177,7 +1173,6 @@ mod array {
             ))
         }
 
-        #[pymethod]
         fn __contains__(&self, value: PyObjectRef, vm: &VirtualMachine) -> bool {
             let array = self.array.read();
             for element in array

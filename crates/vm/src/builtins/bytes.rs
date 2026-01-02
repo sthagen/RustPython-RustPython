@@ -228,7 +228,6 @@ impl PyBytes {
         self.inner.add(&other.borrow_buf())
     }
 
-    #[pymethod]
     fn __contains__(
         &self,
         needle: Either<PyBytesInner, PyIntRef>,
@@ -242,7 +241,6 @@ impl PyBytes {
         PyBytesInner::maketrans(from, to, vm)
     }
 
-    #[pymethod]
     fn __getitem__(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         self._getitem(&needle, vm)
     }

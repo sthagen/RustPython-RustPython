@@ -213,7 +213,6 @@ impl PyList {
         }
     }
 
-    #[pymethod]
     fn __getitem__(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
         self._getitem(&needle, vm)
     }
@@ -228,7 +227,6 @@ impl PyList {
         }
     }
 
-    #[pymethod]
     fn __setitem__(
         &self,
         needle: PyObjectRef,
@@ -251,7 +249,6 @@ impl PyList {
         self.mut_count(vm, &needle)
     }
 
-    #[pymethod]
     pub(crate) fn __contains__(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
         self.mut_contains(vm, &needle)
     }
@@ -309,7 +306,6 @@ impl PyList {
         }
     }
 
-    #[pymethod]
     fn __delitem__(&self, subscript: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
         self._delitem(&subscript, vm)
     }
