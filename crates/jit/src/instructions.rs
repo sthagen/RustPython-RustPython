@@ -27,6 +27,7 @@ enum JitValue {
     Float(Value),
     Bool(Value),
     None,
+    Null,
     Tuple(Vec<JitValue>),
     FuncRef(FuncRef),
 }
@@ -45,14 +46,14 @@ impl JitValue {
             JitValue::Int(_) => Some(JitType::Int),
             JitValue::Float(_) => Some(JitType::Float),
             JitValue::Bool(_) => Some(JitType::Bool),
-            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) => None,
+            JitValue::None | JitValue::Null | JitValue::Tuple(_) | JitValue::FuncRef(_) => None,
         }
     }
 
     fn into_value(self) -> Option<Value> {
         match self {
             JitValue::Int(val) | JitValue::Float(val) | JitValue::Bool(val) => Some(val),
-            JitValue::None | JitValue::Tuple(_) | JitValue::FuncRef(_) => None,
+            JitValue::None | JitValue::Null | JitValue::Tuple(_) | JitValue::FuncRef(_) => None,
         }
     }
 }
@@ -139,7 +140,9 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             }
             JitValue::Bool(val) => Ok(val),
             JitValue::None => Ok(self.builder.ins().iconst(types::I8, 0)),
-            JitValue::Tuple(_) | JitValue::FuncRef(_) => Err(JitCompileError::NotSupported),
+            JitValue::Null | JitValue::Tuple(_) | JitValue::FuncRef(_) => {
+                Err(JitCompileError::NotSupported)
+            }
         }
     }
 
@@ -209,7 +212,10 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             match instruction {
                 Instruction::ReturnValue
                 | Instruction::ReturnConst { .. }
-                | Instruction::Jump { .. } => {
+                | Instruction::Jump { .. }
+                | Instruction::JumpBackward { .. }
+                | Instruction::JumpBackwardNoInterrupt { .. }
+                | Instruction::JumpForward { .. } => {
                     in_unreachable_code = true;
                 }
                 _ => {}
@@ -463,6 +469,12 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     args.push(arg.into_value().unwrap());
                 }
 
+                // Pop self_or_null (should be Null for JIT-compiled recursive calls)
+                let self_or_null = self.stack.pop().ok_or(JitCompileError::BadBytecode)?;
+                if !matches!(self_or_null, JitValue::Null) {
+                    return Err(JitCompileError::NotSupported);
+                }
+
                 match self.stack.pop().ok_or(JitCompileError::BadBytecode)? {
                     JitValue::FuncRef(reference) => {
                         let call = self.builder.ins().call(reference, &args);
@@ -473,6 +485,10 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     }
                     _ => Err(JitCompileError::BadBytecode),
                 }
+            }
+            Instruction::PushNull => {
+                self.stack.push(JitValue::Null);
+                Ok(())
             }
             Instruction::CallIntrinsic1 { func } => {
                 match func.get(arg) {
@@ -545,7 +561,10 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             }
             Instruction::ExtendedArg => Ok(()),
 
-            Instruction::Jump { target } => {
+            Instruction::Jump { target }
+            | Instruction::JumpBackward { target }
+            | Instruction::JumpBackwardNoInterrupt { target }
+            | Instruction::JumpForward { target } => {
                 let target_block = self.get_or_create_block(target.get(arg));
                 self.builder.ins().jump(target_block, &[]);
                 Ok(())
