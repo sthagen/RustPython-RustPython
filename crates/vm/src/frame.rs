@@ -186,7 +186,7 @@ impl Frame {
                 Ok(())
             };
             map_to_dict(&code.cellvars, &self.cells_frees)?;
-            if code.flags.contains(bytecode::CodeFlags::IS_OPTIMIZED) {
+            if code.flags.contains(bytecode::CodeFlags::OPTIMIZED) {
                 map_to_dict(&code.freevars, &self.cells_frees[code.cellvars.len()..])?;
             }
         }
@@ -762,7 +762,7 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::ConvertValue { oparg: conversion } => {
                 self.convert_value(conversion.get(arg), vm)
             }
-            bytecode::Instruction::CopyItem { index } => {
+            bytecode::Instruction::Copy { index } => {
                 // CopyItem { index: 1 } copies TOS
                 // CopyItem { index: 2 } copies second from top
                 // This is 1-indexed to match CPython
@@ -1000,11 +1000,7 @@ impl ExecutingFrame<'_> {
                 let iterable = self.pop_value();
                 let iter = if iterable.class().is(vm.ctx.types.coroutine_type) {
                     // Coroutine requires CO_COROUTINE or CO_ITERABLE_COROUTINE flag
-                    if !self
-                        .code
-                        .flags
-                        .intersects(bytecode::CodeFlags::IS_COROUTINE)
-                    {
+                    if !self.code.flags.intersects(bytecode::CodeFlags::COROUTINE) {
                         return Err(vm.new_type_error(
                             "cannot 'yield from' a coroutine object in a non-coroutine generator"
                                 .to_owned(),
@@ -1108,11 +1104,19 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::LoadAttrMethod { .. } => {
                 unreachable!("LoadAttrMethod is converted to LoadAttr during compilation")
             }
+            bytecode::Instruction::LoadSuperAttr { arg: idx } => {
+                self.load_super_attr(vm, idx.get(arg))
+            }
+            bytecode::Instruction::LoadSuperMethod { .. }
+            | bytecode::Instruction::LoadZeroSuperAttr { .. }
+            | bytecode::Instruction::LoadZeroSuperMethod { .. } => {
+                unreachable!("LOAD_SUPER_* pseudo instructions are converted during compilation")
+            }
             bytecode::Instruction::LoadBuildClass => {
                 self.push_value(vm.builtins.get_attr(identifier!(vm, __build_class__), vm)?);
                 Ok(None)
             }
-            bytecode::Instruction::LoadClassDeref(i) => {
+            bytecode::Instruction::LoadFromDictOrDeref(i) => {
                 let i = i.get(arg) as usize;
                 let name = if i < self.code.cellvars.len() {
                     self.code.cellvars[i]
@@ -1675,7 +1679,7 @@ impl ExecutingFrame<'_> {
                 // arg=0: direct yield (wrapped for async generators)
                 // arg=1: yield from await/yield-from (NOT wrapped)
                 let wrap = oparg.get(arg) == 0;
-                let value = if wrap && self.code.flags.contains(bytecode::CodeFlags::IS_COROUTINE) {
+                let value = if wrap && self.code.flags.contains(bytecode::CodeFlags::COROUTINE) {
                     PyAsyncGenWrappedValue(value).into_pyobject(vm)
                 } else {
                     value
@@ -2522,6 +2526,45 @@ impl ExecutingFrame<'_> {
         } else {
             // Regular attribute access
             let obj = parent.get_attr(attr_name, vm)?;
+            self.push_value(obj);
+        }
+        Ok(None)
+    }
+
+    fn load_super_attr(&mut self, vm: &VirtualMachine, oparg: u32) -> FrameResult {
+        let (name_idx, load_method, has_class) = bytecode::decode_load_super_attr_arg(oparg);
+        let attr_name = self.code.names[name_idx as usize];
+
+        // Stack layout (bottom to top): [super, class, self]
+        // Pop in LIFO order: self, class, super
+        let self_obj = self.pop_value();
+        let class = self.pop_value();
+        let global_super = self.pop_value();
+
+        // Create super object - pass args based on has_class flag
+        // When super is shadowed, has_class=false means call with 0 args
+        let super_obj = if has_class {
+            global_super.call((class.clone(), self_obj.clone()), vm)?
+        } else {
+            global_super.call((), vm)?
+        };
+
+        if load_method {
+            // Method load: push [method, self_or_null]
+            let method = PyMethod::get(super_obj, attr_name, vm)?;
+            match method {
+                PyMethod::Function { target: _, func } => {
+                    self.push_value(func);
+                    self.push_value(self_obj);
+                }
+                PyMethod::Attribute(val) => {
+                    self.push_value(val);
+                    self.push_null();
+                }
+            }
+        } else {
+            // Regular attribute access
+            let obj = super_obj.get_attr(attr_name, vm)?;
             self.push_value(obj);
         }
         Ok(None)

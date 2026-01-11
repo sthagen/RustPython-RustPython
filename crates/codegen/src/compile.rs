@@ -75,6 +75,18 @@ pub enum FBlockDatum {
     ExceptionName(String),
 }
 
+/// Type of super() call optimization detected by can_optimize_super_call()
+#[derive(Debug, Clone)]
+enum SuperCallType<'a> {
+    /// super(class, self) - explicit 2-argument form
+    TwoArg {
+        class_arg: &'a Expr,
+        self_arg: &'a Expr,
+    },
+    /// super() - implicit 0-argument form (uses __class__ cell)
+    ZeroArg,
+}
+
 #[derive(Debug, Clone)]
 pub struct FBlockInfo {
     pub fb_type: FBlockType,
@@ -377,7 +389,7 @@ enum CollectionType {
 impl Compiler {
     fn new(opts: CompileOpts, source_file: SourceFile, code_name: String) -> Self {
         let module_code = ir::CodeInfo {
-            flags: bytecode::CodeFlags::NEW_LOCALS,
+            flags: bytecode::CodeFlags::NEWLOCALS,
             source_path: source_file.name().to_owned(),
             private: None,
             blocks: vec![ir::Block::default()],
@@ -661,6 +673,153 @@ impl Compiler {
         self.symbol_table_stack.pop().expect("compiler bug")
     }
 
+    /// Check if a super() call can be optimized
+    /// Returns Some(SuperCallType) if optimization is possible, None otherwise
+    fn can_optimize_super_call<'a>(
+        &self,
+        value: &'a Expr,
+        attr: &str,
+    ) -> Option<SuperCallType<'a>> {
+        use ruff_python_ast::*;
+
+        // 1. value must be a Call expression
+        let Expr::Call(ExprCall {
+            func, arguments, ..
+        }) = value
+        else {
+            return None;
+        };
+
+        // 2. func must be Name("super")
+        let Expr::Name(ExprName { id, .. }) = func.as_ref() else {
+            return None;
+        };
+        if id.as_str() != "super" {
+            return None;
+        }
+
+        // 3. attr must not be "__class__"
+        if attr == "__class__" {
+            return None;
+        }
+
+        // 4. No keyword arguments
+        if !arguments.keywords.is_empty() {
+            return None;
+        }
+
+        // 5. Must be inside a function (not at module level or class body)
+        if !self.ctx.in_func() {
+            return None;
+        }
+
+        // 6. "super" must be GlobalImplicit (not redefined locally or at module level)
+        let table = self.current_symbol_table();
+        if let Some(symbol) = table.lookup("super")
+            && symbol.scope != SymbolScope::GlobalImplicit
+        {
+            return None;
+        }
+        // Also check top-level scope to detect module-level shadowing.
+        // Only block if super is actually *bound* at module level (not just used).
+        if let Some(top_table) = self.symbol_table_stack.first()
+            && let Some(sym) = top_table.lookup("super")
+            && sym.scope != SymbolScope::GlobalImplicit
+        {
+            return None;
+        }
+
+        // 7. Check argument pattern
+        let args = &arguments.args;
+
+        // No starred expressions allowed
+        if args.iter().any(|arg| matches!(arg, Expr::Starred(_))) {
+            return None;
+        }
+
+        match args.len() {
+            2 => {
+                // 2-arg: super(class, self)
+                Some(SuperCallType::TwoArg {
+                    class_arg: &args[0],
+                    self_arg: &args[1],
+                })
+            }
+            0 => {
+                // 0-arg: super() - need __class__ cell and first parameter
+                // Enclosing function should have at least one positional argument
+                let info = self.code_stack.last()?;
+                if info.metadata.argcount == 0 && info.metadata.posonlyargcount == 0 {
+                    return None;
+                }
+
+                // Check if __class__ is available as a cell/free variable
+                // The scope must be Free (from enclosing class) or have FREE_CLASS flag
+                if let Some(symbol) = table.lookup("__class__") {
+                    if symbol.scope != SymbolScope::Free
+                        && !symbol.flags.contains(SymbolFlags::FREE_CLASS)
+                    {
+                        return None;
+                    }
+                } else {
+                    // __class__ not in symbol table, optimization not possible
+                    return None;
+                }
+
+                Some(SuperCallType::ZeroArg)
+            }
+            _ => None, // 1 or 3+ args - not optimizable
+        }
+    }
+
+    /// Load arguments for super() optimization onto the stack
+    /// Stack result: [global_super, class, self]
+    fn load_args_for_super(&mut self, super_type: &SuperCallType<'_>) -> CompileResult<()> {
+        // 1. Load global super
+        self.compile_name("super", NameUsage::Load)?;
+
+        match super_type {
+            SuperCallType::TwoArg {
+                class_arg,
+                self_arg,
+            } => {
+                // 2-arg: load provided arguments
+                self.compile_expression(class_arg)?;
+                self.compile_expression(self_arg)?;
+            }
+            SuperCallType::ZeroArg => {
+                // 0-arg: load __class__ cell and first parameter
+                // Load __class__ from cell/free variable
+                let scope = self.get_ref_type("__class__").map_err(|e| self.error(e))?;
+                let idx = match scope {
+                    SymbolScope::Cell => self.get_cell_var_index("__class__")?,
+                    SymbolScope::Free => self.get_free_var_index("__class__")?,
+                    _ => {
+                        return Err(self.error(CodegenErrorType::SyntaxError(
+                            "super(): __class__ cell not found".to_owned(),
+                        )));
+                    }
+                };
+                self.emit_arg(idx, Instruction::LoadDeref);
+
+                // Load first parameter (typically 'self').
+                // Safety: can_optimize_super_call() ensures argcount > 0, and
+                // parameters are always added to varnames first (see symboltable.rs).
+                let first_param = {
+                    let info = self.code_stack.last().unwrap();
+                    info.metadata.varnames.first().cloned()
+                };
+                let first_param = first_param.ok_or_else(|| {
+                    self.error(CodegenErrorType::SyntaxError(
+                        "super(): no arguments and no first parameter".to_owned(),
+                    ))
+                })?;
+                self.compile_name(&first_param, NameUsage::Load)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Check if this is an inlined comprehension context (PEP 709)
     /// Currently disabled - always returns false to avoid stack issues
     fn is_inlined_comprehension_context(&self, _comprehension_type: ComprehensionType) -> bool {
@@ -749,19 +908,19 @@ impl Compiler {
             CompilerScope::Module => (bytecode::CodeFlags::empty(), 0, 0, 0),
             CompilerScope::Class => (bytecode::CodeFlags::empty(), 0, 0, 0),
             CompilerScope::Function | CompilerScope::AsyncFunction | CompilerScope::Lambda => (
-                bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED,
+                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
                 0, // Will be set later in enter_function
                 0, // Will be set later in enter_function
                 0, // Will be set later in enter_function
             ),
             CompilerScope::Comprehension => (
-                bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED,
+                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
                 0,
                 1, // comprehensions take one argument (.0)
                 0,
             ),
             CompilerScope::TypeParams => (
-                bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED,
+                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
                 0,
                 0,
                 0,
@@ -1298,7 +1457,7 @@ impl Compiler {
             let parent_obj_name = &parent.metadata.name;
 
             // Determine if parent is a function-like scope
-            let is_function_parent = parent.flags.contains(bytecode::CodeFlags::IS_OPTIMIZED)
+            let is_function_parent = parent.flags.contains(bytecode::CodeFlags::OPTIMIZED)
                 && !parent_obj_name.starts_with("<") // Not a special scope like <lambda>, <listcomp>, etc.
                 && parent_obj_name != "<module>"; // Not the module scope
 
@@ -1382,7 +1541,7 @@ impl Compiler {
 
             if let Stmt::Expr(StmtExpr { value, .. }) = &last {
                 self.compile_expression(value)?;
-                emit!(self, Instruction::CopyItem { index: 1_u32 });
+                emit!(self, Instruction::Copy { index: 1_u32 });
                 emit!(
                     self,
                     Instruction::CallIntrinsic1 {
@@ -1420,7 +1579,7 @@ impl Compiler {
                 Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
                     let pop_instructions = self.current_block().instructions.pop();
                     let store_inst = compiler_unwrap_option(self, pop_instructions); // pop Instruction::Store
-                    emit!(self, Instruction::CopyItem { index: 1_u32 });
+                    emit!(self, Instruction::Copy { index: 1_u32 });
                     self.current_block().instructions.push(store_inst);
                 }
                 _ => self.emit_load_const(ConstantData::None),
@@ -1561,7 +1720,7 @@ impl Compiler {
                     NameUsage::Load => {
                         // Special case for class scope
                         if self.ctx.in_class && !self.ctx.in_func() {
-                            Instruction::LoadClassDeref
+                            Instruction::LoadFromDictOrDeref
                         } else {
                             Instruction::LoadDeref
                         }
@@ -1914,7 +2073,7 @@ impl Compiler {
                             && self
                                 .current_code_info()
                                 .flags
-                                .contains(bytecode::CodeFlags::IS_GENERATOR)
+                                .contains(bytecode::CodeFlags::GENERATOR)
                         {
                             return Err(self.error_ranged(
                                 CodegenErrorType::AsyncReturnValue,
@@ -1938,7 +2097,7 @@ impl Compiler {
 
                 for (i, target) in targets.iter().enumerate() {
                     if i + 1 != targets.len() {
-                        emit!(self, Instruction::CopyItem { index: 1_u32 });
+                        emit!(self, Instruction::Copy { index: 1_u32 });
                     }
                     self.compile_store(target)?;
                 }
@@ -2062,7 +2221,7 @@ impl Compiler {
         }
 
         self.push_output(
-            bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED,
+            bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
             parameters.posonlyargs.len().to_u32(),
             (parameters.posonlyargs.len() + parameters.args.len()).to_u32(),
             parameters.kwonlyargs.len().to_u32(),
@@ -2080,11 +2239,11 @@ impl Compiler {
         }
 
         if let Some(name) = parameters.vararg.as_deref() {
-            self.current_code_info().flags |= bytecode::CodeFlags::HAS_VARARGS;
+            self.current_code_info().flags |= bytecode::CodeFlags::VARARGS;
             self.varname(name.name.as_str())?;
         }
         if let Some(name) = parameters.kwarg.as_deref() {
-            self.current_code_info().flags |= bytecode::CodeFlags::HAS_VARKEYWORDS;
+            self.current_code_info().flags |= bytecode::CodeFlags::VARKEYWORDS;
             self.varname(name.name.as_str())?;
         }
 
@@ -2205,7 +2364,7 @@ impl Compiler {
                         );
                     }
 
-                    emit!(self, Instruction::CopyItem { index: 1_u32 });
+                    emit!(self, Instruction::Copy { index: 1_u32 });
                     self.store_name(name.as_ref())?;
                 }
                 TypeParam::ParamSpec(TypeParamParamSpec { name, default, .. }) => {
@@ -2230,7 +2389,7 @@ impl Compiler {
                         );
                     }
 
-                    emit!(self, Instruction::CopyItem { index: 1_u32 });
+                    emit!(self, Instruction::Copy { index: 1_u32 });
                     self.store_name(name.as_ref())?;
                 }
                 TypeParam::TypeVarTuple(TypeParamTypeVarTuple { name, default, .. }) => {
@@ -2256,7 +2415,7 @@ impl Compiler {
                         );
                     }
 
-                    emit!(self, Instruction::CopyItem { index: 1_u32 });
+                    emit!(self, Instruction::Copy { index: 1_u32 });
                     self.store_name(name.as_ref())?;
                 }
             };
@@ -2396,7 +2555,7 @@ impl Compiler {
 
             if let Some(cleanup) = finally_cleanup_block {
                 self.switch_to_block(cleanup);
-                emit!(self, Instruction::CopyItem { index: 3_u32 });
+                emit!(self, Instruction::Copy { index: 3_u32 });
                 emit!(self, Instruction::PopExcept);
                 emit!(
                     self,
@@ -2457,7 +2616,7 @@ impl Compiler {
             // check if this handler can handle the exception:
             if let Some(exc_type) = type_ {
                 // Duplicate exception for test:
-                emit!(self, Instruction::CopyItem { index: 1_u32 });
+                emit!(self, Instruction::Copy { index: 1_u32 });
 
                 // Check exception type:
                 self.compile_expression(exc_type)?;
@@ -2598,7 +2757,7 @@ impl Compiler {
         // POP_EXCEPT: pop prev_exc from stack and restore -> [prev_exc, lasti, exc]
         // RERAISE 1: reraise with lasti
         self.switch_to_block(cleanup_block);
-        emit!(self, Instruction::CopyItem { index: 3_u32 });
+        emit!(self, Instruction::Copy { index: 3_u32 });
         emit!(self, Instruction::PopExcept);
         emit!(
             self,
@@ -2693,7 +2852,7 @@ impl Compiler {
         if let Some(cleanup) = finally_cleanup_block {
             self.switch_to_block(cleanup);
             // COPY 3: copy the exception from position 3
-            emit!(self, Instruction::CopyItem { index: 3_u32 });
+            emit!(self, Instruction::Copy { index: 3_u32 });
             // POP_EXCEPT: restore prev_exc as current exception
             emit!(self, Instruction::PopExcept);
             // RERAISE 1: reraise with lasti from stack
@@ -2787,7 +2946,7 @@ impl Compiler {
                 emit!(self, Instruction::BuildList { size: 0 });
                 // Stack: [prev_exc, exc, []]
                 // ADDOP_I(c, loc, COPY, 2);
-                emit!(self, Instruction::CopyItem { index: 2 });
+                emit!(self, Instruction::Copy { index: 2 });
                 // Stack: [prev_exc, exc, [], exc_copy]
                 // Now stack is: [prev_exc, orig, list, rest]
             }
@@ -2817,7 +2976,7 @@ impl Compiler {
 
             // ADDOP_I(c, loc, COPY, 1);
             // ADDOP_JUMP(c, loc, POP_JUMP_IF_NONE, no_match);
-            emit!(self, Instruction::CopyItem { index: 1 });
+            emit!(self, Instruction::Copy { index: 1 });
             self.emit_load_const(ConstantData::None);
             emit!(self, Instruction::IsOp(bytecode::Invert::No)); // is None?
             emit!(
@@ -2947,7 +3106,7 @@ impl Compiler {
         // Stack: [prev_exc, result]
 
         // COPY 1
-        emit!(self, Instruction::CopyItem { index: 1 });
+        emit!(self, Instruction::Copy { index: 1 });
         // Stack: [prev_exc, result, result]
 
         // POP_JUMP_IF_NOT_NONE reraise
@@ -3103,7 +3262,7 @@ impl Compiler {
         self.enter_function(name, parameters)?;
         self.current_code_info()
             .flags
-            .set(bytecode::CodeFlags::IS_COROUTINE, is_async);
+            .set(bytecode::CodeFlags::COROUTINE, is_async);
 
         // Set up context
         let prev_ctx = self.ctx;
@@ -3149,7 +3308,7 @@ impl Compiler {
 
         // Handle docstring if present
         if let Some(doc) = doc_str {
-            emit!(self, Instruction::CopyItem { index: 1_u32 });
+            emit!(self, Instruction::Copy { index: 1_u32 });
             self.emit_load_const(ConstantData::Str {
                 value: doc.to_string().into(),
             });
@@ -3233,7 +3392,7 @@ impl Compiler {
             // Enter type params scope
             let type_params_name = format!("<generic parameters of {name}>");
             self.push_output(
-                bytecode::CodeFlags::IS_OPTIMIZED | bytecode::CodeFlags::NEW_LOCALS,
+                bytecode::CodeFlags::OPTIMIZED | bytecode::CodeFlags::NEWLOCALS,
                 0,
                 num_typeparam_args as u32,
                 0,
@@ -3357,12 +3516,14 @@ impl Compiler {
     /// Determines if a variable should be CELL or FREE type
     // = get_ref_type
     fn get_ref_type(&self, name: &str) -> Result<SymbolScope, CodegenErrorType> {
+        let table = self.symbol_table_stack.last().unwrap();
+
         // Special handling for __class__ and __classdict__ in class scope
-        if self.ctx.in_class && (name == "__class__" || name == "__classdict__") {
+        // This should only apply when we're actually IN a class body,
+        // not when we're in a method nested inside a class.
+        if table.typ == CompilerScope::Class && (name == "__class__" || name == "__classdict__") {
             return Ok(SymbolScope::Cell);
         }
-
-        let table = self.symbol_table_stack.last().unwrap();
         match table.lookup(name) {
             Some(symbol) => match symbol.scope {
                 SymbolScope::Cell => Ok(SymbolScope::Cell),
@@ -3633,7 +3794,7 @@ impl Compiler {
 
         if let Some(classcell_idx) = classcell_idx {
             emit!(self, Instruction::LoadClosure(classcell_idx.to_u32()));
-            emit!(self, Instruction::CopyItem { index: 1_u32 });
+            emit!(self, Instruction::Copy { index: 1_u32 });
             let classcell = self.name("__classcell__");
             emit!(self, Instruction::StoreName(classcell));
         } else {
@@ -3664,7 +3825,7 @@ impl Compiler {
         if is_generic {
             let type_params_name = format!("<generic parameters of {name}>");
             self.push_output(
-                bytecode::CodeFlags::IS_OPTIMIZED | bytecode::CodeFlags::NEW_LOCALS,
+                bytecode::CodeFlags::OPTIMIZED | bytecode::CodeFlags::NEWLOCALS,
                 0,
                 0,
                 0,
@@ -4081,7 +4242,7 @@ impl Compiler {
         // to be in the exception table for these instructions.
         // If we cleared fblock, exceptions here would propagate uncaught.
         self.switch_to_block(cleanup_block);
-        emit!(self, Instruction::CopyItem { index: 3 });
+        emit!(self, Instruction::Copy { index: 3 });
         emit!(self, Instruction::PopExcept);
         emit!(self, Instruction::Reraise { depth: 1 });
 
@@ -4384,7 +4545,7 @@ impl Compiler {
                 continue;
             }
             // Duplicate the subject.
-            emit!(self, Instruction::CopyItem { index: 1_u32 });
+            emit!(self, Instruction::Copy { index: 1_u32 });
             if i < star {
                 // For indices before the star, use a nonnegative index equal to i.
                 self.emit_load_const(ConstantData::Integer { value: i.into() });
@@ -4457,7 +4618,7 @@ impl Compiler {
 
         // Otherwise, there is a sub-pattern. Duplicate the object on top of the stack.
         pc.on_top += 1;
-        emit!(self, Instruction::CopyItem { index: 1_u32 });
+        emit!(self, Instruction::Copy { index: 1_u32 });
         // Compile the sub-pattern.
         self.compile_pattern(p.pattern.as_ref().unwrap(), pc)?;
         // After success, decrement the on_top counter.
@@ -4558,7 +4719,7 @@ impl Compiler {
         // 2. Emit MATCH_CLASS with nargs.
         emit!(self, Instruction::MatchClass(u32::try_from(nargs).unwrap()));
         // 3. Duplicate the top of the stack.
-        emit!(self, Instruction::CopyItem { index: 1_u32 });
+        emit!(self, Instruction::Copy { index: 1_u32 });
         // 4. Load None.
         self.emit_load_const(ConstantData::None);
         // 5. Compare with IS_OP 1.
@@ -4723,7 +4884,7 @@ impl Compiler {
         pc.on_top += 2; // subject and keys_tuple are underneath
 
         // Check if match succeeded
-        emit!(self, Instruction::CopyItem { index: 1_u32 });
+        emit!(self, Instruction::Copy { index: 1_u32 });
         // Stack: [subject, keys_tuple, values_tuple, values_tuple_copy]
 
         // Check if copy is None (consumes the copy like POP_JUMP_IF_NONE)
@@ -4776,7 +4937,7 @@ impl Compiler {
                 // Copy rest_dict which is at position (1 + remaining) from TOS
                 emit!(
                     self,
-                    Instruction::CopyItem {
+                    Instruction::Copy {
                         index: 1 + remaining
                     }
                 );
@@ -4833,7 +4994,7 @@ impl Compiler {
             pc.fail_pop.clear();
             pc.on_top = 0;
             // Emit a COPY(1) instruction before compiling the alternative.
-            emit!(self, Instruction::CopyItem { index: 1_u32 });
+            emit!(self, Instruction::Copy { index: 1_u32 });
             self.compile_pattern(alt, pc)?;
 
             let n_stores = pc.stores.len();
@@ -5080,7 +5241,7 @@ impl Compiler {
         for (i, m) in cases.iter().enumerate().take(case_count) {
             // Only copy the subject if not on the last case
             if i != case_count - 1 {
-                emit!(self, Instruction::CopyItem { index: 1_u32 });
+                emit!(self, Instruction::Copy { index: 1_u32 });
             }
 
             pattern_context.stores = Vec::with_capacity(1);
@@ -5127,7 +5288,7 @@ impl Compiler {
             if let Some(ref guard) = m.guard {
                 // Compile guard and jump to end if false
                 self.compile_expression(guard)?;
-                emit!(self, Instruction::CopyItem { index: 1_u32 });
+                emit!(self, Instruction::Copy { index: 1_u32 });
                 emit!(self, Instruction::PopJumpIfFalse { target: end });
                 emit!(self, Instruction::PopTop);
             }
@@ -5207,13 +5368,13 @@ impl Compiler {
 
             // store rhs for the next comparison in chain
             emit!(self, Instruction::Swap { index: 2 });
-            emit!(self, Instruction::CopyItem { index: 2 });
+            emit!(self, Instruction::Copy { index: 2 });
 
             self.compile_addcompare(op);
 
             // if comparison result is false, we break with this value; if true, try the next one.
             /*
-            emit!(self, Instruction::CopyItem { index: 1 });
+            emit!(self, Instruction::Copy { index: 1 });
             // emit!(self, Instruction::ToBool); // TODO: Uncomment this
             emit!(self, Instruction::PopJumpIfFalse { target: cleanup });
             emit!(self, Instruction::PopTop);
@@ -5398,8 +5559,8 @@ impl Compiler {
                 // But we can't use compile_subscript directly because we need DUP_TOP2
                 self.compile_expression(value)?;
                 self.compile_expression(slice)?;
-                emit!(self, Instruction::CopyItem { index: 2_u32 });
-                emit!(self, Instruction::CopyItem { index: 2_u32 });
+                emit!(self, Instruction::Copy { index: 2_u32 });
+                emit!(self, Instruction::Copy { index: 2_u32 });
                 emit!(self, Instruction::Subscript);
                 AugAssignKind::Subscript
             }
@@ -5407,7 +5568,7 @@ impl Compiler {
                 let attr = attr.as_str();
                 self.check_forbidden_name(attr, NameUsage::Store)?;
                 self.compile_expression(value)?;
-                emit!(self, Instruction::CopyItem { index: 1_u32 });
+                emit!(self, Instruction::Copy { index: 1_u32 });
                 let idx = self.name(attr);
                 emit!(self, Instruction::LoadAttr { idx });
                 AugAssignKind::Attr { idx }
@@ -5564,7 +5725,7 @@ impl Compiler {
         for value in values {
             self.compile_expression(value)?;
 
-            emit!(self, Instruction::CopyItem { index: 1_u32 });
+            emit!(self, Instruction::Copy { index: 1_u32 });
             match op {
                 BoolOp::And => {
                     emit!(
@@ -5732,9 +5893,28 @@ impl Compiler {
                 };
             }
             Expr::Attribute(ExprAttribute { value, attr, .. }) => {
-                self.compile_expression(value)?;
-                let idx = self.name(attr.as_str());
-                emit!(self, Instruction::LoadAttr { idx });
+                // Check for super() attribute access optimization
+                if let Some(super_type) = self.can_optimize_super_call(value, attr.as_str()) {
+                    // super().attr or super(cls, self).attr optimization
+                    // Stack: [global_super, class, self] → LOAD_SUPER_ATTR → [attr]
+                    self.load_args_for_super(&super_type)?;
+                    let idx = self.name(attr.as_str());
+                    match super_type {
+                        SuperCallType::TwoArg { .. } => {
+                            // LoadSuperAttr (pseudo) - will be converted to real LoadSuperAttr
+                            // with flags=0b10 (has_class=true, load_method=false) in ir.rs
+                            emit!(self, Instruction::LoadSuperAttr { arg: idx });
+                        }
+                        SuperCallType::ZeroArg => {
+                            emit!(self, Instruction::LoadZeroSuperAttr { idx });
+                        }
+                    }
+                } else {
+                    // Normal attribute access
+                    self.compile_expression(value)?;
+                    let idx = self.name(attr.as_str());
+                    emit!(self, Instruction::LoadAttr { idx });
+                }
             }
             Expr::Compare(ExprCompare {
                 left,
@@ -6062,7 +6242,7 @@ impl Compiler {
                 range: _,
             }) => {
                 self.compile_expression(value)?;
-                emit!(self, Instruction::CopyItem { index: 1_u32 });
+                emit!(self, Instruction::Copy { index: 1_u32 });
                 self.compile_store(target)?;
             }
             Expr::FString(fstring) => {
@@ -6159,12 +6339,29 @@ impl Compiler {
         // Method call: obj → LOAD_ATTR_METHOD → [method, self_or_null] → args → CALL
         // Regular call: func → PUSH_NULL → args → CALL
         if let Expr::Attribute(ExprAttribute { value, attr, .. }) = &func {
-            // Method call: compile object, then LOAD_ATTR_METHOD
-            // LOAD_ATTR_METHOD pushes [method, self_or_null] on stack
-            self.compile_expression(value)?;
-            let idx = self.name(attr.as_str());
-            emit!(self, Instruction::LoadAttrMethod { idx });
-            self.compile_call_helper(0, args)?;
+            // Check for super() method call optimization
+            if let Some(super_type) = self.can_optimize_super_call(value, attr.as_str()) {
+                // super().method() or super(cls, self).method() optimization
+                // Stack: [global_super, class, self] → LOAD_SUPER_METHOD → [method, self]
+                self.load_args_for_super(&super_type)?;
+                let idx = self.name(attr.as_str());
+                match super_type {
+                    SuperCallType::TwoArg { .. } => {
+                        emit!(self, Instruction::LoadSuperMethod { idx });
+                    }
+                    SuperCallType::ZeroArg => {
+                        emit!(self, Instruction::LoadZeroSuperMethod { idx });
+                    }
+                }
+                self.compile_call_helper(0, args)?;
+            } else {
+                // Normal method call: compile object, then LOAD_ATTR_METHOD
+                // LOAD_ATTR_METHOD pushes [method, self_or_null] on stack
+                self.compile_expression(value)?;
+                let idx = self.name(attr.as_str());
+                emit!(self, Instruction::LoadAttrMethod { idx });
+                self.compile_call_helper(0, args)?;
+            }
         } else {
             // Regular call: push func, then NULL for self_or_null slot
             // Stack layout: [func, NULL, args...] - same as method call [func, self, args...]
@@ -6371,9 +6568,9 @@ impl Compiler {
             in_async_scope: prev_ctx.in_async_scope || is_async,
         };
 
-        let flags = bytecode::CodeFlags::NEW_LOCALS | bytecode::CodeFlags::IS_OPTIMIZED;
+        let flags = bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED;
         let flags = if is_async {
-            flags | bytecode::CodeFlags::IS_COROUTINE
+            flags | bytecode::CodeFlags::COROUTINE
         } else {
             flags
         };
@@ -7040,7 +7237,7 @@ impl Compiler {
     }
 
     fn mark_generator(&mut self) {
-        self.current_code_info().flags |= bytecode::CodeFlags::IS_GENERATOR
+        self.current_code_info().flags |= bytecode::CodeFlags::GENERATOR
     }
 
     /// Whether the expression contains an await expression and
