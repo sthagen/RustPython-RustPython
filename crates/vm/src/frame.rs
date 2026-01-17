@@ -2,7 +2,8 @@ use crate::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
     builtins::{
         PyBaseException, PyBaseExceptionRef, PyCode, PyCoroutine, PyDict, PyDictRef, PyGenerator,
-        PyList, PySet, PySlice, PyStr, PyStrInterned, PyStrRef, PyTraceback, PyType,
+        PyInterpolation, PyList, PySet, PySlice, PyStr, PyStrInterned, PyStrRef, PyTemplate,
+        PyTraceback, PyType,
         asyncgenerator::PyAsyncGenWrappedValue,
         function::{PyCell, PyCellRef, PyFunction},
         tuple::{PyTuple, PyTupleRef},
@@ -702,6 +703,56 @@ impl ExecutingFrame<'_> {
                 self.push_value(list_obj.into());
                 Ok(None)
             }
+            Instruction::BuildTemplate => {
+                // Stack: [strings_tuple, interpolations_tuple] -> [template]
+                let interpolations = self.pop_value();
+                let strings = self.pop_value();
+
+                let strings = strings
+                    .downcast::<PyTuple>()
+                    .map_err(|_| vm.new_type_error("BUILD_TEMPLATE expected tuple for strings"))?;
+                let interpolations = interpolations.downcast::<PyTuple>().map_err(|_| {
+                    vm.new_type_error("BUILD_TEMPLATE expected tuple for interpolations")
+                })?;
+
+                let template = PyTemplate::new(strings, interpolations);
+                self.push_value(template.into_pyobject(vm));
+                Ok(None)
+            }
+            Instruction::BuildInterpolation { oparg } => {
+                // oparg encoding: (conversion << 2) | has_format_spec
+                // Stack: [value, expression_str, (format_spec)?] -> [interpolation]
+                let oparg_val = oparg.get(arg);
+                let has_format_spec = (oparg_val & 1) != 0;
+                let conversion_code = oparg_val >> 2;
+
+                let format_spec = if has_format_spec {
+                    self.pop_value().downcast::<PyStr>().map_err(|_| {
+                        vm.new_type_error("BUILD_INTERPOLATION expected str for format_spec")
+                    })?
+                } else {
+                    vm.ctx.empty_str.to_owned()
+                };
+
+                let expression = self.pop_value().downcast::<PyStr>().map_err(|_| {
+                    vm.new_type_error("BUILD_INTERPOLATION expected str for expression")
+                })?;
+                let value = self.pop_value();
+
+                // conversion: 0=None, 1=Str, 2=Repr, 3=Ascii
+                let conversion: PyObjectRef = match conversion_code {
+                    0 => vm.ctx.none(),
+                    1 => vm.ctx.new_str("s").into(),
+                    2 => vm.ctx.new_str("r").into(),
+                    3 => vm.ctx.new_str("a").into(),
+                    _ => vm.ctx.none(), // should not happen
+                };
+
+                let interpolation =
+                    PyInterpolation::new(value, expression, conversion, format_spec, vm)?;
+                self.push_value(interpolation.into_pyobject(vm));
+                Ok(None)
+            }
             Instruction::Call { nargs } => {
                 // Stack: [callable, self_or_null, arg1, ..., argN]
                 let args = self.collect_positional_args(nargs.get(arg));
@@ -1114,6 +1165,29 @@ impl ExecutingFrame<'_> {
                     None => self.cells_frees[i]
                         .get()
                         .ok_or_else(|| self.unbound_cell_exception(i, vm))?,
+                });
+                Ok(None)
+            }
+            Instruction::LoadFromDictOrGlobals(idx) => {
+                // PEP 649: Pop dict from stack (classdict), check there first, then globals
+                let dict = self.pop_value();
+                let name = self.code.names[idx.get(arg) as usize];
+
+                // Only treat KeyError as "not found", propagate other exceptions
+                let value = if let Some(dict_obj) = dict.downcast_ref::<PyDict>() {
+                    dict_obj.get_item_opt(name, vm)?
+                } else {
+                    // Not an exact dict, use mapping protocol
+                    match dict.get_item(name, vm) {
+                        Ok(v) => Some(v),
+                        Err(e) if e.fast_isinstance(vm.ctx.exceptions.key_error) => None,
+                        Err(e) => return Err(e),
+                    }
+                };
+
+                self.push_value(match value {
+                    Some(v) => v,
+                    None => self.load_global_or_builtin(name, vm)?,
                 });
                 Ok(None)
             }

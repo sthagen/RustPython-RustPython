@@ -24,13 +24,13 @@ use num_traits::{Num, ToPrimitive};
 use ruff_python_ast::{
     Alias, Arguments, BoolOp, CmpOp, Comprehension, ConversionFlag, DebugText, Decorator, DictItem,
     ExceptHandler, ExceptHandlerExceptHandler, Expr, ExprAttribute, ExprBoolOp, ExprContext,
-    ExprFString, ExprList, ExprName, ExprSlice, ExprStarred, ExprSubscript, ExprTuple, ExprUnaryOp,
-    FString, FStringFlags, FStringPart, Identifier, Int, InterpolatedStringElement,
+    ExprFString, ExprList, ExprName, ExprSlice, ExprStarred, ExprSubscript, ExprTString, ExprTuple,
+    ExprUnaryOp, FString, FStringFlags, FStringPart, Identifier, Int, InterpolatedStringElement,
     InterpolatedStringElements, Keyword, MatchCase, ModExpression, ModModule, Operator, Parameters,
     Pattern, PatternMatchAs, PatternMatchClass, PatternMatchMapping, PatternMatchOr,
     PatternMatchSequence, PatternMatchSingleton, PatternMatchStar, PatternMatchValue, Singleton,
-    Stmt, StmtExpr, TypeParam, TypeParamParamSpec, TypeParamTypeVar, TypeParamTypeVarTuple,
-    TypeParams, UnaryOp, WithItem,
+    Stmt, StmtAnnAssign, StmtExpr, TString, TypeParam, TypeParamParamSpec, TypeParamTypeVar,
+    TypeParamTypeVarTuple, TypeParams, UnaryOp, WithItem,
     visitor::{Visitor, walk_expr},
 };
 use ruff_text_size::{Ranged, TextRange};
@@ -110,14 +110,6 @@ enum NameUsage {
     Store,
     Delete,
 }
-
-fn is_forbidden_name(name: &str) -> bool {
-    // See https://docs.python.org/3/library/constants.html#built-in-constants
-    const BUILTIN_CONSTANTS: &[&str] = &["__debug__"];
-
-    BUILTIN_CONSTANTS.contains(&name)
-}
-
 /// Main structure holding the state of compilation.
 struct Compiler {
     code_stack: Vec<ir::CodeInfo>,
@@ -420,6 +412,8 @@ impl Compiler {
             in_inlined_comp: false,
             fblock: Vec::with_capacity(MAXBLOCKS),
             symbol_table_index: 0, // Module is always the first symbol table
+            in_conditional_block: 0,
+            next_conditional_annotation_index: 0,
         };
         Self {
             code_stack: vec![module_code],
@@ -676,6 +670,62 @@ impl Compiler {
         Ok(self.current_symbol_table())
     }
 
+    /// Push the annotation symbol table from the next sub_table's annotation_block
+    /// The annotation_block is stored in the function's scope, which is the next sub_table
+    /// Returns true if annotation_block exists, false otherwise
+    fn push_annotation_symbol_table(&mut self) -> bool {
+        let current_table = self
+            .symbol_table_stack
+            .last_mut()
+            .expect("no current symbol table");
+
+        // The annotation_block is in the next sub_table (function scope)
+        let next_idx = current_table.next_sub_table;
+        if next_idx >= current_table.sub_tables.len() {
+            return false;
+        }
+
+        let next_table = &mut current_table.sub_tables[next_idx];
+        if let Some(annotation_block) = next_table.annotation_block.take() {
+            self.symbol_table_stack.push(*annotation_block);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Push the annotation symbol table for module/class level annotations
+    /// This takes annotation_block from the current symbol table (not sub_tables)
+    fn push_current_annotation_symbol_table(&mut self) -> bool {
+        let current_table = self
+            .symbol_table_stack
+            .last_mut()
+            .expect("no current symbol table");
+
+        // For modules/classes, annotation_block is directly in the current table
+        if let Some(annotation_block) = current_table.annotation_block.take() {
+            self.symbol_table_stack.push(*annotation_block);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pop the annotation symbol table and restore it to the function scope's annotation_block
+    fn pop_annotation_symbol_table(&mut self) {
+        let annotation_table = self.symbol_table_stack.pop().expect("compiler bug");
+        let current_table = self
+            .symbol_table_stack
+            .last_mut()
+            .expect("no current symbol table");
+
+        // Restore to the next sub_table (function scope) where it came from
+        let next_idx = current_table.next_sub_table;
+        if next_idx < current_table.sub_tables.len() {
+            current_table.sub_tables[next_idx].annotation_block = Some(Box::new(annotation_table));
+        }
+    }
+
     /// Pop the current symbol table off the stack
     fn pop_symbol_table(&mut self) -> SymbolTable {
         self.symbol_table_stack.pop().expect("compiler bug")
@@ -896,6 +946,12 @@ impl Compiler {
             cellvar_cache.insert("__classdict__".to_string());
         }
 
+        // Handle implicit __conditional_annotations__ cell if needed
+        // Only for class scope - module scope uses NAME operations, not DEREF
+        if ste.has_conditional_annotations && scope_type == CompilerScope::Class {
+            cellvar_cache.insert("__conditional_annotations__".to_string());
+        }
+
         // Build freevars using dictbytype (FREE scope, offset by cellvars size)
         let mut freevar_cache = IndexSet::default();
         let mut free_names: Vec<_> = ste
@@ -931,6 +987,12 @@ impl Compiler {
                 bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
                 0,
                 0,
+                0,
+            ),
+            CompilerScope::Annotation => (
+                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
+                0,
+                1, // annotation scope takes one argument (format)
                 0,
             ),
         };
@@ -971,6 +1033,8 @@ impl Compiler {
             in_inlined_comp: false,
             fblock: Vec::with_capacity(MAXBLOCKS),
             symbol_table_index: key,
+            in_conditional_block: 0,
+            next_conditional_annotation_index: 0,
         };
 
         // Push the old compiler unit on the stack (like PyCapsule)
@@ -1058,6 +1122,81 @@ impl Compiler {
         let stack_top = compiler_unwrap_option(self, pop);
         // No parent scope stack to maintain
         unwrap_internal(self, stack_top.finalize_code(&self.opts))
+    }
+
+    /// Exit annotation scope - similar to exit_scope but restores annotation_block to parent
+    fn exit_annotation_scope(&mut self) -> CodeObject {
+        self.pop_annotation_symbol_table();
+
+        let pop = self.code_stack.pop();
+        let stack_top = compiler_unwrap_option(self, pop);
+        unwrap_internal(self, stack_top.finalize_code(&self.opts))
+    }
+
+    /// Enter annotation scope using the symbol table's annotation_block
+    /// Returns false if no annotation_block exists
+    fn enter_annotation_scope(&mut self, func_name: &str) -> CompileResult<bool> {
+        if !self.push_annotation_symbol_table() {
+            return Ok(false);
+        }
+
+        let key = self.symbol_table_stack.len() - 1;
+        let lineno = self.get_source_line_number().get();
+        let annotate_name = format!("<annotate of {func_name}>");
+
+        self.enter_scope(
+            &annotate_name,
+            CompilerScope::Annotation,
+            key,
+            lineno.to_u32(),
+        )?;
+
+        // Override arg_count since enter_scope sets it to 1 but we need the varnames
+        // setup to be correct too
+        self.current_code_info()
+            .metadata
+            .varnames
+            .insert("format".to_owned());
+
+        // Emit format validation: if format > VALUE_WITH_FAKE_GLOBALS: raise NotImplementedError
+        // VALUE_WITH_FAKE_GLOBALS = 2 (from annotationlib.Format)
+        self.emit_format_validation()?;
+
+        Ok(true)
+    }
+
+    /// Emit format parameter validation for annotation scope
+    /// if format > VALUE_WITH_FAKE_GLOBALS (2): raise NotImplementedError
+    fn emit_format_validation(&mut self) -> CompileResult<()> {
+        use bytecode::ComparisonOperator::Greater;
+
+        // Load format parameter (first local variable, index 0)
+        emit!(self, Instruction::LoadFast(0));
+
+        // Load VALUE_WITH_FAKE_GLOBALS constant (2)
+        self.emit_load_const(ConstantData::Integer { value: 2.into() });
+
+        // Compare: format > 2
+        emit!(self, Instruction::CompareOp { op: Greater });
+
+        // Jump to body if format <= 2 (comparison is false)
+        let body_block = self.new_block();
+        emit!(self, Instruction::PopJumpIfFalse { target: body_block });
+
+        // Raise NotImplementedError
+        let not_implemented_error = self.name("NotImplementedError");
+        emit!(self, Instruction::LoadGlobal(not_implemented_error));
+        emit!(
+            self,
+            Instruction::RaiseVarargs {
+                kind: bytecode::RaiseKind::Raise
+            }
+        );
+
+        // Body label - continue with annotation evaluation
+        self.switch_to_block(body_block);
+
+        Ok(())
     }
 
     /// Push a new fblock
@@ -1376,11 +1515,7 @@ impl Compiler {
         self._name_inner(name, |i| &mut i.metadata.names)
     }
     fn varname(&mut self, name: &str) -> CompileResult<bytecode::NameIdx> {
-        if Self::is_forbidden_arg_name(name) {
-            return Err(self.error(CodegenErrorType::SyntaxError(format!(
-                "cannot assign to {name}",
-            ))));
-        }
+        // Note: __debug__ checks are now handled in symboltable phase
         Ok(self._name_inner(name, |i| &mut i.metadata.varnames))
     }
     fn _name_inner(
@@ -1495,6 +1630,8 @@ impl Compiler {
         symbol_table: SymbolTable,
     ) -> CompileResult<()> {
         let size_before = self.code_stack.len();
+        // Set future_annotations from symbol table (detected during symbol table scan)
+        self.future_annotations = symbol_table.future_annotations;
         self.symbol_table_stack.push(symbol_table);
 
         let (doc, statements) = split_doc(&body.body, &self.opts);
@@ -1506,10 +1643,24 @@ impl Compiler {
             emit!(self, Instruction::StoreGlobal(doc))
         }
 
+        // Handle annotations based on future_annotations flag
         if Self::find_ann(statements) {
-            emit!(self, Instruction::SetupAnnotations);
+            if self.future_annotations {
+                // PEP 563: Initialize __annotations__ dict
+                emit!(self, Instruction::SetupAnnotations);
+            } else {
+                // PEP 649: Generate __annotate__ function FIRST (before statements)
+                self.compile_module_annotate(statements)?;
+
+                // PEP 649: Initialize __conditional_annotations__ set after __annotate__
+                if self.current_symbol_table().has_conditional_annotations {
+                    emit!(self, Instruction::BuildSet { size: 0 });
+                    self.store_name("__conditional_annotations__")?;
+                }
+            }
         }
 
+        // Compile all statements
         self.compile_statements(statements)?;
 
         assert_eq!(self.code_stack.len(), size_before);
@@ -1524,10 +1675,25 @@ impl Compiler {
         body: &[Stmt],
         symbol_table: SymbolTable,
     ) -> CompileResult<()> {
+        // Set future_annotations from symbol table (detected during symbol table scan)
+        self.future_annotations = symbol_table.future_annotations;
         self.symbol_table_stack.push(symbol_table);
 
+        // Handle annotations based on future_annotations flag
         if Self::find_ann(body) {
-            emit!(self, Instruction::SetupAnnotations);
+            if self.future_annotations {
+                // PEP 563: Initialize __annotations__ dict
+                emit!(self, Instruction::SetupAnnotations);
+            } else {
+                // PEP 649: Generate __annotate__ function FIRST (before statements)
+                self.compile_module_annotate(body)?;
+
+                // PEP 649: Initialize __conditional_annotations__ set after __annotate__
+                if self.current_symbol_table().has_conditional_annotations {
+                    emit!(self, Instruction::BuildSet { size: 0 });
+                    self.store_name("__conditional_annotations__")?;
+                }
+            }
         }
 
         if let Some((last, body)) = body.split_last() {
@@ -1634,15 +1800,6 @@ impl Compiler {
         symboltable::mangle_name(private, name)
     }
 
-    fn check_forbidden_name(&mut self, name: &str, usage: NameUsage) -> CompileResult<()> {
-        let msg = match usage {
-            NameUsage::Store if is_forbidden_name(name) => "cannot assign to",
-            NameUsage::Delete if is_forbidden_name(name) => "cannot delete",
-            _ => return Ok(()),
-        };
-        Err(self.error(CodegenErrorType::SyntaxError(format!("{msg} {name}"))))
-    }
-
     // = compiler_nameop
     fn compile_name(&mut self, name: &str, usage: NameUsage) -> CompileResult<()> {
         enum NameOp {
@@ -1650,10 +1807,10 @@ impl Compiler {
             Global,
             Deref,
             Name,
+            DictOrGlobals, // PEP 649: can_see_class_scope
         }
 
         let name = self.mangle(name);
-        self.check_forbidden_name(&name, usage)?;
 
         // Special handling for __debug__
         if NameUsage::Load == usage && name == "__debug__" {
@@ -1666,16 +1823,18 @@ impl Compiler {
         // Determine the operation type based on symbol scope
         let is_function_like = self.ctx.in_func();
 
-        // Look up the symbol, handling TypeParams scope specially
-        let (symbol_scope, _is_typeparams) = {
+        // Look up the symbol, handling TypeParams and Annotation scopes specially
+        let (symbol_scope, can_see_class_scope) = {
             let current_table = self.current_symbol_table();
             let is_typeparams = current_table.typ == CompilerScope::TypeParams;
+            let is_annotation = current_table.typ == CompilerScope::Annotation;
+            let can_see_class = current_table.can_see_class_scope;
 
             // First try to find in current table
             let symbol = current_table.lookup(name.as_ref());
 
-            // If not found and we're in TypeParams scope, try parent scope
-            let symbol = if symbol.is_none() && is_typeparams {
+            // If not found and we're in TypeParams or Annotation scope, try parent scope
+            let symbol = if symbol.is_none() && (is_typeparams || is_annotation) {
                 self.symbol_table_stack
                     .get(self.symbol_table_stack.len() - 2) // Try to get parent index
                     .expect("Symbol has no parent! This is a compiler bug.")
@@ -1684,14 +1843,46 @@ impl Compiler {
                 symbol
             };
 
-            (symbol.map(|s| s.scope), is_typeparams)
+            (symbol.map(|s| s.scope), can_see_class)
         };
 
-        let actual_scope = symbol_scope.ok_or_else(|| {
-            self.error(CodegenErrorType::SyntaxError(format!(
-                "The symbol '{name}' must be present in the symbol table"
-            )))
-        })?;
+        // Special handling for class scope implicit cell variables
+        // These are treated as Cell even if not explicitly marked in symbol table
+        // Only for LOAD operations - explicit stores like `__class__ = property(...)`
+        // should use STORE_NAME to store in class namespace dict
+        let symbol_scope = {
+            let current_table = self.current_symbol_table();
+            if current_table.typ == CompilerScope::Class
+                && usage == NameUsage::Load
+                && (name == "__class__"
+                    || name == "__classdict__"
+                    || name == "__conditional_annotations__")
+            {
+                Some(SymbolScope::Cell)
+            } else {
+                symbol_scope
+            }
+        };
+
+        // In annotation or type params scope, missing symbols are treated as global implicit
+        // This allows referencing global names like Union, Optional, etc. that are imported
+        // at module level but not explicitly bound in the function scope
+        let actual_scope = match symbol_scope {
+            Some(scope) => scope,
+            None => {
+                let current_table = self.current_symbol_table();
+                if matches!(
+                    current_table.typ,
+                    CompilerScope::Annotation | CompilerScope::TypeParams
+                ) {
+                    SymbolScope::GlobalImplicit
+                } else {
+                    return Err(self.error(CodegenErrorType::SyntaxError(format!(
+                        "the symbol '{name}' must be present in the symbol table"
+                    ))));
+                }
+            }
+        };
 
         // Determine operation type based on scope
         let op_type = match actual_scope {
@@ -1705,7 +1896,11 @@ impl Compiler {
                 }
             }
             SymbolScope::GlobalImplicit => {
-                if is_function_like {
+                // PEP 649: In annotation scope with class visibility, use DictOrGlobals
+                // to check classdict first before globals
+                if can_see_class_scope {
+                    NameOp::DictOrGlobals
+                } else if is_function_like {
                     NameOp::Global
                 } else {
                     NameOp::Name
@@ -1764,6 +1959,25 @@ impl Compiler {
                     NameUsage::Delete => Instruction::DeleteName,
                 };
                 self.emit_arg(idx, op);
+            }
+            NameOp::DictOrGlobals => {
+                // PEP 649: First check classdict (from __classdict__ freevar), then globals
+                let idx = self.get_global_name_index(&name);
+                match usage {
+                    NameUsage::Load => {
+                        // Load __classdict__ first (it's a free variable in annotation scope)
+                        let classdict_idx = self.get_free_var_index("__classdict__")?;
+                        self.emit_arg(classdict_idx, Instruction::LoadDeref);
+                        self.emit_arg(idx, Instruction::LoadFromDictOrGlobals);
+                    }
+                    // Store/Delete in annotation scope should use Name ops
+                    NameUsage::Store => {
+                        self.emit_arg(idx, Instruction::StoreName);
+                    }
+                    NameUsage::Delete => {
+                        self.emit_arg(idx, Instruction::DeleteName);
+                    }
+                }
             }
         }
 
@@ -1897,6 +2111,7 @@ impl Compiler {
                 elif_else_clauses,
                 ..
             }) => {
+                self.enter_conditional_block();
                 match elif_else_clauses.as_slice() {
                     // Only if
                     [] => {
@@ -1944,6 +2159,7 @@ impl Compiler {
                         self.switch_to_block(after_block);
                     }
                 }
+                self.leave_conditional_block();
             }
             Stmt::While(StmtWhile {
                 test, body, orelse, ..
@@ -1990,11 +2206,13 @@ impl Compiler {
                 is_star,
                 ..
             }) => {
+                self.enter_conditional_block();
                 if *is_star {
                     self.compile_try_star_except(body, handlers, orelse, finalbody)?
                 } else {
                     self.compile_try_statement(body, handlers, orelse, finalbody)?
                 }
+                self.leave_conditional_block();
             }
             Stmt::FunctionDef(StmtFunctionDef {
                 name,
@@ -2117,8 +2335,9 @@ impl Compiler {
                 target,
                 annotation,
                 value,
+                simple,
                 ..
-            }) => self.compile_annotated_assign(target, annotation, value.as_deref())?,
+            }) => self.compile_annotated_assign(target, annotation, value.as_deref(), *simple)?,
             Stmt::Delete(StmtDelete { targets, .. }) => {
                 for target in targets {
                     self.compile_delete(target)?;
@@ -2193,7 +2412,6 @@ impl Compiler {
         match &expression {
             Expr::Name(ExprName { id, .. }) => self.compile_name(id.as_str(), NameUsage::Delete)?,
             Expr::Attribute(ExprAttribute { value, attr, .. }) => {
-                self.check_forbidden_name(attr.as_str(), NameUsage::Delete)?;
                 self.compile_expression(value)?;
                 let idx = self.name(attr.as_str());
                 emit!(self, Instruction::DeleteAttr { idx });
@@ -3212,10 +3430,6 @@ impl Compiler {
         Ok(())
     }
 
-    fn is_forbidden_arg_name(name: &str) -> bool {
-        is_forbidden_name(name)
-    }
-
     /// Compile default arguments
     // = compiler_default_arguments
     fn compile_default_arguments(
@@ -3306,12 +3520,19 @@ impl Compiler {
         // Set qualname
         self.set_qualname();
 
-        // Handle docstring
+        // Handle docstring - store in co_consts[0] if present
         let (doc_str, body) = split_doc(body, &self.opts);
-        self.current_code_info()
-            .metadata
-            .consts
-            .insert_full(ConstantData::None);
+        if let Some(doc) = &doc_str {
+            // Docstring present: store in co_consts[0] and set HAS_DOCSTRING flag
+            self.current_code_info()
+                .metadata
+                .consts
+                .insert_full(ConstantData::Str {
+                    value: doc.to_string().into(),
+                });
+            self.current_code_info().flags |= bytecode::CodeFlags::HAS_DOCSTRING;
+        }
+        // If no docstring, don't add None to co_consts
 
         // Compile body statements
         self.compile_statements(body)?;
@@ -3331,30 +3552,41 @@ impl Compiler {
         // Create function object with closure
         self.make_closure(code, funcflags)?;
 
-        // Handle docstring if present
-        if let Some(doc) = doc_str {
-            emit!(self, Instruction::Copy { index: 1_u32 });
-            self.emit_load_const(ConstantData::Str {
-                value: doc.to_string().into(),
-            });
-            emit!(self, Instruction::Swap { index: 2 });
-            let doc_attr = self.name("__doc__");
-            emit!(self, Instruction::StoreAttr { idx: doc_attr });
-        }
+        // Note: docstring is now retrieved from co_consts[0] by the VM
+        // when HAS_DOCSTRING flag is set, so no runtime __doc__ assignment needed
 
         Ok(())
     }
 
-    /// Compile function annotations
-    // = compiler_visit_annotations
-    fn visit_annotations(
+    /// Compile function annotations as a closure (PEP 649)
+    /// Returns true if an __annotate__ closure was created
+    /// Uses symbol table's annotation_block for proper scoping.
+    fn compile_annotations_closure(
         &mut self,
+        func_name: &str,
         parameters: &Parameters,
         returns: Option<&Expr>,
-    ) -> CompileResult<u32> {
-        let mut num_annotations = 0;
+    ) -> CompileResult<bool> {
+        // Try to enter annotation scope - returns false if no annotation_block exists
+        if !self.enter_annotation_scope(func_name)? {
+            return Ok(false);
+        }
 
-        // Handle parameter annotations
+        // Count annotations
+        let parameters_iter = core::iter::empty()
+            .chain(&parameters.posonlyargs)
+            .chain(&parameters.args)
+            .chain(&parameters.kwonlyargs)
+            .map(|x| &x.parameter)
+            .chain(parameters.vararg.as_deref())
+            .chain(parameters.kwarg.as_deref());
+
+        let num_annotations: u32 =
+            u32::try_from(parameters_iter.filter(|p| p.annotation.is_some()).count())
+                .expect("too many annotations")
+                + if returns.is_some() { 1 } else { 0 };
+
+        // Compile annotations inside the annotation scope
         let parameters_iter = core::iter::empty()
             .chain(&parameters.posonlyargs)
             .chain(&parameters.args)
@@ -3369,20 +3601,193 @@ impl Compiler {
                     value: self.mangle(param.name.as_str()).into_owned().into(),
                 });
                 self.compile_annotation(annotation)?;
-                num_annotations += 1;
             }
         }
 
-        // Handle return annotation last
+        // Handle return annotation
         if let Some(annotation) = returns {
             self.emit_load_const(ConstantData::Str {
                 value: "return".into(),
             });
             self.compile_annotation(annotation)?;
-            num_annotations += 1;
         }
 
-        Ok(num_annotations)
+        // Build the map and return it
+        emit!(
+            self,
+            Instruction::BuildMap {
+                size: num_annotations,
+            }
+        );
+        emit!(self, Instruction::ReturnValue);
+
+        // Exit the annotation scope and get the code object
+        let annotate_code = self.exit_annotation_scope();
+
+        // Make a closure from the code object
+        self.make_closure(annotate_code, bytecode::MakeFunctionFlags::empty())?;
+
+        Ok(true)
+    }
+
+    /// Collect simple (non-conditional) annotations from module body
+    /// Returns list of (name, annotation_expr) pairs
+    fn collect_simple_annotations(body: &[Stmt]) -> Vec<(&str, &Expr)> {
+        let mut annotations = Vec::new();
+        for stmt in body {
+            if let Stmt::AnnAssign(StmtAnnAssign {
+                target,
+                annotation,
+                simple,
+                ..
+            }) = stmt
+                && *simple
+                && let Expr::Name(ExprName { id, .. }) = target.as_ref()
+            {
+                annotations.push((id.as_str(), annotation.as_ref()));
+            }
+        }
+        annotations
+    }
+
+    /// Compile module-level __annotate__ function (PEP 649)
+    /// Returns true if __annotate__ was created and stored
+    fn compile_module_annotate(&mut self, body: &[Stmt]) -> CompileResult<bool> {
+        // Collect simple annotations from module body first
+        let annotations = Self::collect_simple_annotations(body);
+
+        if annotations.is_empty() {
+            return Ok(false);
+        }
+
+        // Check if we have conditional annotations
+        let has_conditional = self.current_symbol_table().has_conditional_annotations;
+
+        // Get parent scope type and name BEFORE pushing annotation symbol table
+        let parent_scope_type = self.current_symbol_table().typ;
+        let parent_name = self
+            .symbol_table_stack
+            .last()
+            .map(|t| t.name.as_str())
+            .unwrap_or("module")
+            .to_owned();
+        let scope_name = format!("<annotate of {parent_name}>");
+
+        // Try to push annotation symbol table from current scope
+        if !self.push_current_annotation_symbol_table() {
+            return Ok(false);
+        }
+
+        // Enter annotation scope for code generation
+        let key = self.symbol_table_stack.len() - 1;
+        let lineno = self.get_source_line_number().get();
+        self.enter_scope(&scope_name, CompilerScope::Annotation, key, lineno.to_u32())?;
+
+        // Add 'format' parameter to varnames
+        self.current_code_info()
+            .metadata
+            .varnames
+            .insert("format".to_owned());
+
+        // Emit format validation: if format > VALUE_WITH_FAKE_GLOBALS: raise NotImplementedError
+        self.emit_format_validation()?;
+
+        if has_conditional {
+            // PEP 649: Build dict incrementally, checking conditional annotations
+            // Start with empty dict
+            emit!(self, Instruction::BuildMap { size: 0 });
+
+            // Process each annotation
+            for (idx, (name, annotation)) in annotations.iter().enumerate() {
+                // Check if index is in __conditional_annotations__
+                let not_set_block = self.new_block();
+
+                // LOAD_CONST index
+                self.emit_load_const(ConstantData::Integer { value: idx.into() });
+                // Load __conditional_annotations__ from appropriate scope
+                // Class scope: LoadDeref (freevars), Module scope: LoadGlobal
+                if parent_scope_type == CompilerScope::Class {
+                    let idx = self.get_free_var_index("__conditional_annotations__")?;
+                    emit!(self, Instruction::LoadDeref(idx));
+                } else {
+                    let cond_annotations_name = self.name("__conditional_annotations__");
+                    emit!(self, Instruction::LoadGlobal(cond_annotations_name));
+                }
+                // CONTAINS_OP (in)
+                emit!(self, Instruction::ContainsOp(bytecode::Invert::No));
+                // POP_JUMP_IF_FALSE not_set
+                emit!(
+                    self,
+                    Instruction::PopJumpIfFalse {
+                        target: not_set_block
+                    }
+                );
+
+                // Annotation value
+                self.compile_annotation(annotation)?;
+                // COPY dict to TOS
+                emit!(self, Instruction::Copy { index: 2 });
+                // LOAD_CONST name
+                self.emit_load_const(ConstantData::Str {
+                    value: self.mangle(name).into_owned().into(),
+                });
+                // STORE_SUBSCR - dict[name] = value
+                emit!(self, Instruction::StoreSubscr);
+
+                // not_set label
+                self.switch_to_block(not_set_block);
+            }
+
+            // Return the dict
+            emit!(self, Instruction::ReturnValue);
+        } else {
+            // No conditional annotations - use simple BuildMap
+            let num_annotations = u32::try_from(annotations.len()).expect("too many annotations");
+
+            // Compile annotations inside the annotation scope
+            for (name, annotation) in annotations {
+                self.emit_load_const(ConstantData::Str {
+                    value: self.mangle(name).into_owned().into(),
+                });
+                self.compile_annotation(annotation)?;
+            }
+
+            // Build the map and return it
+            emit!(
+                self,
+                Instruction::BuildMap {
+                    size: num_annotations,
+                }
+            );
+            emit!(self, Instruction::ReturnValue);
+        }
+
+        // Exit annotation scope - pop symbol table, restore to parent's annotation_block, and get code
+        let annotation_table = self.pop_symbol_table();
+        // Restore annotation_block to module's symbol table
+        self.symbol_table_stack
+            .last_mut()
+            .expect("no module symbol table")
+            .annotation_block = Some(Box::new(annotation_table));
+        // Exit code scope
+        let pop = self.code_stack.pop();
+        let annotate_code = unwrap_internal(
+            self,
+            compiler_unwrap_option(self, pop).finalize_code(&self.opts),
+        );
+
+        // Make a closure from the code object
+        self.make_closure(annotate_code, bytecode::MakeFunctionFlags::empty())?;
+
+        // Store as __annotate_func__ for classes, __annotate__ for modules
+        let name = if parent_scope_type == CompilerScope::Class {
+            "__annotate_func__"
+        } else {
+            "__annotate__"
+        };
+        self.store_name(name)?;
+
+        Ok(true)
     }
 
     // = compiler_function
@@ -3449,18 +3854,12 @@ impl Compiler {
             }
         }
 
-        // Compile annotations
-        let mut annotations_flag = bytecode::MakeFunctionFlags::empty();
-        let num_annotations = self.visit_annotations(parameters, returns)?;
-        if num_annotations > 0 {
-            annotations_flag = bytecode::MakeFunctionFlags::ANNOTATIONS;
-            emit!(
-                self,
-                Instruction::BuildMap {
-                    size: num_annotations,
-                }
-            );
-        }
+        // Compile annotations as closure (PEP 649)
+        let annotations_flag = if self.compile_annotations_closure(name, parameters, returns)? {
+            bytecode::MakeFunctionFlags::ANNOTATE
+        } else {
+            bytecode::MakeFunctionFlags::empty()
+        };
 
         // Compile function body
         let final_funcflags = funcflags | annotations_flag;
@@ -3543,10 +3942,14 @@ impl Compiler {
     fn get_ref_type(&self, name: &str) -> Result<SymbolScope, CodegenErrorType> {
         let table = self.symbol_table_stack.last().unwrap();
 
-        // Special handling for __class__ and __classdict__ in class scope
+        // Special handling for __class__, __classdict__, and __conditional_annotations__ in class scope
         // This should only apply when we're actually IN a class body,
         // not when we're in a method nested inside a class.
-        if table.typ == CompilerScope::Class && (name == "__class__" || name == "__classdict__") {
+        if table.typ == CompilerScope::Class
+            && (name == "__class__"
+                || name == "__classdict__"
+                || name == "__conditional_annotations__")
+        {
             return Ok(SymbolScope::Cell);
         }
         match table.lookup(name) {
@@ -3665,6 +4068,16 @@ impl Compiler {
                 self,
                 Instruction::SetFunctionAttribute {
                     attr: bytecode::MakeFunctionFlags::ANNOTATIONS
+                }
+            );
+        }
+
+        // Set __annotate__ closure if present (PEP 649)
+        if flags.contains(bytecode::MakeFunctionFlags::ANNOTATE) {
+            emit!(
+                self,
+                Instruction::SetFunctionAttribute {
+                    attr: bytecode::MakeFunctionFlags::ANNOTATE
                 }
             );
         }
@@ -3799,9 +4212,31 @@ impl Compiler {
             emit!(self, Instruction::StoreName(dunder_type_params));
         }
 
-        // Setup annotations if needed
+        // PEP 649: Initialize __classdict__ cell for class annotation scope
+        if self.current_symbol_table().needs_classdict {
+            let locals_name = self.name("locals");
+            emit!(self, Instruction::LoadName(locals_name));
+            emit!(self, Instruction::PushNull);
+            emit!(self, Instruction::Call { nargs: 0 });
+            let classdict_idx = self.get_cell_var_index("__classdict__")?;
+            emit!(self, Instruction::StoreDeref(classdict_idx));
+        }
+
+        // Handle class annotations based on future_annotations flag
         if Self::find_ann(body) {
-            emit!(self, Instruction::SetupAnnotations);
+            if self.future_annotations {
+                // PEP 563: Initialize __annotations__ dict for class
+                emit!(self, Instruction::SetupAnnotations);
+            } else {
+                // PEP 649: Initialize __conditional_annotations__ set if needed for class
+                if self.current_symbol_table().has_conditional_annotations {
+                    emit!(self, Instruction::BuildSet { size: 0 });
+                    self.store_name("__conditional_annotations__")?;
+                }
+
+                // PEP 649: Generate __annotate__ function for class annotations
+                self.compile_module_annotate(body)?;
+            }
         }
 
         // 3. Compile the class body
@@ -4025,6 +4460,8 @@ impl Compiler {
     }
 
     fn compile_while(&mut self, test: &Expr, body: &[Stmt], orelse: &[Stmt]) -> CompileResult<()> {
+        self.enter_conditional_block();
+
         let while_block = self.new_block();
         let else_block = self.new_block();
         let after_block = self.new_block();
@@ -4053,6 +4490,8 @@ impl Compiler {
         // Note: PopBlock is no longer emitted for loops
         self.compile_statements(orelse)?;
         self.switch_to_block(after_block);
+
+        self.leave_conditional_block();
         Ok(())
     }
 
@@ -4062,6 +4501,8 @@ impl Compiler {
         body: &[Stmt],
         is_async: bool,
     ) -> CompileResult<()> {
+        self.enter_conditional_block();
+
         // Python 3.12+ style with statement:
         //
         // BEFORE_WITH          # TOS: ctx_mgr -> [__exit__, __enter__ result]
@@ -4274,6 +4715,7 @@ impl Compiler {
         // ===== After block =====
         self.switch_to_block(after_block);
 
+        self.leave_conditional_block();
         Ok(())
     }
 
@@ -4285,6 +4727,8 @@ impl Compiler {
         orelse: &[Stmt],
         is_async: bool,
     ) -> CompileResult<()> {
+        self.enter_conditional_block();
+
         // Start loop
         let for_block = self.new_block();
         let else_block = self.new_block();
@@ -4352,6 +4796,7 @@ impl Compiler {
 
         self.switch_to_block(after_block);
 
+        self.leave_conditional_block();
         Ok(())
     }
 
@@ -5324,8 +5769,10 @@ impl Compiler {
     }
 
     fn compile_match(&mut self, subject: &Expr, cases: &[MatchCase]) -> CompileResult<()> {
+        self.enter_conditional_block();
         let mut pattern_context = PatternContext::new();
         self.compile_match_inner(subject, cases, &mut pattern_context)?;
+        self.leave_conditional_block();
         Ok(())
     }
 
@@ -5457,31 +5904,61 @@ impl Compiler {
         target: &Expr,
         annotation: &Expr,
         value: Option<&Expr>,
+        simple: bool,
     ) -> CompileResult<()> {
+        // Perform the actual assignment first
         if let Some(value) = value {
             self.compile_expression(value)?;
             self.compile_store(target)?;
         }
 
-        // Annotations are only evaluated in a module or class.
-        if self.ctx.in_func() {
-            return Ok(());
-        }
+        // If we have a simple name in module or class scope, store annotation
+        if simple
+            && !self.ctx.in_func()
+            && let Expr::Name(ExprName { id, .. }) = target
+        {
+            if self.future_annotations {
+                // PEP 563: Store stringified annotation directly to __annotations__
+                // Compile annotation as string
+                self.compile_annotation(annotation)?;
+                // Load __annotations__
+                let annotations_name = self.name("__annotations__");
+                emit!(self, Instruction::LoadName(annotations_name));
+                // Load the variable name
+                self.emit_load_const(ConstantData::Str {
+                    value: self.mangle(id.as_str()).into_owned().into(),
+                });
+                // Store: __annotations__[name] = annotation
+                emit!(self, Instruction::StoreSubscr);
+            } else {
+                // PEP 649: Handle conditional annotations
+                if self.current_symbol_table().has_conditional_annotations {
+                    // Allocate an index for every annotation when has_conditional_annotations
+                    // This keeps indices aligned with compile_module_annotate's enumeration
+                    let code_info = self.current_code_info();
+                    let annotation_index = code_info.next_conditional_annotation_index;
+                    code_info.next_conditional_annotation_index += 1;
 
-        // Compile annotation:
-        self.compile_annotation(annotation)?;
+                    // Determine if this annotation is conditional
+                    // Module and Class scopes both need all annotations tracked
+                    let scope_type = self.current_symbol_table().typ;
+                    let in_conditional_block = self.current_code_info().in_conditional_block > 0;
+                    let is_conditional =
+                        matches!(scope_type, CompilerScope::Module | CompilerScope::Class)
+                            || in_conditional_block;
 
-        if let Expr::Name(ExprName { id, .. }) = &target {
-            // Store as dict entry in __annotations__ dict:
-            let annotations = self.name("__annotations__");
-            emit!(self, Instruction::LoadName(annotations));
-            self.emit_load_const(ConstantData::Str {
-                value: self.mangle(id.as_str()).into_owned().into(),
-            });
-            emit!(self, Instruction::StoreSubscr);
-        } else {
-            // Drop annotation if not assigned to simple identifier.
-            emit!(self, Instruction::PopTop);
+                    // Only add to __conditional_annotations__ set if actually conditional
+                    if is_conditional {
+                        let cond_annotations_name = self.name("__conditional_annotations__");
+                        emit!(self, Instruction::LoadName(cond_annotations_name));
+                        self.emit_load_const(ConstantData::Integer {
+                            value: annotation_index.into(),
+                        });
+                        emit!(self, Instruction::SetAdd { i: 0_u32 });
+                        emit!(self, Instruction::PopTop);
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -5496,7 +5973,6 @@ impl Compiler {
                 self.compile_subscript(value, slice, *ctx)?;
             }
             Expr::Attribute(ExprAttribute { value, attr, .. }) => {
-                self.check_forbidden_name(attr.as_str(), NameUsage::Store)?;
                 self.compile_expression(value)?;
                 let idx = self.name(attr.as_str());
                 emit!(self, Instruction::StoreAttr { idx });
@@ -5591,7 +6067,6 @@ impl Compiler {
             }
             Expr::Attribute(ExprAttribute { value, attr, .. }) => {
                 let attr = attr.as_str();
-                self.check_forbidden_name(attr, NameUsage::Store)?;
                 self.compile_expression(value)?;
                 emit!(self, Instruction::Copy { index: 1_u32 });
                 let idx = self.name(attr);
@@ -6100,10 +6575,7 @@ impl Compiler {
                     in_async_scope: false,
                 };
 
-                self.current_code_info()
-                    .metadata
-                    .consts
-                    .insert_full(ConstantData::None);
+                // Lambda cannot have docstrings, so no None is added to co_consts
 
                 self.compile_expression(body)?;
                 self.emit_return_value();
@@ -6282,8 +6754,8 @@ impl Compiler {
             Expr::FString(fstring) => {
                 self.compile_expr_fstring(fstring)?;
             }
-            Expr::TString(_) => {
-                return Err(self.error(CodegenErrorType::NotImplementedYet));
+            Expr::TString(tstring) => {
+                self.compile_expr_tstring(tstring)?;
             }
             Expr::StringLiteral(string) => {
                 let value = string.value.to_str();
@@ -6421,12 +6893,6 @@ impl Compiler {
         // Normal arguments:
         let (size, unpack) = self.gather_elements(additional_positional, &arguments.args)?;
         let has_double_star = arguments.keywords.iter().any(|k| k.arg.is_none());
-
-        for keyword in &arguments.keywords {
-            if let Some(name) = &keyword.arg {
-                self.check_forbidden_name(name.as_str(), NameUsage::Store)?;
-            }
-        }
 
         if unpack || has_double_star {
             // Create a tuple with positional args:
@@ -7030,6 +7496,19 @@ impl Compiler {
         self.code_stack.last_mut().expect("no code on stack")
     }
 
+    /// Enter a conditional block (if/for/while/match/try/with)
+    /// PEP 649: Track conditional annotation context
+    fn enter_conditional_block(&mut self) {
+        self.current_code_info().in_conditional_block += 1;
+    }
+
+    /// Leave a conditional block
+    fn leave_conditional_block(&mut self) {
+        let code_info = self.current_code_info();
+        debug_assert!(code_info.in_conditional_block > 0);
+        code_info.in_conditional_block -= 1;
+    }
+
     /// Compile break or continue statement with proper fblock cleanup.
     /// compiler_break, compiler_continue
     /// This handles unwinding through With blocks and exception handlers.
@@ -7462,6 +7941,114 @@ impl Compiler {
                     size: element_count
                 }
             );
+        }
+
+        Ok(())
+    }
+
+    fn compile_expr_tstring(&mut self, expr_tstring: &ExprTString) -> CompileResult<()> {
+        // TStringValue can contain multiple TString parts (implicit concatenation)
+        // Each TString part should be compiled and the results merged into a single Template
+        let tstring_value = &expr_tstring.value;
+
+        // Collect all strings and compile all interpolations
+        let mut all_strings: Vec<Wtf8Buf> = Vec::new();
+        let mut current_string = Wtf8Buf::new();
+        let mut interp_count: u32 = 0;
+
+        for tstring in tstring_value.iter() {
+            self.compile_tstring_into(
+                tstring,
+                &mut all_strings,
+                &mut current_string,
+                &mut interp_count,
+            )?;
+        }
+
+        // Add trailing string
+        all_strings.push(std::mem::take(&mut current_string));
+
+        // Now build the Template:
+        // Stack currently has all interpolations from compile_tstring_into calls
+
+        // 1. Build interpolations tuple from the interpolations on the stack
+        emit!(self, Instruction::BuildTuple { size: interp_count });
+
+        // 2. Load all string parts
+        let string_count: u32 = all_strings
+            .len()
+            .try_into()
+            .expect("t-string string count overflowed");
+        for s in &all_strings {
+            self.emit_load_const(ConstantData::Str { value: s.clone() });
+        }
+
+        // 3. Build strings tuple
+        emit!(self, Instruction::BuildTuple { size: string_count });
+
+        // 4. Swap so strings is below interpolations: [interps, strings] -> [strings, interps]
+        emit!(self, Instruction::Swap { index: 2 });
+
+        // 5. Build the Template
+        emit!(self, Instruction::BuildTemplate);
+
+        Ok(())
+    }
+
+    fn compile_tstring_into(
+        &mut self,
+        tstring: &TString,
+        strings: &mut Vec<Wtf8Buf>,
+        current_string: &mut Wtf8Buf,
+        interp_count: &mut u32,
+    ) -> CompileResult<()> {
+        for element in &tstring.elements {
+            match element {
+                InterpolatedStringElement::Literal(lit) => {
+                    // Accumulate literal parts into current_string
+                    current_string.push_str(&lit.value);
+                }
+                InterpolatedStringElement::Interpolation(interp) => {
+                    // Finish current string segment
+                    strings.push(std::mem::take(current_string));
+
+                    // Compile the interpolation value
+                    self.compile_expression(&interp.expression)?;
+
+                    // Load the expression source string
+                    let expr_range = interp.expression.range();
+                    let expr_source = self.source_file.slice(expr_range);
+                    self.emit_load_const(ConstantData::Str {
+                        value: expr_source.to_string().into(),
+                    });
+
+                    // Determine conversion code
+                    let conversion: u32 = match interp.conversion {
+                        ConversionFlag::None => 0,
+                        ConversionFlag::Str => 1,
+                        ConversionFlag::Repr => 2,
+                        ConversionFlag::Ascii => 3,
+                    };
+
+                    // Handle format_spec
+                    let has_format_spec = interp.format_spec.is_some();
+                    if let Some(format_spec) = &interp.format_spec {
+                        // Compile format_spec as a string using fstring element compilation
+                        // Use default FStringFlags since format_spec syntax is independent of t-string flags
+                        self.compile_fstring_elements(
+                            FStringFlags::empty(),
+                            &format_spec.elements,
+                        )?;
+                    }
+
+                    // Emit BUILD_INTERPOLATION
+                    // oparg encoding: (conversion << 2) | has_format_spec
+                    let oparg = (conversion << 2) | (has_format_spec as u32);
+                    emit!(self, Instruction::BuildInterpolation { oparg });
+
+                    *interp_count += 1;
+                }
+            }
         }
 
         Ok(())
