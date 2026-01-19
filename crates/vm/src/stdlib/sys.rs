@@ -76,8 +76,11 @@ mod sys {
     #[pyattr(name = "_rustpython_debugbuild")]
     const RUSTPYTHON_DEBUGBUILD: bool = cfg!(debug_assertions);
 
+    #[cfg(not(windows))]
     #[pyattr(name = "abiflags")]
-    pub(crate) const ABIFLAGS: &str = "t"; // 't' for free-threaded (no GIL)
+    const ABIFLAGS_ATTR: &str = "t"; // 't' for free-threaded (no GIL)
+    // Internal constant used for sysconfigdata_name
+    pub(crate) const ABIFLAGS: &str = "t";
     #[pyattr(name = "api_version")]
     const API_VERSION: u32 = 0x0; // what C api?
     #[pyattr(name = "copyright")]
@@ -144,6 +147,10 @@ mod sys {
     #[pyattr]
     fn platlibdir(_vm: &VirtualMachine) -> &'static str {
         option_env!("RUSTPYTHON_PLATLIBDIR").unwrap_or("lib")
+    }
+    #[pyattr]
+    fn _stdlib_dir(vm: &VirtualMachine) -> PyObjectRef {
+        vm.state.config.paths.stdlib_dir.clone().to_pyobject(vm)
     }
 
     // alphabetical order with segments of pyattr and others
@@ -527,6 +534,7 @@ mod sys {
             "_multiarch" => ctx.new_str(multiarch()),
             "version" => version_info(vm),
             "hexversion" => ctx.new_int(version::VERSION_HEX),
+            "supports_isolated_interpreters" => ctx.new_bool(false),
         })
     }
 
@@ -626,6 +634,12 @@ mod sys {
     #[pyfunction]
     const fn _is_gil_enabled() -> bool {
         false // RustPython has no GIL (like free-threaded Python)
+    }
+
+    /// Return True if remote debugging is enabled, False otherwise.
+    #[pyfunction]
+    const fn is_remote_debug_enabled() -> bool {
+        false // RustPython does not support remote debugging
     }
 
     #[pyfunction]
@@ -1203,6 +1217,32 @@ mod sys {
     #[pyfunction]
     fn get_coroutine_origin_tracking_depth() -> i32 {
         crate::vm::thread::COROUTINE_ORIGIN_TRACKING_DEPTH.get() as i32
+    }
+
+    #[pyfunction]
+    fn _clear_type_descriptors(type_obj: PyTypeRef, vm: &VirtualMachine) -> PyResult<()> {
+        use crate::types::PyTypeFlags;
+
+        // Check if type is immutable
+        if type_obj.slots.flags.has_feature(PyTypeFlags::IMMUTABLETYPE) {
+            return Err(vm.new_type_error("argument is immutable".to_owned()));
+        }
+
+        let mut attributes = type_obj.attributes.write();
+
+        // Remove __dict__ descriptor if present
+        attributes.swap_remove(identifier!(vm, __dict__));
+
+        // Remove __weakref__ descriptor if present
+        attributes.swap_remove(identifier!(vm, __weakref__));
+
+        drop(attributes);
+
+        // Update slots to notify subclasses and recalculate cached values
+        type_obj.update_slot::<true>(identifier!(vm, __dict__), &vm.ctx);
+        type_obj.update_slot::<true>(identifier!(vm, __weakref__), &vm.ctx);
+
+        Ok(())
     }
 
     #[pyfunction]

@@ -1,3 +1,5 @@
+#[cfg(feature = "flame")]
+use crate::bytecode::InstructionMetadata;
 use crate::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
     builtins::{
@@ -13,6 +15,7 @@ use crate::{
     coroutine::Coro,
     exceptions::ExceptionCtor,
     function::{ArgMapping, Either, FuncArgs},
+    object::{Traverse, TraverseFn},
     protocol::{PyIter, PyIterReturn},
     scope::Scope,
     stdlib::{builtins, typing},
@@ -66,7 +69,7 @@ type Lasti = atomic::AtomicU32;
 #[cfg(not(feature = "threading"))]
 type Lasti = core::cell::Cell<u32>;
 
-#[pyclass(module = false, name = "frame")]
+#[pyclass(module = false, name = "frame", traverse = "manual")]
 pub struct Frame {
     pub code: PyRef<PyCode>,
     pub func_obj: Option<PyObjectRef>,
@@ -97,6 +100,27 @@ impl PyPayload for Frame {
     }
 }
 
+unsafe impl Traverse for FrameState {
+    fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
+        self.stack.traverse(tracer_fn);
+    }
+}
+
+unsafe impl Traverse for Frame {
+    fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
+        self.code.traverse(tracer_fn);
+        self.func_obj.traverse(tracer_fn);
+        self.fastlocals.traverse(tracer_fn);
+        self.cells_frees.traverse(tracer_fn);
+        self.locals.traverse(tracer_fn);
+        self.globals.traverse(tracer_fn);
+        self.builtins.traverse(tracer_fn);
+        self.trace.traverse(tracer_fn);
+        self.state.traverse(tracer_fn);
+        self.temporary_refs.traverse(tracer_fn);
+    }
+}
+
 // Running a frame can result in one of the below:
 pub enum ExecutionResult {
     Return(PyObjectRef),
@@ -115,10 +139,24 @@ impl Frame {
         func_obj: Option<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> Self {
-        let cells_frees = core::iter::repeat_with(|| PyCell::default().into_ref(&vm.ctx))
-            .take(code.cellvars.len())
-            .chain(closure.iter().cloned())
-            .collect();
+        let nlocals = code.varnames.len();
+        let num_cells = code.cellvars.len();
+        let nfrees = closure.len();
+
+        let cells_frees: Box<[PyCellRef]> =
+            core::iter::repeat_with(|| PyCell::default().into_ref(&vm.ctx))
+                .take(num_cells)
+                .chain(closure.iter().cloned())
+                .collect();
+
+        // Extend fastlocals to include varnames + cellvars + freevars (localsplus)
+        let total_locals = nlocals + num_cells + nfrees;
+        let mut fastlocals_vec: Vec<Option<PyObjectRef>> = vec![None; total_locals];
+
+        // Store cell objects at cellvars and freevars positions
+        for (i, cell) in cells_frees.iter().enumerate() {
+            fastlocals_vec[nlocals + i] = Some(cell.clone().into());
+        }
 
         let state = FrameState {
             stack: BoxVec::new(code.max_stackdepth as usize),
@@ -127,7 +165,7 @@ impl Frame {
         };
 
         Self {
-            fastlocals: PyMutex::new(vec![None; code.varnames.len()].into_boxed_slice()),
+            fastlocals: PyMutex::new(fastlocals_vec.into_boxed_slice()),
             cells_frees,
             locals: scope.locals,
             globals: scope.globals,
@@ -626,35 +664,14 @@ impl ExecutingFrame<'_> {
                     target: target.get(arg),
                 },
             ),
-            Instruction::BuildListFromTuples { size } => {
-                // SAFETY: compiler guarantees `size` tuples are on the stack
-                let elements = unsafe { self.flatten_tuples(size.get(arg) as usize) };
-                let list_obj = vm.ctx.new_list(elements);
-                self.push_value(list_obj.into());
-                Ok(None)
-            }
             Instruction::BuildList { size } => {
-                let elements = self.pop_multiple(size.get(arg) as usize).collect();
+                let sz = size.get(arg) as usize;
+                let elements = self.pop_multiple(sz).collect();
                 let list_obj = vm.ctx.new_list(elements);
                 self.push_value(list_obj.into());
                 Ok(None)
-            }
-            Instruction::BuildMapForCall { size } => {
-                self.execute_build_map_for_call(vm, size.get(arg))
             }
             Instruction::BuildMap { size } => self.execute_build_map(vm, size.get(arg)),
-            Instruction::BuildSetFromTuples { size } => {
-                let set = PySet::default().into_ref(&vm.ctx);
-                for element in self.pop_multiple(size.get(arg) as usize) {
-                    // SAFETY: trust compiler
-                    let tup = unsafe { element.downcast_unchecked::<PyTuple>() };
-                    for item in tup.iter() {
-                        set.add(item.clone(), vm)?;
-                    }
-                }
-                self.push_value(set.into());
-                Ok(None)
-            }
             Instruction::BuildSet { size } => {
                 let set = PySet::default().into_ref(&vm.ctx);
                 for element in self.pop_multiple(size.get(arg) as usize) {
@@ -680,21 +697,6 @@ impl ExecutingFrame<'_> {
                     .map(|pyobj| pyobj.downcast::<PyStr>().unwrap())
                     .collect();
                 self.push_value(vm.ctx.new_str(s).into());
-                Ok(None)
-            }
-            Instruction::BuildTupleFromIter => {
-                if !self.top_value().class().is(vm.ctx.types.tuple_type) {
-                    let elements: Vec<_> = self.pop_value().try_to_value(vm)?;
-                    let list_obj = vm.ctx.new_tuple(elements);
-                    self.push_value(list_obj.into());
-                }
-                Ok(None)
-            }
-            Instruction::BuildTupleFromTuples { size } => {
-                // SAFETY: compiler guarantees `size` tuples are on the stack
-                let elements = unsafe { self.flatten_tuples(size.get(arg) as usize) };
-                let list_obj = vm.ctx.new_tuple(elements);
-                self.push_value(list_obj.into());
                 Ok(None)
             }
             Instruction::BuildTuple { size } => {
@@ -763,9 +765,9 @@ impl ExecutingFrame<'_> {
                 let args = self.collect_keyword_args(nargs.get(arg));
                 self.execute_call(args, vm)
             }
-            Instruction::CallFunctionEx { has_kwargs } => {
-                // Stack: [callable, self_or_null, args_tuple, (kwargs_dict)?]
-                let args = self.collect_ex_args(vm, has_kwargs.get(arg))?;
+            Instruction::CallFunctionEx => {
+                // Stack: [callable, self_or_null, args_tuple, kwargs_or_null]
+                let args = self.collect_ex_args(vm)?;
                 self.execute_call(args, vm)
             }
             Instruction::CallIntrinsic1 { func } => {
@@ -907,6 +909,48 @@ impl ExecutingFrame<'_> {
                 }
 
                 dict.merge_object(source, vm)?;
+                Ok(None)
+            }
+            Instruction::DictMerge { index } => {
+                let source = self.pop_value();
+                let idx = index.get(arg);
+
+                // Get the dict to merge into (same logic as DICT_UPDATE)
+                let dict_ref = if idx <= 1 {
+                    self.top_value()
+                } else {
+                    self.nth_value(idx - 1)
+                };
+
+                let dict: &Py<PyDict> = unsafe { dict_ref.downcast_unchecked_ref() };
+
+                // Check if source is a mapping
+                if vm
+                    .get_method(source.clone(), vm.ctx.intern_str("keys"))
+                    .is_none()
+                {
+                    return Err(vm.new_type_error(format!(
+                        "'{}' object is not a mapping",
+                        source.class().name()
+                    )));
+                }
+
+                // Check for duplicate keys
+                let keys_iter = vm.call_method(&source, "keys", ())?;
+                for key in keys_iter.try_to_value::<Vec<PyObjectRef>>(vm)? {
+                    if key.downcast_ref::<PyStr>().is_none() {
+                        return Err(vm.new_type_error("keywords must be strings".to_owned()));
+                    }
+                    if dict.contains_key(&*key, vm) {
+                        let key_repr = key.repr(vm)?;
+                        return Err(vm.new_type_error(format!(
+                            "got multiple values for keyword argument {}",
+                            key_repr.as_str()
+                        )));
+                    }
+                    let value = vm.call_method(&source, "__getitem__", (key.clone(),))?;
+                    dict.set_item(&*key, value, vm)?;
+                }
                 Ok(None)
             }
             Instruction::EndAsyncFor => {
@@ -1146,6 +1190,16 @@ impl ExecutingFrame<'_> {
                 list.append(item);
                 Ok(None)
             }
+            Instruction::ListExtend { i } => {
+                let iterable = self.pop_value();
+                let obj = self.nth_value(i.get(arg));
+                let list: &Py<PyList> = unsafe {
+                    // SAFETY: compiler guarantees correct type
+                    obj.downcast_unchecked_ref()
+                };
+                list.extend(iterable, vm)?;
+                Ok(None)
+            }
             Instruction::LoadAttr { idx } => self.load_attr(vm, idx.get(arg)),
             Instruction::LoadSuperAttr { arg: idx } => self.load_super_attr(vm, idx.get(arg)),
             Instruction::LoadBuildClass => {
@@ -1191,20 +1245,15 @@ impl ExecutingFrame<'_> {
                 });
                 Ok(None)
             }
-            Instruction::LoadClosure(i) => {
-                let value = self.cells_frees[i.get(arg) as usize].clone();
-                self.push_value(value.into());
-                Ok(None)
-            }
             Instruction::LoadConst { idx } => {
                 self.push_value(self.code.constants[idx.get(arg) as usize].clone().into());
                 Ok(None)
             }
             Instruction::LoadDeref(i) => {
-                let i = i.get(arg) as usize;
-                let x = self.cells_frees[i]
+                let idx = i.get(arg) as usize;
+                let x = self.cells_frees[idx]
                     .get()
-                    .ok_or_else(|| self.unbound_cell_exception(i, vm))?;
+                    .ok_or_else(|| self.unbound_cell_exception(idx, vm))?;
                 self.push_value(x);
                 Ok(None)
             }
@@ -1537,6 +1586,19 @@ impl ExecutingFrame<'_> {
                 set.add(item, vm)?;
                 Ok(None)
             }
+            Instruction::SetUpdate { i } => {
+                let iterable = self.pop_value();
+                let obj = self.nth_value(i.get(arg));
+                let set: &Py<PySet> = unsafe {
+                    // SAFETY: compiler guarantees correct type
+                    obj.downcast_unchecked_ref()
+                };
+                let iter = PyIter::try_from_object(vm, iterable)?;
+                while let PyIterReturn::Return(item) = iter.next(vm)? {
+                    set.add(item, vm)?;
+                }
+                Ok(None)
+            }
             Instruction::SetExcInfo => {
                 // Set the current exception to TOS (for except* handlers)
                 // This updates sys.exc_info() so bare 'raise' will reraise the matched exception
@@ -1839,16 +1901,6 @@ impl ExecutingFrame<'_> {
             })
     }
 
-    unsafe fn flatten_tuples(&mut self, size: usize) -> Vec<PyObjectRef> {
-        let mut elements = Vec::new();
-        for tup in self.pop_multiple(size) {
-            // SAFETY: caller ensures that the elements are tuples
-            let tup = unsafe { tup.downcast_unchecked::<PyTuple>() };
-            elements.extend(tup.iter().cloned());
-        }
-        elements
-    }
-
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
     fn import(&mut self, vm: &VirtualMachine, module_name: Option<&Py<PyStr>>) -> PyResult<()> {
         let module_name = module_name.unwrap_or(vm.ctx.empty_str);
@@ -2056,35 +2108,6 @@ impl ExecutingFrame<'_> {
         Ok(None)
     }
 
-    fn execute_build_map_for_call(&mut self, vm: &VirtualMachine, size: u32) -> FrameResult {
-        let size = size as usize;
-        let map_obj = vm.ctx.new_dict();
-        for obj in self.pop_multiple(size) {
-            // Use keys() method for all mapping objects to preserve order
-            Self::iterate_mapping_keys(vm, &obj, "keyword argument", |key| {
-                // Check for keyword argument restrictions
-                if key.downcast_ref::<PyStr>().is_none() {
-                    return Err(vm.new_type_error("keywords must be strings"));
-                }
-                if map_obj.contains_key(&*key, vm) {
-                    let key_repr = &key.repr(vm)?;
-                    let msg = format!(
-                        "got multiple values for keyword argument {}",
-                        key_repr.as_str()
-                    );
-                    return Err(vm.new_type_error(msg));
-                }
-
-                let value = obj.get_item(&*key, vm)?;
-                map_obj.set_item(&*key, value, vm)?;
-                Ok(())
-            })?;
-        }
-
-        self.push_value(map_obj.into());
-        Ok(None)
-    }
-
     fn execute_build_slice(
         &mut self,
         vm: &VirtualMachine,
@@ -2128,9 +2151,9 @@ impl ExecutingFrame<'_> {
         FuncArgs::with_kwargs_names(args, kwarg_names)
     }
 
-    fn collect_ex_args(&mut self, vm: &VirtualMachine, has_kwargs: bool) -> PyResult<FuncArgs> {
-        let kwargs = if has_kwargs {
-            let kw_obj = self.pop_value();
+    fn collect_ex_args(&mut self, vm: &VirtualMachine) -> PyResult<FuncArgs> {
+        let kwargs_or_null = self.pop_value_opt();
+        let kwargs = if let Some(kw_obj) = kwargs_or_null {
             let mut kwargs = IndexMap::new();
 
             // Use keys() method for all mapping objects to preserve order
