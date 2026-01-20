@@ -45,13 +45,6 @@ enum UnwindReason {
     /// We hit an exception, so unwind any try-except and finally blocks. The exception should be
     /// on top of the vm exception stack.
     Raising { exception: PyBaseExceptionRef },
-
-    // NoWorries,
-    /// We are unwinding blocks, since we hit break
-    Break { target: bytecode::Label },
-
-    /// We are unwinding blocks since we hit a continue statements.
-    Continue { target: bytecode::Label },
 }
 
 #[derive(Debug)]
@@ -658,12 +651,6 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
 
-            Instruction::Break { target } => self.unwind_blocks(
-                vm,
-                UnwindReason::Break {
-                    target: target.get(arg),
-                },
-            ),
             Instruction::BuildList { size } => {
                 let sz = size.get(arg) as usize;
                 let elements = self.pop_multiple(sz).collect();
@@ -788,6 +775,15 @@ impl ExecutingFrame<'_> {
                 let exc_value = self.pop_value();
                 let (rest, matched) =
                     crate::exceptions::exception_group_match(&exc_value, &match_type, vm)?;
+
+                // Set matched exception as current exception (if not None)
+                // This mirrors CPython's PyErr_SetHandledException(match_o) in CHECK_EG_MATCH
+                if !vm.is_none(&matched)
+                    && let Some(exc) = matched.downcast_ref::<PyBaseException>()
+                {
+                    vm.set_exception(Some(exc.to_owned()));
+                }
+
                 self.push_value(rest);
                 self.push_value(matched);
                 Ok(None)
@@ -804,13 +800,6 @@ impl ExecutingFrame<'_> {
                 self.push_value(vm.ctx.new_bool(value).into());
                 Ok(None)
             }
-            Instruction::Continue { target } => self.unwind_blocks(
-                vm,
-                UnwindReason::Continue {
-                    target: target.get(arg),
-                },
-            ),
-
             Instruction::ConvertValue { oparg: conversion } => {
                 self.convert_value(conversion.get(arg), vm)
             }
@@ -1138,35 +1127,6 @@ impl ExecutingFrame<'_> {
                 };
                 self.push_value(vm.ctx.new_bool(value).into());
                 Ok(None)
-            }
-            Instruction::JumpIfFalseOrPop { target } => {
-                self.jump_if_or_pop(vm, target.get(arg), false)
-            }
-            Instruction::JumpIfNotExcMatch(target) => {
-                let b = self.pop_value();
-                let a = self.pop_value();
-                if let Some(tuple_of_exceptions) = b.downcast_ref::<PyTuple>() {
-                    for exception in tuple_of_exceptions {
-                        if !exception
-                            .is_subclass(vm.ctx.exceptions.base_exception_type.into(), vm)?
-                        {
-                            return Err(vm.new_type_error(
-                                "catching classes that do not inherit from BaseException is not allowed",
-                            ));
-                        }
-                    }
-                } else if !b.is_subclass(vm.ctx.exceptions.base_exception_type.into(), vm)? {
-                    return Err(vm.new_type_error(
-                        "catching classes that do not inherit from BaseException is not allowed",
-                    ));
-                }
-
-                let value = a.is_instance(&b, vm)?;
-                self.push_value(vm.ctx.new_bool(value).into());
-                self.pop_jump_if(vm, target.get(arg), false)
-            }
-            Instruction::JumpIfTrueOrPop { target } => {
-                self.jump_if_or_pop(vm, target.get(arg), true)
             }
             Instruction::JumpForward { target } => {
                 self.jump(target.get(arg));
@@ -1568,10 +1528,6 @@ impl ExecutingFrame<'_> {
                 // }
                 Ok(None)
             }
-            Instruction::ReturnConst { idx } => {
-                let value = self.code.constants[idx.get(arg) as usize].clone().into();
-                self.unwind_blocks(vm, UnwindReason::Returning { value })
-            }
             Instruction::ReturnValue => {
                 let value = self.pop_value();
                 self.unwind_blocks(vm, UnwindReason::Returning { value })
@@ -1599,15 +1555,6 @@ impl ExecutingFrame<'_> {
                 }
                 Ok(None)
             }
-            Instruction::SetExcInfo => {
-                // Set the current exception to TOS (for except* handlers)
-                // This updates sys.exc_info() so bare 'raise' will reraise the matched exception
-                let exc = self.top_value();
-                if let Some(exc) = exc.downcast_ref::<PyBaseException>() {
-                    vm.set_exception(Some(exc.to_owned()));
-                }
-                Ok(None)
-            }
             Instruction::PushExcInfo => {
                 // Stack: [exc] -> [prev_exc, exc]
                 let exc = self.pop_value();
@@ -1630,7 +1577,23 @@ impl ExecutingFrame<'_> {
                 let exc_type = self.pop_value();
                 let exc = self.top_value();
 
-                // Validate that exc_type is valid for exception matching
+                // Validate that exc_type inherits from BaseException
+                if let Some(tuple_of_exceptions) = exc_type.downcast_ref::<PyTuple>() {
+                    for exception in tuple_of_exceptions {
+                        if !exception
+                            .is_subclass(vm.ctx.exceptions.base_exception_type.into(), vm)?
+                        {
+                            return Err(vm.new_type_error(
+                                "catching classes that do not inherit from BaseException is not allowed",
+                            ));
+                        }
+                    }
+                } else if !exc_type.is_subclass(vm.ctx.exceptions.base_exception_type.into(), vm)? {
+                    return Err(vm.new_type_error(
+                        "catching classes that do not inherit from BaseException is not allowed",
+                    ));
+                }
+
                 let result = exc.is_instance(&exc_type, vm)?;
                 self.push_value(vm.ctx.new_bool(result).into());
                 Ok(None)
@@ -1734,7 +1697,6 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::StoreSubscr => self.execute_store_subscript(vm),
-            Instruction::Subscript => self.execute_subscript(vm),
             Instruction::Swap { index } => {
                 let len = self.state.stack.len();
                 debug_assert!(len > 0, "stack underflow in SWAP");
@@ -2066,20 +2028,7 @@ impl ExecutingFrame<'_> {
                 drop(fastlocals);
                 Ok(Some(ExecutionResult::Return(value)))
             }
-            UnwindReason::Break { target } | UnwindReason::Continue { target } => {
-                // Break/continue: jump to the target label
-                self.jump(target);
-                Ok(None)
-            }
         }
-    }
-
-    fn execute_subscript(&mut self, vm: &VirtualMachine) -> FrameResult {
-        let b_ref = self.pop_value();
-        let a_ref = self.pop_value();
-        let value = a_ref.get_item(&*b_ref, vm)?;
-        self.push_value(value);
-        Ok(None)
     }
 
     fn execute_store_subscript(&mut self, vm: &VirtualMachine) -> FrameResult {
@@ -2351,23 +2300,6 @@ impl ExecutingFrame<'_> {
         Ok(None)
     }
 
-    #[inline]
-    fn jump_if_or_pop(
-        &mut self,
-        vm: &VirtualMachine,
-        target: bytecode::Label,
-        flag: bool,
-    ) -> FrameResult {
-        let obj = self.top_value();
-        let value = obj.to_owned().try_to_bool(vm)?;
-        if value == flag {
-            self.jump(target);
-        } else {
-            self.pop_value();
-        }
-        Ok(None)
-    }
-
     /// The top of stack contains the iterator, lets push it forward
     fn execute_for_iter(&mut self, vm: &VirtualMachine, target: bytecode::Label) -> FrameResult {
         let top_of_stack = PyIter::new(self.top_value());
@@ -2380,15 +2312,13 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Ok(PyIterReturn::StopIteration(_)) => {
-                // Pop iterator from stack:
-                self.pop_value();
-
-                // End of for loop
+                // CPython 3.14: Do NOT pop iterator here
+                // POP_ITER instruction will handle cleanup after the loop
                 self.jump(target);
                 Ok(None)
             }
             Err(next_error) => {
-                // Pop iterator from stack:
+                // On error, pop iterator and propagate
                 self.pop_value();
                 Err(next_error)
             }

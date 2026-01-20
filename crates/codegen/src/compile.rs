@@ -489,7 +489,7 @@ impl Compiler {
             match ctx {
                 ast::ExprContext::Load => {
                     emit!(self, Instruction::BuildSlice { argc });
-                    emit!(self, Instruction::Subscript);
+                    emit!(self, Instruction::BinarySubscr);
                 }
                 ast::ExprContext::Store => {
                     emit!(self, Instruction::BuildSlice { argc });
@@ -503,7 +503,7 @@ impl Compiler {
 
             // Emit appropriate instruction based on context
             match ctx {
-                ast::ExprContext::Load => emit!(self, Instruction::Subscript),
+                ast::ExprContext::Load => emit!(self, Instruction::BinarySubscr),
                 ast::ExprContext::Store => emit!(self, Instruction::StoreSubscr),
                 ast::ExprContext::Del => emit!(self, Instruction::DeleteSubscr),
                 ast::ExprContext::Invalid => {
@@ -2925,12 +2925,19 @@ impl Compiler {
             // If we gave a typ,
             // check if this handler can handle the exception:
             if let Some(exc_type) = type_ {
-                // Duplicate exception for test:
-                emit!(self, Instruction::Copy { index: 1_u32 });
-
                 // Check exception type:
+                // Stack: [prev_exc, exc]
                 self.compile_expression(exc_type)?;
-                emit!(self, Instruction::JumpIfNotExcMatch(next_handler));
+                // Stack: [prev_exc, exc, type]
+                emit!(self, Instruction::CheckExcMatch);
+                // Stack: [prev_exc, exc, bool]
+                emit!(
+                    self,
+                    Instruction::PopJumpIfFalse {
+                        target: next_handler
+                    }
+                );
+                // Stack: [prev_exc, exc]
 
                 // We have a match, store in name (except x as y)
                 if let Some(alias) = name {
@@ -3308,12 +3315,8 @@ impl Compiler {
 
             // Handler matched
             // Stack: [prev_exc, orig, list, new_rest, match]
+            // Note: CheckEgMatch already sets the matched exception as current exception
             let handler_except_block = self.new_block();
-
-            // Set matched exception as current exception (for __context__ in handler body)
-            // This ensures that exceptions raised in the handler get the matched part
-            // as their __context__, not the original full exception group
-            emit!(self, Instruction::SetExcInfo);
 
             // Store match to name or pop
             if let Some(alias) = name {
@@ -4929,6 +4932,9 @@ impl Compiler {
 
         if is_async {
             emit!(self, Instruction::EndAsyncFor);
+        } else {
+            // Pop the iterator after loop ends
+            emit!(self, Instruction::PopTop);
         }
         self.compile_statements(orelse)?;
 
@@ -5987,14 +5993,9 @@ impl Compiler {
             self.compile_addcompare(op);
 
             // if comparison result is false, we break with this value; if true, try the next one.
-            /*
             emit!(self, Instruction::Copy { index: 1 });
-            // emit!(self, Instruction::ToBool); // TODO: Uncomment this
             emit!(self, Instruction::PopJumpIfFalse { target: cleanup });
             emit!(self, Instruction::PopTop);
-            */
-
-            emit!(self, Instruction::JumpIfFalseOrPop { target: cleanup });
         }
 
         self.compile_expression(last_comparator)?;
@@ -6205,7 +6206,7 @@ impl Compiler {
                 self.compile_expression(slice)?;
                 emit!(self, Instruction::Copy { index: 2_u32 });
                 emit!(self, Instruction::Copy { index: 2_u32 });
-                emit!(self, Instruction::Subscript);
+                emit!(self, Instruction::BinarySubscr);
                 AugAssignKind::Subscript
             }
             ast::Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
@@ -7367,6 +7368,8 @@ impl Compiler {
             if is_async {
                 emit!(self, Instruction::EndAsyncFor);
                 emit!(self, Instruction::PopTop);
+            } else {
+                emit!(self, Instruction::PopTop);
             }
         }
 
@@ -7688,17 +7691,11 @@ impl Compiler {
     }
 
     fn emit_return_const(&mut self, constant: ConstantData) {
-        let idx = self.arg_constant(constant);
-        self.emit_arg(idx, |idx| Instruction::ReturnConst { idx })
+        self.emit_load_const(constant);
+        emit!(self, Instruction::ReturnValue)
     }
 
     fn emit_return_value(&mut self) {
-        if let Some(inst) = self.current_block().instructions.last_mut()
-            && let AnyInstruction::Real(Instruction::LoadConst { idx }) = inst.instr
-        {
-            inst.instr = Instruction::ReturnConst { idx }.into();
-            return;
-        }
         emit!(self, Instruction::ReturnValue)
     }
 
@@ -7876,11 +7873,8 @@ impl Compiler {
         }
 
         // Jump to target
-        if is_break {
-            emit!(self, Instruction::Break { target: exit_block });
-        } else {
-            emit!(self, Instruction::Continue { target: loop_block });
-        }
+        let target = if is_break { exit_block } else { loop_block };
+        emit!(self, PseudoInstruction::Jump { target });
 
         Ok(())
     }

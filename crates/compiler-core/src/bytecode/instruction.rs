@@ -266,25 +266,6 @@ pub enum Instruction {
     BuildConstKeyMap {
         size: Arg<u32>,
     } = 215, // Placeholder
-    Break {
-        target: Arg<Label>,
-    } = 216,
-    Continue {
-        target: Arg<Label>,
-    } = 217,
-    JumpIfFalseOrPop {
-        target: Arg<Label>,
-    } = 218,
-    JumpIfTrueOrPop {
-        target: Arg<Label>,
-    } = 219,
-    JumpIfNotExcMatch(Arg<Label>) = 220,
-    LoadAssertionError = 221, // Placeholder
-    ReturnConst {
-        idx: Arg<u32>,
-    } = 222,
-    SetExcInfo = 223,
-    Subscript = 224,
     // CPython 3.14 RESUME (128)
     Resume {
         arg: Arg<u32>,
@@ -435,23 +416,6 @@ impl TryFrom<u8> for Instruction {
             u8::from(Self::BuildConstKeyMap {
                 size: Arg::marker(),
             }),
-            u8::from(Self::Break {
-                target: Arg::marker(),
-            }),
-            u8::from(Self::Continue {
-                target: Arg::marker(),
-            }),
-            u8::from(Self::JumpIfFalseOrPop {
-                target: Arg::marker(),
-            }),
-            u8::from(Self::JumpIfTrueOrPop {
-                target: Arg::marker(),
-            }),
-            u8::from(Self::JumpIfNotExcMatch(Arg::marker())),
-            u8::from(Self::LoadAssertionError),
-            u8::from(Self::ReturnConst { idx: Arg::marker() }),
-            u8::from(Self::SetExcInfo),
-            u8::from(Self::Subscript),
         ];
 
         if (cpython_start..=cpython_end).contains(&value)
@@ -475,14 +439,9 @@ impl InstructionMetadata for Instruction {
             Self::JumpBackward { target: l }
             | Self::JumpBackwardNoInterrupt { target: l }
             | Self::JumpForward { target: l }
-            | Self::JumpIfNotExcMatch(l)
             | Self::PopJumpIfTrue { target: l }
             | Self::PopJumpIfFalse { target: l }
-            | Self::JumpIfTrueOrPop { target: l }
-            | Self::JumpIfFalseOrPop { target: l }
             | Self::ForIter { target: l }
-            | Self::Break { target: l }
-            | Self::Continue { target: l }
             | Self::Send { target: l } => Some(*l),
             _ => None,
         }
@@ -494,10 +453,7 @@ impl InstructionMetadata for Instruction {
             Self::JumpForward { .. }
                 | Self::JumpBackward { .. }
                 | Self::JumpBackwardNoInterrupt { .. }
-                | Self::Continue { .. }
-                | Self::Break { .. }
                 | Self::ReturnValue
-                | Self::ReturnConst { .. }
                 | Self::RaiseVarargs { .. }
                 | Self::Reraise { .. }
         )
@@ -525,7 +481,6 @@ impl InstructionMetadata for Instruction {
             Self::DeleteGlobal(_) => 0,
             Self::DeleteDeref(_) => 0,
             Self::LoadFromDictOrDeref(_) => 1,
-            Self::Subscript => -1,
             Self::StoreSubscr => -3,
             Self::DeleteSubscr => -2,
             Self::LoadAttr { .. } => 0,
@@ -547,24 +502,8 @@ impl InstructionMetadata for Instruction {
             Self::GetLen => 1,
             Self::CallIntrinsic1 { .. } => 0,  // Takes 1, pushes 1
             Self::CallIntrinsic2 { .. } => -1, // Takes 2, pushes 1
-            Self::Continue { .. } => 0,
-            Self::Break { .. } => 0,
             Self::PopJumpIfTrue { .. } => -1,
             Self::PopJumpIfFalse { .. } => -1,
-            Self::JumpIfTrueOrPop { .. } => {
-                if jump {
-                    0
-                } else {
-                    -1
-                }
-            }
-            Self::JumpIfFalseOrPop { .. } => {
-                if jump {
-                    0
-                } else {
-                    -1
-                }
-            }
             Self::MakeFunction => {
                 // CPython 3.14 style: MakeFunction only pops code object
                 -1 + 1 // pop code, push function
@@ -584,17 +523,13 @@ impl InstructionMetadata for Instruction {
             Self::FormatSimple => 0,
             Self::FormatWithSpec => -1,
             Self::ForIter { .. } => {
-                if jump {
-                    -1
-                } else {
-                    1
-                }
+                // jump=False: push next value (+1)
+                // jump=True: iterator stays on stack, no change (0)
+                if jump { 0 } else { 1 }
             }
             Self::IsOp(_) => -1,
             Self::ContainsOp(_) => -1,
-            Self::JumpIfNotExcMatch(_) => -2,
             Self::ReturnValue => -1,
-            Self::ReturnConst { .. } => 0,
             Self::Resume { .. } => 0,
             Self::YieldValue { .. } => 0,
             // SEND: (receiver, val) -> (receiver, retval) - no change, both paths keep same depth
@@ -603,7 +538,6 @@ impl InstructionMetadata for Instruction {
             Self::EndSend => -1,
             // CLEANUP_THROW: (sub_iter, last_sent_val, exc) -> (None, value) = 3 pop, 2 push = -1
             Self::CleanupThrow => -1,
-            Self::SetExcInfo => 0,
             Self::PushExcInfo => 1,    // [exc] -> [prev_exc, exc]
             Self::CheckExcMatch => 0,  // [exc, type] -> [exc, bool] (pops type, pushes bool)
             Self::Reraise { .. } => 0, // Exception raised, stack effect doesn't matter
@@ -684,7 +618,6 @@ impl InstructionMetadata for Instruction {
             Self::EndFor => 0,
             Self::ExitInitCheck => 0,
             Self::InterpreterExit => 0,
-            Self::LoadAssertionError => 0,
             Self::LoadLocals => 0,
             Self::ReturnGenerator => 0,
             Self::StoreSlice => 0,
@@ -874,7 +807,6 @@ impl InstructionMetadata for Instruction {
             Self::BeforeWith => w!(BEFORE_WITH),
             Self::BinaryOp { op } => write!(f, "{:pad$}({})", "BINARY_OP", op.get(arg)),
             Self::BinarySubscr => w!(BINARY_SUBSCR),
-            Self::Break { target } => w!(BREAK, target),
             Self::BuildList { size } => w!(BUILD_LIST, size),
             Self::BuildMap { size } => w!(BUILD_MAP, size),
             Self::BuildSet { size } => w!(BUILD_SET, size),
@@ -891,7 +823,6 @@ impl InstructionMetadata for Instruction {
             Self::CleanupThrow => w!(CLEANUP_THROW),
             Self::CompareOp { op } => w!(COMPARE_OP, ?op),
             Self::ContainsOp(inv) => w!(CONTAINS_OP, ?inv),
-            Self::Continue { target } => w!(CONTINUE, target),
             Self::ConvertValue { oparg } => write!(f, "{:pad$}{}", "CONVERT_VALUE", oparg.get(arg)),
             Self::Copy { index } => w!(COPY, index),
             Self::DeleteAttr { idx } => w!(DELETE_ATTR, name = idx),
@@ -920,9 +851,6 @@ impl InstructionMetadata for Instruction {
             Self::JumpBackward { target } => w!(JUMP_BACKWARD, target),
             Self::JumpBackwardNoInterrupt { target } => w!(JUMP_BACKWARD_NO_INTERRUPT, target),
             Self::JumpForward { target } => w!(JUMP_FORWARD, target),
-            Self::JumpIfFalseOrPop { target } => w!(JUMP_IF_FALSE_OR_POP, target),
-            Self::JumpIfNotExcMatch(target) => w!(JUMP_IF_NOT_EXC_MATCH, target),
-            Self::JumpIfTrueOrPop { target } => w!(JUMP_IF_TRUE_OR_POP, target),
             Self::ListAppend { i } => w!(LIST_APPEND, i),
             Self::ListExtend { i } => w!(LIST_EXTEND, i),
             Self::LoadAttr { idx } => {
@@ -973,11 +901,9 @@ impl InstructionMetadata for Instruction {
             Self::RaiseVarargs { kind } => w!(RAISE_VARARGS, ?kind),
             Self::Reraise { depth } => w!(RERAISE, depth),
             Self::Resume { arg } => w!(RESUME, arg),
-            Self::ReturnConst { idx } => fmt_const("RETURN_CONST", arg, f, idx),
             Self::ReturnValue => w!(RETURN_VALUE),
             Self::Send { target } => w!(SEND, target),
             Self::SetAdd { i } => w!(SET_ADD, i),
-            Self::SetExcInfo => w!(SET_EXC_INFO),
             Self::SetFunctionAttribute { attr } => w!(SET_FUNCTION_ATTRIBUTE, ?attr),
             Self::SetupAnnotations => w!(SETUP_ANNOTATIONS),
             Self::SetUpdate { i } => w!(SET_UPDATE, i),
@@ -994,7 +920,6 @@ impl InstructionMetadata for Instruction {
             Self::StoreGlobal(idx) => w!(STORE_GLOBAL, name = idx),
             Self::StoreName(idx) => w!(STORE_NAME, name = idx),
             Self::StoreSubscr => w!(STORE_SUBSCR),
-            Self::Subscript => w!(SUBSCRIPT),
             Self::Swap { index } => w!(SWAP, index),
             Self::ToBool => w!(TO_BOOL),
             Self::UnpackEx { args } => w!(UNPACK_EX, args),
