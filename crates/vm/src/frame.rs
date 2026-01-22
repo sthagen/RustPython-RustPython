@@ -617,39 +617,7 @@ impl ExecutingFrame<'_> {
         }
 
         match instruction {
-            Instruction::BeforeAsyncWith => {
-                let mgr = self.pop_value();
-                let error_string = || -> String {
-                    format!(
-                        "'{:.200}' object does not support the asynchronous context manager protocol",
-                        mgr.class().name(),
-                    )
-                };
-
-                let aenter_res = vm
-                    .get_special_method(&mgr, identifier!(vm, __aenter__))?
-                    .ok_or_else(|| vm.new_type_error(error_string()))?
-                    .invoke((), vm)?;
-                let aexit = mgr
-                    .get_attr(identifier!(vm, __aexit__), vm)
-                    .map_err(|_exc| {
-                        vm.new_type_error({
-                            format!("{} (missed __aexit__ method)", error_string())
-                        })
-                    })?;
-                self.push_value(aexit);
-                self.push_value(aenter_res);
-
-                Ok(None)
-            }
             Instruction::BinaryOp { op } => self.execute_bin_op(vm, op.get(arg)),
-            Instruction::BinarySubscr => {
-                let key = self.pop_value();
-                let container = self.pop_value();
-                let result = container.get_item(key.as_object(), vm)?;
-                self.push_value(result);
-                Ok(None)
-            }
 
             Instruction::BuildList { size } => {
                 let sz = size.get(arg) as usize;
@@ -1166,6 +1134,12 @@ impl ExecutingFrame<'_> {
                 self.push_value(vm.builtins.get_attr(identifier!(vm, __build_class__), vm)?);
                 Ok(None)
             }
+            Instruction::LoadLocals => {
+                // Push the locals dict onto the stack
+                let locals = self.locals.clone().into_object();
+                self.push_value(locals);
+                Ok(None)
+            }
             Instruction::LoadFromDictOrDeref(i) => {
                 let i = i.get(arg) as usize;
                 let name = if i < self.code.cellvars.len() {
@@ -1207,6 +1181,12 @@ impl ExecutingFrame<'_> {
             }
             Instruction::LoadConst { idx } => {
                 self.push_value(self.code.constants[idx.get(arg) as usize].clone().into());
+                Ok(None)
+            }
+            Instruction::LoadSmallInt { idx } => {
+                // Push small integer (-5..=256) directly without constant table lookup
+                let value = vm.ctx.new_int(idx.get(arg) as i32);
+                self.push_value(value.into());
                 Ok(None)
             }
             Instruction::LoadDeref(i) => {
@@ -1261,6 +1241,40 @@ impl ExecutingFrame<'_> {
                     }
                     Err(e) => return Err(e),
                 }
+                Ok(None)
+            }
+            Instruction::LoadSpecial { method } => {
+                // Stack effect: 0 (replaces TOS with bound method)
+                // Input: [..., obj]
+                // Output: [..., bound_method]
+                use crate::vm::PyMethod;
+                use bytecode::SpecialMethod;
+
+                let obj = self.pop_value();
+                let method_name = match method.get(arg) {
+                    SpecialMethod::Enter => identifier!(vm, __enter__),
+                    SpecialMethod::Exit => identifier!(vm, __exit__),
+                    SpecialMethod::AEnter => identifier!(vm, __aenter__),
+                    SpecialMethod::AExit => identifier!(vm, __aexit__),
+                };
+
+                let bound = match vm.get_special_method(&obj, method_name)? {
+                    Some(PyMethod::Function { target, func }) => {
+                        // Create bound method: PyBoundMethod(object=target, function=func)
+                        crate::builtins::PyBoundMethod::new(target, func)
+                            .into_ref(&vm.ctx)
+                            .into()
+                    }
+                    Some(PyMethod::Attribute(bound)) => bound,
+                    None => {
+                        return Err(vm.new_type_error(format!(
+                            "'{}' object does not support the context manager protocol (missed {} method)",
+                            obj.class().name(),
+                            method_name
+                        )));
+                    }
+                };
+                self.push_value(bound);
                 Ok(None)
             }
             Instruction::MakeFunction => self.execute_make_function(vm),
@@ -1485,6 +1499,15 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::Nop => Ok(None),
+            Instruction::ReturnGenerator => {
+                // In RustPython, generators/coroutines are created in function.rs
+                // before the frame starts executing. The RETURN_GENERATOR instruction
+                // pushes None so that the following POP_TOP has something to consume.
+                // This matches CPython's semantics where the sent value (None for first call)
+                // is on the stack when the generator resumes.
+                self.push_value(vm.ctx.none());
+                Ok(None)
+            }
             Instruction::PopExcept => {
                 // Pop prev_exc from value stack and restore it
                 let prev_exc = self.pop_value();
@@ -1505,8 +1528,32 @@ impl ExecutingFrame<'_> {
             }
             Instruction::PopJumpIfFalse { target } => self.pop_jump_if(vm, target.get(arg), false),
             Instruction::PopJumpIfTrue { target } => self.pop_jump_if(vm, target.get(arg), true),
+            Instruction::PopJumpIfNone { target } => {
+                let value = self.pop_value();
+                if vm.is_none(&value) {
+                    self.jump(target.get(arg));
+                }
+                Ok(None)
+            }
+            Instruction::PopJumpIfNotNone { target } => {
+                let value = self.pop_value();
+                if !vm.is_none(&value) {
+                    self.jump(target.get(arg));
+                }
+                Ok(None)
+            }
             Instruction::PopTop => {
                 // Pop value from stack and ignore.
+                self.pop_value();
+                Ok(None)
+            }
+            Instruction::EndFor => {
+                // Pop the next value from stack (cleanup after loop body)
+                self.pop_value();
+                Ok(None)
+            }
+            Instruction::PopIter => {
+                // Pop the iterator from stack (end of for loop)
                 self.pop_value();
                 Ok(None)
             }
@@ -1629,35 +1676,6 @@ impl ExecutingFrame<'_> {
                 self.execute_set_function_attribute(vm, attr.get(arg))
             }
             Instruction::SetupAnnotations => self.setup_annotations(vm),
-            Instruction::BeforeWith => {
-                // TOS: context_manager
-                // Result: [..., __exit__, __enter__ result]
-                let context_manager = self.pop_value();
-                let error_string = || -> String {
-                    format!(
-                        "'{:.200}' object does not support the context manager protocol",
-                        context_manager.class().name(),
-                    )
-                };
-
-                // Get __exit__ first (before calling __enter__)
-                let exit = context_manager
-                    .get_attr(identifier!(vm, __exit__), vm)
-                    .map_err(|_exc| {
-                        vm.new_type_error(format!("{} (missed __exit__ method)", error_string()))
-                    })?;
-
-                // Get and call __enter__
-                let enter_res = vm
-                    .get_special_method(&context_manager, identifier!(vm, __enter__))?
-                    .ok_or_else(|| vm.new_type_error(error_string()))?
-                    .invoke((), vm)?;
-
-                // Push __exit__ first, then enter result
-                self.push_value(exit);
-                self.push_value(enter_res);
-                Ok(None)
-            }
             Instruction::StoreAttr { idx } => self.store_attr(vm, idx.get(arg)),
             Instruction::StoreDeref(i) => {
                 let value = self.pop_value();
@@ -1790,6 +1808,17 @@ impl ExecutingFrame<'_> {
                 let value = self.pop_value();
                 self.pop_value(); // discard receiver
                 self.push_value(value);
+                Ok(None)
+            }
+            Instruction::ExitInitCheck => {
+                // Check that __init__ returned None
+                let should_be_none = self.pop_value();
+                if !vm.is_none(&should_be_none) {
+                    return Err(vm.new_type_error(format!(
+                        "__init__() should return None, not '{}'",
+                        should_be_none.class().name()
+                    )));
+                }
                 Ok(None)
             }
             Instruction::CleanupThrow => {
@@ -2312,9 +2341,26 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Ok(PyIterReturn::StopIteration(_)) => {
-                // CPython 3.14: Do NOT pop iterator here
-                // POP_ITER instruction will handle cleanup after the loop
-                self.jump(target);
+                // Check if target instruction is END_FOR (CPython 3.14 pattern)
+                // If so, skip it and jump to target + 1 instruction (POP_ITER)
+                let target_idx = target.0 as usize;
+                let jump_target = if let Some(unit) = self.code.instructions.get(target_idx) {
+                    if matches!(unit.op, bytecode::Instruction::EndFor)
+                        && matches!(
+                            self.code.instructions.get(target_idx + 1).map(|u| &u.op),
+                            Some(bytecode::Instruction::PopIter)
+                        )
+                    {
+                        // Skip END_FOR, jump to POP_ITER
+                        bytecode::Label(target.0 + 1)
+                    } else {
+                        // Legacy pattern: jump directly to target (POP_TOP/POP_ITER)
+                        target
+                    }
+                } else {
+                    target
+                };
+                self.jump(jump_target);
                 Ok(None)
             }
             Err(next_error) => {
@@ -2400,6 +2446,7 @@ impl ExecutingFrame<'_> {
             bytecode::BinaryOperator::InplaceXor => vm._ixor(a_ref, b_ref),
             bytecode::BinaryOperator::InplaceOr => vm._ior(a_ref, b_ref),
             bytecode::BinaryOperator::InplaceAnd => vm._iand(a_ref, b_ref),
+            bytecode::BinaryOperator::Subscr => a_ref.get_item(b_ref.as_object(), vm),
         }?;
 
         self.push_value(value);
@@ -2709,6 +2756,30 @@ impl ExecutingFrame<'_> {
                     .downcast::<PyList>()
                     .map_err(|_| vm.new_type_error("LIST_TO_TUPLE expects a list"))?;
                 Ok(vm.ctx.new_tuple(list.borrow_vec().to_vec()).into())
+            }
+            bytecode::IntrinsicFunction1::StopIterationError => {
+                // Convert StopIteration to RuntimeError
+                // Used to ensure async generators don't raise StopIteration directly
+                // _PyGen_FetchStopIterationValue
+                // Use fast_isinstance to handle subclasses of StopIteration
+                if arg.fast_isinstance(vm.ctx.exceptions.stop_iteration) {
+                    Err(vm.new_runtime_error("coroutine raised StopIteration"))
+                } else {
+                    // If not StopIteration, just re-raise the original exception
+                    Err(arg.downcast().unwrap_or_else(|obj| {
+                        vm.new_runtime_error(format!(
+                            "unexpected exception type: {:?}",
+                            obj.class()
+                        ))
+                    }))
+                }
+            }
+            bytecode::IntrinsicFunction1::AsyncGenWrap => {
+                // Wrap value for async generator
+                // Creates an AsyncGenWrappedValue
+                Ok(crate::builtins::asyncgenerator::PyAsyncGenWrappedValue(arg)
+                    .into_ref(&vm.ctx)
+                    .into())
             }
         }
     }

@@ -1,7 +1,7 @@
-pub(crate) use opcode::make_module;
+pub(crate) use _opcode::module_def;
 
 #[pymodule]
-mod opcode {
+mod _opcode {
     use crate::vm::{
         AsObject, PyObjectRef, PyResult, VirtualMachine,
         builtins::{PyInt, PyIntRef},
@@ -194,7 +194,8 @@ mod opcode {
 
         let opcode = Opcode::try_from_pyint(args.opcode, vm)?;
 
-        Ok(opcode.stack_effect(oparg.into(), jump))
+        let _ = jump; // Python API accepts jump but it's not used
+        Ok(opcode.stack_effect(oparg.into()))
     }
 
     #[pyfunction]

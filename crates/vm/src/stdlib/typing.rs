@@ -1,10 +1,11 @@
 // spell-checker:ignore typevarobject funcobj
-use crate::{Context, PyPayload, PyRef, VirtualMachine, class::PyClassImpl, stdlib::PyModule};
+use crate::{Context, class::PyClassImpl};
 
 pub use crate::stdlib::typevar::{
     Generic, ParamSpec, ParamSpecArgs, ParamSpecKwargs, TypeVar, TypeVarTuple,
     set_typeparam_default,
 };
+pub(crate) use decl::module_def;
 pub use decl::*;
 
 /// Initialize typing types (call extend_class)
@@ -12,28 +13,7 @@ pub fn init(ctx: &Context) {
     NoDefault::extend_class(ctx, ctx.types.typing_no_default_type);
 }
 
-pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
-    let module = decl::make_module(vm);
-    TypeVar::make_class(&vm.ctx);
-    ParamSpec::make_class(&vm.ctx);
-    TypeVarTuple::make_class(&vm.ctx);
-    ParamSpecArgs::make_class(&vm.ctx);
-    ParamSpecKwargs::make_class(&vm.ctx);
-    Generic::make_class(&vm.ctx);
-    extend_module!(vm, &module, {
-        "NoDefault" => vm.ctx.typing_no_default.clone(),
-        "TypeVar" => TypeVar::class(&vm.ctx).to_owned(),
-        "ParamSpec" => ParamSpec::class(&vm.ctx).to_owned(),
-        "TypeVarTuple" => TypeVarTuple::class(&vm.ctx).to_owned(),
-        "ParamSpecArgs" => ParamSpecArgs::class(&vm.ctx).to_owned(),
-        "ParamSpecKwargs" => ParamSpecKwargs::class(&vm.ctx).to_owned(),
-        "Generic" => Generic::class(&vm.ctx).to_owned(),
-        "Union" => vm.ctx.types.union_type.to_owned(),
-    });
-    module
-}
-
-#[pymodule(name = "_typing")]
+#[pymodule(name = "_typing", with(super::typevar::typevar))]
 pub(crate) mod decl {
     use crate::{
         Py, PyObjectRef, PyPayload, PyResult, VirtualMachine,
@@ -195,15 +175,17 @@ pub(crate) mod decl {
         }
     }
 
-    // impl AsMapping for Generic {
-    //     fn as_mapping() -> &'static PyMappingMethods {
-    //         static AS_MAPPING: Lazy<PyMappingMethods> = Lazy::new(|| PyMappingMethods {
-    //             subscript: atomic_func!(|mapping, needle, vm| {
-    //                 call_typing_func_object(vm, "_GenericAlias", (mapping.obj, needle))
-    //             }),
-    //             ..PyMappingMethods::NOT_IMPLEMENTED
-    //         });
-    //         &AS_MAPPING
-    //     }
-    // }
+    pub(crate) fn module_exec(
+        vm: &VirtualMachine,
+        module: &Py<crate::builtins::PyModule>,
+    ) -> PyResult<()> {
+        __module_exec(vm, module);
+
+        extend_module!(vm, module, {
+            "NoDefault" => vm.ctx.typing_no_default.clone(),
+            "Union" => vm.ctx.types.union_type.to_owned(),
+        });
+
+        Ok(())
+    }
 }

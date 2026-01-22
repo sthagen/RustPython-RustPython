@@ -30,7 +30,7 @@ use rustpython_compiler_core::{
     bytecode::{
         self, AnyInstruction, Arg as OpArgMarker, BinaryOperator, BuildSliceArgCount, CodeObject,
         ComparisonOperator, ConstantData, ConvertValueOparg, Instruction, IntrinsicFunction1,
-        Invert, OpArg, OpArgType, PseudoInstruction, UnpackExArgs,
+        Invert, OpArg, OpArgType, PseudoInstruction, SpecialMethod, UnpackExArgs,
     },
 };
 use rustpython_wtf8::Wtf8Buf;
@@ -489,7 +489,12 @@ impl Compiler {
             match ctx {
                 ast::ExprContext::Load => {
                     emit!(self, Instruction::BuildSlice { argc });
-                    emit!(self, Instruction::BinarySubscr);
+                    emit!(
+                        self,
+                        Instruction::BinaryOp {
+                            op: BinaryOperator::Subscr
+                        }
+                    );
                 }
                 ast::ExprContext::Store => {
                     emit!(self, Instruction::BuildSlice { argc });
@@ -503,7 +508,12 @@ impl Compiler {
 
             // Emit appropriate instruction based on context
             match ctx {
-                ast::ExprContext::Load => emit!(self, Instruction::BinarySubscr),
+                ast::ExprContext::Load => emit!(
+                    self,
+                    Instruction::BinaryOp {
+                        op: BinaryOperator::Subscr
+                    }
+                ),
                 ast::ExprContext::Store => emit!(self, Instruction::StoreSubscr),
                 ast::ExprContext::Del => emit!(self, Instruction::DeleteSubscr),
                 ast::ExprContext::Invalid => {
@@ -1126,6 +1136,13 @@ impl Compiler {
         // Set the source range for the RESUME instruction
         // For now, just use an empty range at the beginning
         self.current_source_range = TextRange::default();
+
+        // For async functions/coroutines, emit RETURN_GENERATOR + POP_TOP before RESUME
+        if scope_type == CompilerScope::AsyncFunction {
+            emit!(self, Instruction::ReturnGenerator);
+            emit!(self, Instruction::PopTop);
+        }
+
         emit!(
             self,
             Instruction::Resume {
@@ -1361,7 +1378,7 @@ impl Compiler {
                 if preserve_tos {
                     emit!(self, Instruction::Swap { index: 2 });
                 }
-                emit!(self, Instruction::PopTop);
+                emit!(self, Instruction::PopIter);
             }
 
             FBlockType::TryExcept => {
@@ -3613,6 +3630,7 @@ impl Compiler {
             self.current_code_info().flags |= bytecode::CodeFlags::HAS_DOCSTRING;
         }
         // If no docstring, don't add None to co_consts
+        // Note: RETURN_GENERATOR + POP_TOP for async functions is emitted in enter_scope()
 
         // Compile body statements
         self.compile_statements(body)?;
@@ -4338,10 +4356,7 @@ impl Compiler {
 
         // PEP 649: Initialize __classdict__ cell for class annotation scope
         if self.current_symbol_table().needs_classdict {
-            let locals_name = self.name("locals");
-            emit!(self, Instruction::LoadName(locals_name));
-            emit!(self, Instruction::PushNull);
-            emit!(self, Instruction::Call { nargs: 0 });
+            emit!(self, Instruction::LoadLocals);
             let classdict_idx = self.get_cell_var_index("__classdict__")?;
             emit!(self, Instruction::StoreDeref(classdict_idx));
         }
@@ -4680,20 +4695,55 @@ impl Compiler {
         let exc_handler_block = self.new_block();
         let after_block = self.new_block();
 
-        // Compile context expression and BEFORE_WITH
+        // Compile context expression and load __enter__/__exit__ methods
         self.compile_expression(&item.context_expr)?;
         self.set_source_range(with_range);
+
+        // Stack: [cm]
+        emit!(self, Instruction::Copy { index: 1_u32 }); // [cm, cm]
 
         if is_async {
             if self.ctx.func != FunctionContext::AsyncFunction {
                 return Err(self.error(CodegenErrorType::InvalidAsyncWith));
             }
-            emit!(self, Instruction::BeforeAsyncWith);
+            // Load __aexit__ and __aenter__, then call __aenter__
+            emit!(
+                self,
+                Instruction::LoadSpecial {
+                    method: SpecialMethod::AExit
+                }
+            ); // [cm, bound_aexit]
+            emit!(self, Instruction::Swap { index: 2_u32 }); // [bound_aexit, cm]
+            emit!(
+                self,
+                Instruction::LoadSpecial {
+                    method: SpecialMethod::AEnter
+                }
+            ); // [bound_aexit, bound_aenter]
+            // bound_aenter is already bound, call with NULL self_or_null
+            emit!(self, Instruction::PushNull); // [bound_aexit, bound_aenter, NULL]
+            emit!(self, Instruction::Call { nargs: 0 }); // [bound_aexit, awaitable]
             emit!(self, Instruction::GetAwaitable);
             self.emit_load_const(ConstantData::None);
             self.compile_yield_from_sequence(true)?;
         } else {
-            emit!(self, Instruction::BeforeWith);
+            // Load __exit__ and __enter__, then call __enter__
+            emit!(
+                self,
+                Instruction::LoadSpecial {
+                    method: SpecialMethod::Exit
+                }
+            ); // [cm, bound_exit]
+            emit!(self, Instruction::Swap { index: 2_u32 }); // [bound_exit, cm]
+            emit!(
+                self,
+                Instruction::LoadSpecial {
+                    method: SpecialMethod::Enter
+                }
+            ); // [bound_exit, bound_enter]
+            // bound_enter is already bound, call with NULL self_or_null
+            emit!(self, Instruction::PushNull); // [bound_exit, bound_enter, NULL]
+            emit!(self, Instruction::Call { nargs: 0 }); // [bound_exit, enter_result]
         }
 
         // Stack: [..., __exit__, enter_result]
@@ -4933,8 +4983,10 @@ impl Compiler {
         if is_async {
             emit!(self, Instruction::EndAsyncFor);
         } else {
-            // Pop the iterator after loop ends
-            emit!(self, Instruction::PopTop);
+            // END_FOR + POP_ITER pattern (CPython 3.14)
+            // FOR_ITER jumps to END_FOR, but VM skips it (+1) to reach POP_ITER
+            emit!(self, Instruction::EndFor);
+            emit!(self, Instruction::PopIter);
         }
         self.compile_statements(orelse)?;
 
@@ -5179,7 +5231,12 @@ impl Compiler {
                 );
             }
             // Use BINARY_OP/NB_SUBSCR to extract the element.
-            emit!(self, Instruction::BinarySubscr);
+            emit!(
+                self,
+                Instruction::BinaryOp {
+                    op: BinaryOperator::Subscr
+                }
+            );
             // Compile the subpattern in irrefutable mode.
             self.compile_pattern_subpattern(pattern, pc)?;
         }
@@ -6206,7 +6263,12 @@ impl Compiler {
                 self.compile_expression(slice)?;
                 emit!(self, Instruction::Copy { index: 2_u32 });
                 emit!(self, Instruction::Copy { index: 2_u32 });
-                emit!(self, Instruction::BinarySubscr);
+                emit!(
+                    self,
+                    Instruction::BinaryOp {
+                        op: BinaryOperator::Subscr
+                    }
+                );
                 AugAssignKind::Subscript
             }
             ast::Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
@@ -6472,8 +6534,11 @@ impl Compiler {
             }
         );
 
-        // JUMP_NO_INTERRUPT send (regular JUMP in RustPython)
-        emit!(self, PseudoInstruction::Jump { target: send_block });
+        // JUMP_BACKWARD_NO_INTERRUPT send
+        emit!(
+            self,
+            PseudoInstruction::JumpNoInterrupt { target: send_block }
+        );
 
         // fail: CLEANUP_THROW
         // Stack when exception: [receiver, yielded_value, exc]
@@ -7369,7 +7434,9 @@ impl Compiler {
                 emit!(self, Instruction::EndAsyncFor);
                 emit!(self, Instruction::PopTop);
             } else {
-                emit!(self, Instruction::PopTop);
+                // END_FOR + POP_ITER pattern (CPython 3.14)
+                emit!(self, Instruction::EndFor);
+                emit!(self, Instruction::PopIter);
             }
         }
 
@@ -7566,9 +7633,13 @@ impl Compiler {
             self.switch_to_block(after_block);
             if is_async {
                 emit!(self, Instruction::EndAsyncFor);
+                // Pop the iterator
+                emit!(self, Instruction::PopTop);
+            } else {
+                // END_FOR + POP_ITER pattern (CPython 3.14)
+                emit!(self, Instruction::EndFor);
+                emit!(self, Instruction::PopIter);
             }
-            // Pop the iterator
-            emit!(self, Instruction::PopTop);
         }
 
         // Step 8: Clean up - restore saved locals
@@ -7686,6 +7757,18 @@ impl Compiler {
     }
 
     fn emit_load_const(&mut self, constant: ConstantData) {
+        // Use LOAD_SMALL_INT for integers in small int cache range (-5..=256)
+        // Still add to co_consts for compatibility (CPython does this too)
+        if let ConstantData::Integer { ref value } = constant
+            && let Some(small_int) = value.to_i32()
+            && (-5..=256).contains(&small_int)
+        {
+            // Add to co_consts even though we use LOAD_SMALL_INT
+            let _idx = self.arg_constant(constant);
+            // Store as u32 (two's complement for negative values)
+            self.emit_arg(small_int as u32, |idx| Instruction::LoadSmallInt { idx });
+            return;
+        }
         let idx = self.arg_constant(constant);
         self.emit_arg(idx, |idx| Instruction::LoadConst { idx })
     }
@@ -7869,7 +7952,7 @@ impl Compiler {
 
         // For break in a for loop, pop the iterator
         if is_break && is_for_loop {
-            emit!(self, Instruction::PopTop);
+            emit!(self, Instruction::PopIter);
         }
 
         // Jump to target
