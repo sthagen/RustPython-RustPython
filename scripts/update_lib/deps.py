@@ -65,27 +65,67 @@ DEPENDENCIES = {
     },
     # Rust-implemented modules (no lib file, only test)
     "int": {
-        "lib": [],  # No Python lib (Rust implementation)
+        "lib": [],
         "hard_deps": ["_pylong.py"],
+        "test": [
+            "test/test_int.py",
+            "test/test_long.py",
+        ],
     },
-    # Pure Python implementations
-    "abc": {
-        "hard_deps": ["_py_abc.py"],
+    "exception": {
+        "lib": [],
+        "test": [
+            "test/test_exceptions.py",
+            "test/test_baseexception.py",
+            "test/test_except_star.py",
+            "test/test_exception_group.py",
+            "test/test_exception_hierarchy.py",
+            "test/test_exception_variations.py",
+        ],
+    },
+    "dict": {
+        "lib": [],
+        "test": [
+            "test/test_dict.py",
+            "test/test_dictcomps.py",
+            "test/test_dictviews.py",
+            "test/test_userdict.py",
+        ],
+    },
+    "list": {
+        "lib": [],
+        "test": [
+            "test/test_list.py",
+            "test/test_listcomps.py",
+            "test/test_userlist.py",
+        ],
     },
     "codecs": {
-        "hard_deps": ["_pycodecs.py"],
+        "test": [
+            "test/test_codecs.py",
+            "test/test_codeccallbacks.py",
+            "test/test_codecencodings_cn.py",
+            "test/test_codecencodings_hk.py",
+            "test/test_codecencodings_iso2022.py",
+            "test/test_codecencodings_jp.py",
+            "test/test_codecencodings_kr.py",
+            "test/test_codecencodings_tw.py",
+            "test/test_codecmaps_cn.py",
+            "test/test_codecmaps_hk.py",
+            "test/test_codecmaps_jp.py",
+            "test/test_codecmaps_kr.py",
+            "test/test_codecmaps_tw.py",
+            "test/test_charmapcodec.py",
+            "test/test_multibytecodec.py",
+        ],
     },
-    "datetime": {
-        "hard_deps": ["_pydatetime.py"],
-    },
-    "decimal": {
-        "hard_deps": ["_pydecimal.py"],
-    },
-    "io": {
-        "hard_deps": ["_pyio.py"],
-    },
-    "warnings": {
-        "hard_deps": ["_py_warnings.py"],
+    # Non-pattern hard_deps (can't be auto-detected)
+    "ast": {
+        "hard_deps": ["_ast_unparse.py"],
+        "test": [
+            "test/test_ast.py",
+            "test/test_unparse.py",
+        ],
     },
     # Data directories
     "pydoc": {
@@ -98,25 +138,229 @@ DEPENDENCIES = {
     "support": {
         "lib": ["test/support"],
         "data": ["test/wheeldata"],
+        "test": [
+            "test/test_support.py",
+            "test/test_script_helper.py",
+        ],
+    },
+    # test_htmlparser tests html.parser
+    "html": {
+        "test": ["test/test_html.py", "test/test_htmlparser.py"],
+    },
+    "xml": {
+        "test": [
+            "test/test_xml_etree.py",
+            "test/test_xml_etree_c.py",
+            "test/test_minidom.py",
+            "test/test_pulldom.py",
+            "test/test_pyexpat.py",
+            "test/test_sax.py",
+        ],
+    },
+    "multiprocessing": {
+        "test": [
+            "test/test_multiprocessing_fork",
+            "test/test_multiprocessing_forkserver",
+            "test/test_multiprocessing_spawn",
+        ],
+    },
+    "urllib": {
+        "test": [
+            "test/test_urllib.py",
+            "test/test_urllib2.py",
+            "test/test_urllib2_localnet.py",
+            "test/test_urllib2net.py",
+            "test/test_urllibnet.py",
+            "test/test_urlparse.py",
+            "test/test_urllib_response.py",
+            "test/test_robotparser.py",
+        ],
+    },
+    "collections": {
+        "test": [
+            "test/test_collections.py",
+            "test/test_deque.py",
+            "test/test_defaultdict.py",
+            "test/test_ordered_dict.py",
+        ],
+    },
+    "http": {
+        "test": [
+            "test/test_httplib.py",
+            "test/test_http_cookiejar.py",
+            "test/test_http_cookies.py",
+            "test/test_httpservers.py",
+        ],
+    },
+    "unicode": {
+        "lib": [],
+        "test": [
+            "test/test_unicode_file.py",
+            "test/test_unicode_file_functions.py",
+            "test/test_unicode_identifiers.py",
+            "test/test_unicodedata.py",
+        ],
+    },
+    "typing": {
+        "test": [
+            "test/test_typing.py",
+            "test/test_type_aliases.py",
+            "test/test_type_annotations.py",
+            "test/test_type_params.py",
+            "test/test_genericalias.py",
+        ],
+    },
+    "unpack": {
+        "lib": [],
+        "test": [
+            "test/test_unpack.py",
+            "test/test_unpack_ex.py",
+        ],
+    },
+    "zipimport": {
+        "test": [
+            "test/test_zipimport.py",
+            "test/test_zipimport_support.py",
+        ],
+    },
+    "time": {
+        "lib": [],
+        "test": [
+            "test/test_time.py",
+            "test/test_strftime.py",
+        ],
+    },
+    "sys": {
+        "lib": [],
+        "test": [
+            "test/test_sys.py",
+            "test/test_syslog.py",
+            "test/test_sys_setprofile.py",
+            "test/test_sys_settrace.py",
+        ],
+    },
+    "str": {
+        "lib": [],
+        "test": [
+            "test/test_str.py",
+            "test/test_fstring.py",
+            "test/test_string_literals.py",
+        ],
+    },
+    "thread": {
+        "lib": [],
+        "test": [
+            "test/test_thread.py",
+            "test/test_thread_local_bytecode.py",
+            "test/test_threadsignals.py",
+        ],
+    },
+    "threading": {
+        "test": [
+            "test/test_threading.py",
+            "test/test_threadedtempfile.py",
+            "test/test_threading_local.py",
+        ],
+    },
+    "class": {
+        "lib": [],
+        "test": [
+            "test/test_class.py",
+            "test/test_genericclass.py",
+            "test/test_subclassinit.py",
+        ],
+    },
+    "generator": {
+        "lib": [],
+        "test": [
+            "test/test_generators.py",
+            "test/test_genexps.py",
+            "test/test_generator_stop.py",
+            "test/test_yield_from.py",
+        ],
+    },
+    "descr": {
+        "lib": [],
+        "test": [
+            "test/test_descr.py",
+            "test/test_descrtut.py",
+        ],
+    },
+    "contextlib": {
+        "test": [
+            "test/test_contextlib.py",
+            "test/test_contextlib_async.py",
+        ],
+    },
+    "io": {
+        "test": [
+            "test/test_io.py",
+            "test/test_bufio.py",
+            "test/test_fileio.py",
+            "test/test_memoryio.py",
+        ],
+    },
+    "dbm": {
+        "test": [
+            "test/test_dbm.py",
+            "test/test_dbm_gnu.py",
+            "test/test_dbm_ndbm.py",
+        ],
+    },
+    "datetime": {
+        "test": [
+            "test/test_datetime.py",
+            "test/test_strptime.py",
+        ],
+    },
+    "file": {
+        "lib": [],
+        "test": [
+            "test/test_file.py",
+            "test/test_largefile.py",
+        ],
+    },
+    "fcntl": {
+        "lib": [],
+        "test": [
+            "test/test_fcntl.py",
+            "test/test_ioctl.py",
+        ],
+    },
+    "xmlrpc": {
+        "test": [
+            "test/test_xmlrpc.py",
+            "test/test_docxmlrpc.py",
+        ],
+    },
+    "ctypes": {
+        "test": [
+            "test/test_ctypes",
+            "test/test_stable_abi_ctypes.py",
+        ],
     },
 }
 
-def resolve_hard_dep_parent(name: str) -> str | None:
+
+def resolve_hard_dep_parent(name: str, cpython_prefix: str = "cpython") -> str | None:
     """Resolve a hard_dep name to its parent module.
 
-    If 'name' is listed as a hard_dep of another module, return that module's name.
-    E.g., 'pydoc_data' -> 'pydoc', '_pydatetime' -> 'datetime'
+    Only returns a parent if the file is actually tracked:
+    - Explicitly listed in DEPENDENCIES as a hard_dep
+    - Or auto-detected _py{module}.py pattern where the parent module exists
 
     Args:
         name: Module or file name (with or without .py extension)
+        cpython_prefix: CPython directory prefix
 
     Returns:
-        Parent module name if found, None otherwise
+        Parent module name if found and tracked, None otherwise
     """
     # Normalize: remove .py extension if present
     if name.endswith(".py"):
         name = name[:-3]
 
+    # Check DEPENDENCIES table first (explicit hard_deps)
     for module_name, dep_info in DEPENDENCIES.items():
         hard_deps = dep_info.get("hard_deps", [])
         for dep in hard_deps:
@@ -124,6 +368,26 @@ def resolve_hard_dep_parent(name: str) -> str | None:
             dep_normalized = dep[:-3] if dep.endswith(".py") else dep
             if dep_normalized == name:
                 return module_name
+
+    # Auto-detect _py{module} or _py_{module} patterns
+    # Only if the parent module actually exists
+    if name.startswith("_py"):
+        if name.startswith("_py_"):
+            # _py_abc -> abc
+            parent = name[4:]
+        else:
+            # _pydatetime -> datetime
+            parent = name[3:]
+
+        # Verify the parent module exists
+        lib_dir = pathlib.Path(cpython_prefix) / "Lib"
+        parent_file = lib_dir / f"{parent}.py"
+        parent_dir = lib_dir / parent
+        if parent_file.exists() or (
+            parent_dir.exists() and (parent_dir / "__init__.py").exists()
+        ):
+            return parent
+
     return None
 
 
@@ -233,9 +497,15 @@ def get_lib_paths(
         # Default: try file first, then directory
         paths = [resolve_module_path(name, cpython_prefix, prefer="file")]
 
-    # Add hard_deps
+    # Add hard_deps from DEPENDENCIES
     for dep in dep_info.get("hard_deps", []):
         paths.append(construct_lib_path(cpython_prefix, dep))
+
+    # Auto-detect _py{module}.py or _py_{module}.py patterns
+    for pattern in [f"_py{name}.py", f"_py_{name}.py"]:
+        auto_path = construct_lib_path(cpython_prefix, pattern)
+        if auto_path.exists() and auto_path not in paths:
+            paths.append(auto_path)
 
     return tuple(paths)
 
@@ -453,9 +723,12 @@ def is_up_to_date(
 
     lib_paths = get_lib_paths(name, cpython_prefix)
 
+    found_any = False
     for cpython_path in lib_paths:
         if not cpython_path.exists():
             continue
+
+        found_any = True
 
         # Convert cpython path to local path
         # cpython/Lib/foo.py -> Lib/foo.py
@@ -474,7 +747,11 @@ def is_up_to_date(
             if not _dircmp_is_same(dcmp):
                 return False
 
-    return True
+    if not found_any:
+        dep_info = DEPENDENCIES.get(name, {})
+        if dep_info.get("lib") == []:
+            return True
+    return found_any
 
 
 def get_test_dependencies(
