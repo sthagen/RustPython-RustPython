@@ -247,9 +247,25 @@ def _iter_patch_lines(
 
     # Build cache of all classes (for Phase 2 to find classes without methods)
     cache = {}
+    # Build per-class set of async method names (for Phase 2 to generate correct override)
+    async_methods: dict[str, set[str]] = {}
+    # Track class bases for inherited async method lookup
+    class_bases: dict[str, list[str]] = {}
+    all_classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             cache[node.name] = node.end_lineno
+            class_bases[node.name] = [
+                base.id
+                for base in node.bases
+                if isinstance(base, ast.Name) and base.id in all_classes
+            ]
+            cls_async: set[str] = set()
+            for item in node.body:
+                if isinstance(item, ast.AsyncFunctionDef):
+                    cls_async.add(item.name)
+            if cls_async:
+                async_methods[node.name] = cls_async
 
     # Phase 1: Iterate and mark existing tests
     for cls_node, fn_node in iter_tests(tree):
@@ -274,7 +290,27 @@ def _iter_patch_lines(
 
         for test_name, specs in tests.items():
             decorators = "\n".join(spec.as_decorator() for spec in specs)
-            patch_lines = f"""
+            # Check current class and ancestors for async method
+            is_async = False
+            queue = [cls_name]
+            visited: set[str] = set()
+            while queue:
+                cur = queue.pop(0)
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                if test_name in async_methods.get(cur, set()):
+                    is_async = True
+                    break
+                queue.extend(class_bases.get(cur, []))
+            if is_async:
+                patch_lines = f"""
+{decorators}
+async def {test_name}(self):
+{DEFAULT_INDENT}return await super().{test_name}()
+""".rstrip()
+            else:
+                patch_lines = f"""
 {decorators}
 def {test_name}(self):
 {DEFAULT_INDENT}return super().{test_name}()
