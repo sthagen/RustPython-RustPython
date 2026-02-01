@@ -41,6 +41,10 @@ pub mod module {
     };
     use strum_macros::{EnumIter, EnumString};
 
+    #[cfg(target_os = "android")]
+    #[pyattr]
+    use libc::{SCHED_DEADLINE, SCHED_NORMAL};
+
     #[cfg(target_os = "freebsd")]
     #[pyattr]
     use libc::{MFD_HUGE_MASK, SF_MNOWAIT, SF_NOCACHE, SF_NODISKIO, SF_SYNC};
@@ -656,8 +660,16 @@ pub mod module {
     }
 
     fn py_os_after_fork_child(vm: &VirtualMachine) {
+        // Reset low-level state before any Python code runs in the child.
+        // Signal triggers from the parent must not fire in the child.
+        crate::signal::clear_after_fork();
+        crate::stdlib::signal::_signal::clear_wakeup_fd_after_fork();
+
+        // Reset weakref stripe locks that may have been held during fork.
+        #[cfg(feature = "threading")]
+        crate::object::reset_weakref_locks_after_fork();
+
         // Mark all other threads as done before running Python callbacks
-        // See _PyThread_AfterFork behavior
         #[cfg(feature = "threading")]
         crate::stdlib::thread::after_fork_child(vm);
 
