@@ -29,7 +29,6 @@ env:
   # test_posixpath: OSError: (22, 'The filename, directory name, or volume label syntax is incorrect. (os error 123)')
   # test_venv: couple of failing tests
   WINDOWS_SKIPS: >-
-    test_asyncio
     test_glob
     test_rlcompleter
     test_pathlib
@@ -101,10 +100,12 @@ env:
     test_subclassinit
     test_super
     test_syntax
+    test_tstring
     test_tuple
     test_types
     test_unary
     test_unpack
+    test_unpack_ex
     test_weakref
     test_yield_from
   ENV_POLLUTING_TESTS_COMMON: >-
