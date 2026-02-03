@@ -5,6 +5,7 @@ pub(crate) mod _ast {
     use crate::{
         AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
         builtins::{PyStrRef, PyTupleRef, PyType, PyTypeRef},
+        class::PyClassImpl,
         function::FuncArgs,
         types::{Constructor, Initializer},
     };
@@ -65,8 +66,13 @@ pub(crate) mod _ast {
                     if fields.len() == 1 { "" } else { "s" },
                 )));
             }
+
+            // Track which fields were set
+            let mut set_fields = std::collections::HashSet::new();
+
             for (name, arg) in fields.iter().zip(args.args) {
                 zelf.set_attr(name, arg, vm)?;
+                set_fields.insert(name.as_str().to_string());
             }
             for (key, value) in args.kwargs {
                 if let Some(pos) = fields.iter().position(|f| f.as_str() == key)
@@ -78,7 +84,41 @@ pub(crate) mod _ast {
                         key
                     )));
                 }
+                set_fields.insert(key.clone());
                 zelf.set_attr(vm.ctx.intern_str(key), value, vm)?;
+            }
+
+            // Use _field_types to determine defaults for unset fields.
+            // Only built-in AST node classes have _field_types populated.
+            let field_types = zelf.class().get_attr(vm.ctx.intern_str("_field_types"));
+            if let Some(Ok(ft_dict)) =
+                field_types.map(|ft| ft.downcast::<crate::builtins::PyDict>())
+            {
+                let expr_ctx_type: PyObjectRef =
+                    super::super::pyast::NodeExprContext::make_class(&vm.ctx).into();
+
+                for field in &fields {
+                    if set_fields.contains(field.as_str()) {
+                        continue;
+                    }
+                    if let Some(ftype) = ft_dict.get_item_opt::<str>(field.as_str(), vm)? {
+                        if ftype.fast_isinstance(vm.ctx.types.union_type) {
+                            // Optional field (T | None) — no default
+                        } else if ftype.fast_isinstance(vm.ctx.types.generic_alias_type) {
+                            // List field (list[T]) — default to []
+                            let empty_list: PyObjectRef = vm.ctx.new_list(vec![]).into();
+                            zelf.set_attr(vm.ctx.intern_str(field.as_str()), empty_list, vm)?;
+                        } else if ftype.is(&expr_ctx_type) {
+                            // expr_context — default to Load()
+                            let load_type =
+                                super::super::pyast::NodeExprContextLoad::make_class(&vm.ctx);
+                            let load_instance =
+                                vm.ctx.new_base_object(load_type, Some(vm.ctx.new_dict()));
+                            zelf.set_attr(vm.ctx.intern_str(field.as_str()), load_instance, vm)?;
+                        }
+                        // else: required field, no default set
+                    }
+                }
             }
 
             Ok(())

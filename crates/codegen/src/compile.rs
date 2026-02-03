@@ -4638,7 +4638,7 @@ impl Compiler {
             self.emit_load_const(ConstantData::Str { value: name.into() });
 
             if let Some(arguments) = arguments {
-                self.codegen_call_helper(2, arguments)?;
+                self.codegen_call_helper(2, arguments, self.current_source_range)?;
             } else {
                 emit!(self, Instruction::Call { nargs: 2 });
             }
@@ -5039,8 +5039,9 @@ impl Compiler {
     }
 
     fn compile_error_forbidden_name(&mut self, name: &str) -> CodegenError {
-        // TODO: make into error (fine for now since it realistically errors out earlier)
-        panic!("Failing due to forbidden name {name:?}");
+        self.error(CodegenErrorType::SyntaxError(format!(
+            "cannot use forbidden name '{name}' in pattern"
+        )))
     }
 
     /// Ensures that `pc.fail_pop` has at least `n + 1` entries.
@@ -5387,12 +5388,9 @@ impl Compiler {
 
         // Check for too many sub-patterns.
         if nargs > u32::MAX as usize || (nargs + n_attrs).saturating_sub(1) > i32::MAX as usize {
-            let msg = format!(
-                "too many sub-patterns in class pattern {:?}",
-                match_class.cls
-            );
-            panic!("{}", msg);
-            // return self.compiler_error(&msg);
+            return Err(self.error(CodegenErrorType::SyntaxError(
+                "too many sub-patterns in class pattern".to_owned(),
+            )));
         }
 
         // Validate keyword attributes if any.
@@ -5677,7 +5675,11 @@ impl Compiler {
         // Ensure the pattern is a MatchOr.
         let end = self.new_block(); // Create a new jump target label.
         let size = p.patterns.len();
-        assert!(size > 1, "MatchOr must have more than one alternative");
+        if size <= 1 {
+            return Err(self.error(CodegenErrorType::SyntaxError(
+                "MatchOr requires at least 2 patterns".to_owned(),
+            )));
+        }
 
         // Save the current pattern context.
         let old_pc = pc.clone();
@@ -7079,6 +7081,10 @@ impl Compiler {
     }
 
     fn compile_call(&mut self, func: &ast::Expr, args: &ast::Arguments) -> CompileResult<()> {
+        // Save the call expression's source range so CALL instructions use the
+        // call start line, not the last argument's line.
+        let call_range = self.current_source_range;
+
         // Method call: obj → LOAD_ATTR_METHOD → [method, self_or_null] → args → CALL
         // Regular call: func → PUSH_NULL → args → CALL
         if let ast::Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = &func {
@@ -7096,21 +7102,21 @@ impl Compiler {
                         self.emit_load_zero_super_method(idx);
                     }
                 }
-                self.codegen_call_helper(0, args)?;
+                self.codegen_call_helper(0, args, call_range)?;
             } else {
                 // Normal method call: compile object, then LOAD_ATTR with method flag
                 // LOAD_ATTR(method=1) pushes [method, self_or_null] on stack
                 self.compile_expression(value)?;
                 let idx = self.name(attr.as_str());
                 self.emit_load_attr_method(idx);
-                self.codegen_call_helper(0, args)?;
+                self.codegen_call_helper(0, args, call_range)?;
             }
         } else {
             // Regular call: push func, then NULL for self_or_null slot
             // Stack layout: [func, NULL, args...] - same as method call [func, self, args...]
             self.compile_expression(func)?;
             emit!(self, Instruction::PushNull);
-            self.codegen_call_helper(0, args)?;
+            self.codegen_call_helper(0, args, call_range)?;
         }
         Ok(())
     }
@@ -7152,10 +7158,13 @@ impl Compiler {
     }
 
     /// Compile call arguments and emit the appropriate CALL instruction.
+    /// `call_range` is the source range of the call expression, used to set
+    /// the correct line number on the CALL instruction.
     fn codegen_call_helper(
         &mut self,
         additional_positional: u32,
         arguments: &ast::Arguments,
+        call_range: TextRange,
     ) -> CompileResult<()> {
         let nelts = arguments.args.len();
         let nkwelts = arguments.keywords.len();
@@ -7186,6 +7195,8 @@ impl Compiler {
                     self.compile_expression(&keyword.value)?;
                 }
 
+                // Restore call expression range for kwnames and CALL_KW
+                self.set_source_range(call_range);
                 self.emit_load_const(ConstantData::Tuple {
                     elements: kwarg_names,
                 });
@@ -7193,6 +7204,7 @@ impl Compiler {
                 let nargs = additional_positional + nelts.to_u32() + nkwelts.to_u32();
                 emit!(self, Instruction::CallKw { nargs });
             } else {
+                self.set_source_range(call_range);
                 let nargs = additional_positional + nelts.to_u32();
                 emit!(self, Instruction::Call { nargs });
             }
@@ -7284,6 +7296,7 @@ impl Compiler {
                 emit!(self, Instruction::PushNull);
             }
 
+            self.set_source_range(call_range);
             emit!(self, Instruction::CallFunctionEx);
         }
 
