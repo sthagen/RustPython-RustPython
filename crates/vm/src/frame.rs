@@ -10,7 +10,7 @@ use crate::{
         function::{PyCell, PyCellRef, PyFunction},
         tuple::{PyTuple, PyTupleRef},
     },
-    bytecode::{self, Instruction},
+    bytecode::{self, Instruction, LoadSuperAttr},
     convert::{IntoObject, ToPyResult},
     coroutine::Coro,
     exceptions::ExceptionCtor,
@@ -72,7 +72,7 @@ pub struct Frame {
     pub(crate) cells_frees: Box<[PyCellRef]>,
     pub locals: ArgMapping,
     pub globals: PyDictRef,
-    pub builtins: PyDictRef,
+    pub builtins: PyObjectRef,
 
     // on feature=threading, this is a duplicate of FrameState.lasti, but it's faster to do an
     // atomic store than it is to do a fetch_add, for every instruction executed
@@ -137,7 +137,7 @@ impl Frame {
     pub(crate) fn new(
         code: PyRef<PyCode>,
         scope: Scope,
-        builtins: PyDictRef,
+        builtins: PyObjectRef,
         closure: &[PyCellRef],
         func_obj: Option<PyObjectRef>,
         vm: &VirtualMachine,
@@ -328,19 +328,14 @@ impl Py<Frame> {
     }
 
     pub fn next_external_frame(&self, vm: &VirtualMachine) -> Option<FrameRef> {
-        self.f_back(vm).map(|mut back| {
-            loop {
-                back = if let Some(back) = back.to_owned().f_back(vm) {
-                    back
-                } else {
-                    break back;
-                };
-
-                if !back.is_internal_frame() {
-                    break back;
-                }
+        let mut frame = self.f_back(vm);
+        while let Some(ref f) = frame {
+            if !f.is_internal_frame() {
+                break;
             }
-        })
+            frame = f.f_back(vm);
+        }
+        frame
     }
 }
 
@@ -352,7 +347,7 @@ struct ExecutingFrame<'a> {
     cells_frees: &'a [PyCellRef],
     locals: &'a ArgMapping,
     globals: &'a PyDictRef,
-    builtins: &'a PyDictRef,
+    builtins: &'a PyObjectRef,
     object: &'a Py<Frame>,
     lasti: &'a Lasti,
     state: &'a mut FrameState,
@@ -1207,7 +1202,31 @@ impl ExecutingFrame<'_> {
             Instruction::LoadAttr { idx } => self.load_attr(vm, idx.get(arg)),
             Instruction::LoadSuperAttr { arg: idx } => self.load_super_attr(vm, idx.get(arg)),
             Instruction::LoadBuildClass => {
-                self.push_value(vm.builtins.get_attr(identifier!(vm, __build_class__), vm)?);
+                let build_class =
+                    if let Some(builtins_dict) = self.builtins.downcast_ref::<PyDict>() {
+                        builtins_dict
+                            .get_item_opt(identifier!(vm, __build_class__), vm)?
+                            .ok_or_else(|| {
+                                vm.new_name_error(
+                                    "__build_class__ not found".to_owned(),
+                                    identifier!(vm, __build_class__).to_owned(),
+                                )
+                            })?
+                    } else {
+                        self.builtins
+                            .get_item(identifier!(vm, __build_class__), vm)
+                            .map_err(|e| {
+                                if e.fast_isinstance(vm.ctx.exceptions.key_error) {
+                                    vm.new_name_error(
+                                        "__build_class__ not found".to_owned(),
+                                        identifier!(vm, __build_class__).to_owned(),
+                                    )
+                                } else {
+                                    e
+                                }
+                            })?
+                    };
+                self.push_value(build_class);
                 Ok(None)
             }
             Instruction::LoadLocals => {
@@ -2124,11 +2143,26 @@ impl ExecutingFrame<'_> {
 
     #[inline]
     fn load_global_or_builtin(&self, name: &Py<PyStr>, vm: &VirtualMachine) -> PyResult {
-        self.globals
-            .get_chain(self.builtins, name, vm)?
-            .ok_or_else(|| {
-                vm.new_name_error(format!("name '{name}' is not defined"), name.to_owned())
+        if let Some(builtins_dict) = self.builtins.downcast_ref::<PyDict>() {
+            // Fast path: builtins is a dict
+            self.globals
+                .get_chain(builtins_dict, name, vm)?
+                .ok_or_else(|| {
+                    vm.new_name_error(format!("name '{name}' is not defined"), name.to_owned())
+                })
+        } else {
+            // Slow path: builtins is not a dict, use generic __getitem__
+            if let Some(value) = self.globals.get_item_opt(name, vm)? {
+                return Ok(value);
+            }
+            self.builtins.get_item(name, vm).map_err(|e| {
+                if e.fast_isinstance(vm.ctx.exceptions.key_error) {
+                    vm.new_name_error(format!("name '{name}' is not defined"), name.to_owned())
+                } else {
+                    e
+                }
             })
+        }
     }
 
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
@@ -2820,9 +2854,8 @@ impl ExecutingFrame<'_> {
         Ok(None)
     }
 
-    fn load_super_attr(&mut self, vm: &VirtualMachine, oparg: u32) -> FrameResult {
-        let (name_idx, load_method, has_class) = bytecode::decode_load_super_attr_arg(oparg);
-        let attr_name = self.code.names[name_idx as usize];
+    fn load_super_attr(&mut self, vm: &VirtualMachine, oparg: LoadSuperAttr) -> FrameResult {
+        let attr_name = self.code.names[oparg.name_idx() as usize];
 
         // Stack layout (bottom to top): [super, class, self]
         // Pop in LIFO order: self, class, super
@@ -2832,13 +2865,13 @@ impl ExecutingFrame<'_> {
 
         // Create super object - pass args based on has_class flag
         // When super is shadowed, has_class=false means call with 0 args
-        let super_obj = if has_class {
+        let super_obj = if oparg.has_class() {
             global_super.call((class.clone(), self_obj.clone()), vm)?
         } else {
             global_super.call((), vm)?
         };
 
-        if load_method {
+        if oparg.is_load_method() {
             // Method load: push [method, self_or_null]
             let method = PyMethod::get(super_obj, attr_name, vm)?;
             match method {
