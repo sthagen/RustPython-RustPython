@@ -493,56 +493,46 @@ impl Compiler {
         slice: &ast::Expr,
         ctx: ast::ExprContext,
     ) -> CompileResult<()> {
-        // 1. Check subscripter and index for Load context
-        // 2. VISIT value
-        // 3. Handle two-element slice specially
-        // 4. Otherwise VISIT slice and emit appropriate instruction
-
-        // For Load context, some checks are skipped for now
-        // if ctx == ast::ExprContext::Load {
-        //     check_subscripter(value);
-        //     check_index(value, slice);
-        // }
+        // Save full subscript expression range (set by compile_expression before this call)
+        let subscript_range = self.current_source_range;
 
         // VISIT(c, expr, e->v.Subscript.value)
         self.compile_expression(value)?;
 
         // Handle two-element non-constant slice with BINARY_SLICE/STORE_SLICE
-        if slice.should_use_slice_optimization() && !matches!(ctx, ast::ExprContext::Del) {
+        let use_slice_opt = matches!(ctx, ast::ExprContext::Load | ast::ExprContext::Store)
+            && slice.should_use_slice_optimization();
+        if use_slice_opt {
             match slice {
                 ast::Expr::Slice(s) => self.compile_slice_two_parts(s)?,
                 _ => unreachable!(
                     "should_use_slice_optimization should only return true for ast::Expr::Slice"
                 ),
             };
-            match ctx {
-                ast::ExprContext::Load => {
-                    emit!(self, Instruction::BinarySlice);
-                }
-                ast::ExprContext::Store => {
-                    emit!(self, Instruction::StoreSlice);
-                }
-                _ => unreachable!(),
-            }
         } else {
             // VISIT(c, expr, e->v.Subscript.slice)
             self.compile_expression(slice)?;
+        }
 
-            // Emit appropriate instruction based on context
-            match ctx {
-                ast::ExprContext::Load => emit!(
-                    self,
-                    Instruction::BinaryOp {
-                        op: BinaryOperator::Subscr
-                    }
-                ),
-                ast::ExprContext::Store => emit!(self, Instruction::StoreSubscr),
-                ast::ExprContext::Del => emit!(self, Instruction::DeleteSubscr),
-                ast::ExprContext::Invalid => {
-                    return Err(self.error(CodegenErrorType::SyntaxError(
-                        "Invalid expression context".to_owned(),
-                    )));
+        // Restore full subscript expression range before emitting
+        self.set_source_range(subscript_range);
+
+        match (use_slice_opt, ctx) {
+            (true, ast::ExprContext::Load) => emit!(self, Instruction::BinarySlice),
+            (true, ast::ExprContext::Store) => emit!(self, Instruction::StoreSlice),
+            (true, _) => unreachable!(),
+            (false, ast::ExprContext::Load) => emit!(
+                self,
+                Instruction::BinaryOp {
+                    op: BinaryOperator::Subscr
                 }
+            ),
+            (false, ast::ExprContext::Store) => emit!(self, Instruction::StoreSubscr),
+            (false, ast::ExprContext::Del) => emit!(self, Instruction::DeleteSubscr),
+            (false, ast::ExprContext::Invalid) => {
+                return Err(self.error(CodegenErrorType::SyntaxError(
+                    "Invalid expression context".to_owned(),
+                )));
             }
         }
 
@@ -1175,7 +1165,7 @@ impl Compiler {
                 arg: OpArgMarker::marker(),
             }
             .into(),
-            arg: OpArg(bytecode::ResumeType::AtFuncStart as u32),
+            arg: OpArg(u32::from(bytecode::ResumeType::AtFuncStart)),
             target: BlockIdx::NULL,
             location,
             end_location,
@@ -1277,8 +1267,6 @@ impl Compiler {
     /// Emit format parameter validation for annotation scope
     /// if format > VALUE_WITH_FAKE_GLOBALS (2): raise NotImplementedError
     fn emit_format_validation(&mut self) -> CompileResult<()> {
-        use bytecode::ComparisonOperator::Greater;
-
         // Load format parameter (first local variable, index 0)
         emit!(self, Instruction::LoadFast(0));
 
@@ -1286,7 +1274,12 @@ impl Compiler {
         self.emit_load_const(ConstantData::Integer { value: 2.into() });
 
         // Compare: format > 2
-        emit!(self, Instruction::CompareOp { op: Greater });
+        emit!(
+            self,
+            Instruction::CompareOp {
+                op: ComparisonOperator::Greater
+            }
+        );
 
         // Jump to body if format <= 2 (comparison is false)
         let body_block = self.new_block();
@@ -6555,9 +6548,9 @@ impl Compiler {
             self,
             Instruction::Resume {
                 arg: if is_await {
-                    bytecode::ResumeType::AfterAwait as u32
+                    u32::from(bytecode::ResumeType::AfterAwait)
                 } else {
-                    bytecode::ResumeType::AfterYieldFrom as u32
+                    u32::from(bytecode::ResumeType::AfterYieldFrom)
                 }
             }
         );
@@ -6603,7 +6596,8 @@ impl Compiler {
                 self.compile_expression(left)?;
                 self.compile_expression(right)?;
 
-                // Perform operation:
+                // Restore full expression range before emitting the operation
+                self.set_source_range(range);
                 self.compile_op(op, false);
             }
             ast::Expr::Subscript(ast::ExprSubscript {
@@ -6614,7 +6608,8 @@ impl Compiler {
             ast::Expr::UnaryOp(ast::ExprUnaryOp { op, operand, .. }) => {
                 self.compile_expression(operand)?;
 
-                // Perform operation:
+                // Restore full expression range before emitting the operation
+                self.set_source_range(range);
                 match op {
                     ast::UnaryOp::UAdd => emit!(
                         self,
@@ -6710,7 +6705,7 @@ impl Compiler {
                 emit!(
                     self,
                     Instruction::Resume {
-                        arg: bytecode::ResumeType::AfterYield as u32
+                        arg: u32::from(bytecode::ResumeType::AfterYield)
                     }
                 );
             }
@@ -6932,7 +6927,7 @@ impl Compiler {
                         emit!(
                             compiler,
                             Instruction::Resume {
-                                arg: bytecode::ResumeType::AfterYield as u32
+                                arg: u32::from(bytecode::ResumeType::AfterYield)
                             }
                         );
                         emit!(compiler, Instruction::PopTop);
@@ -8420,7 +8415,7 @@ impl Compiler {
 
                     // Emit BUILD_INTERPOLATION
                     // oparg encoding: (conversion << 2) | has_format_spec
-                    let oparg = (conversion << 2) | (has_format_spec as u32);
+                    let oparg = (conversion << 2) | u32::from(has_format_spec);
                     emit!(self, Instruction::BuildInterpolation { oparg });
 
                     *interp_count += 1;
