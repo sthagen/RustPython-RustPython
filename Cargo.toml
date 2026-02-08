@@ -10,7 +10,8 @@ repository.workspace = true
 license.workspace = true
 
 [features]
-default = ["threading", "stdlib", "stdio", "importlib", "ssl-rustls"]
+default = ["threading", "stdlib", "stdio", "importlib", "ssl-rustls", "host_env"]
+host_env = ["rustpython-vm/host_env", "rustpython-stdlib?/host_env"]
 importlib = ["rustpython-vm/importlib"]
 encodings = ["rustpython-vm/encodings"]
 stdio = ["rustpython-vm/stdio"]
@@ -225,9 +226,9 @@ unsafe_op_in_unsafe_fn = "deny"
 elided_lifetimes_in_paths = "warn"
 
 [workspace.lints.clippy]
-# alloc_instead_of_core = "warn"
-# std_instead_of_alloc = "warn"
-# std_instead_of_core = "warn"
+alloc_instead_of_core = "warn"
+std_instead_of_alloc = "warn"
+std_instead_of_core = "warn"
 perf = "warn"
 style = "warn"
 complexity = "warn"

@@ -10,7 +10,7 @@ use crate::{
         function::{PyCell, PyCellRef, PyFunction},
         tuple::{PyTuple, PyTupleRef},
     },
-    bytecode::{self, Instruction, LoadSuperAttr},
+    bytecode::{self, Instruction, LoadAttr, LoadSuperAttr},
     convert::{IntoObject, ToPyResult},
     coroutine::Coro,
     exceptions::ExceptionCtor,
@@ -577,7 +577,7 @@ impl ExecutingFrame<'_> {
                     {
                         // YIELD_VALUE arg: 0 = direct yield, >= 1 = yield-from/await
                         // OpArgByte.0 is the raw byte value
-                        if prev_unit.arg.0 >= 1 {
+                        if u8::from(prev_unit.arg) >= 1 {
                             // In yield-from/await context, delegate is on top of stack
                             return Some(self.top_value());
                         }
@@ -2890,12 +2890,11 @@ impl ExecutingFrame<'_> {
         Ok(None)
     }
 
-    fn load_attr(&mut self, vm: &VirtualMachine, oparg: u32) -> FrameResult {
-        let (name_idx, is_method) = bytecode::decode_load_attr_arg(oparg);
-        let attr_name = self.code.names[name_idx as usize];
+    fn load_attr(&mut self, vm: &VirtualMachine, oparg: LoadAttr) -> FrameResult {
+        let attr_name = self.code.names[oparg.name_idx() as usize];
         let parent = self.pop_value();
 
-        if is_method {
+        if oparg.is_method() {
             // Method call: push [method, self_or_null]
             let method = PyMethod::get(parent.clone(), attr_name, vm)?;
             match method {
@@ -3204,7 +3203,7 @@ impl ExecutingFrame<'_> {
         let stack = &self.state.stack;
         match &stack[stack.len() - depth as usize - 1] {
             Some(obj) => obj,
-            None => unsafe { std::hint::unreachable_unchecked() },
+            None => unsafe { core::hint::unreachable_unchecked() },
         }
     }
 

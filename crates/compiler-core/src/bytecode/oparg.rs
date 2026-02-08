@@ -12,17 +12,26 @@ pub trait OpArgType: Copy + Into<u32> + TryFrom<u32> {}
 /// Opcode argument that may be extended by a prior ExtendedArg.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct OpArgByte(pub u8);
+pub struct OpArgByte(u8);
 
 impl OpArgByte {
-    pub const fn null() -> Self {
-        Self(0)
+    pub const NULL: Self = Self::new(0);
+
+    #[must_use]
+    pub const fn new(value: u8) -> Self {
+        Self(value)
     }
 }
 
 impl From<u8> for OpArgByte {
     fn from(raw: u8) -> Self {
-        Self(raw)
+        Self::new(raw)
+    }
+}
+
+impl From<OpArgByte> for u8 {
+    fn from(value: OpArgByte) -> Self {
+        value.0
     }
 }
 
@@ -35,11 +44,14 @@ impl fmt::Debug for OpArgByte {
 /// Full 32-bit op_arg, including any possible ExtendedArg extension.
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
-pub struct OpArg(pub u32);
+pub struct OpArg(u32);
 
 impl OpArg {
-    pub const fn null() -> Self {
-        Self(0)
+    pub const NULL: Self = Self::new(0);
+
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
     }
 
     /// Returns how many CodeUnits a instruction with this op_arg will be encoded as
@@ -65,7 +77,7 @@ impl OpArg {
 
 impl From<u32> for OpArg {
     fn from(raw: u32) -> Self {
-        Self(raw)
+        Self::new(raw)
     }
 }
 
@@ -94,7 +106,7 @@ impl OpArgState {
     #[inline(always)]
     pub fn extend(&mut self, arg: OpArgByte) -> OpArg {
         self.state = (self.state << 8) | u32::from(arg.0);
-        OpArg(self.state)
+        self.state.into()
     }
 
     #[inline(always)]
@@ -752,5 +764,70 @@ impl LoadSuperAttrBuilder {
 impl From<LoadSuperAttrBuilder> for LoadSuperAttr {
     fn from(builder: LoadSuperAttrBuilder) -> Self {
         builder.build()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct LoadAttr(u32);
+
+impl LoadAttr {
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub fn builder() -> LoadAttrBuilder {
+        LoadAttrBuilder::default()
+    }
+
+    #[must_use]
+    pub const fn name_idx(self) -> u32 {
+        self.0 >> 1
+    }
+
+    #[must_use]
+    pub const fn is_method(self) -> bool {
+        (self.0 & 1) == 1
+    }
+}
+
+impl OpArgType for LoadAttr {}
+
+impl From<u32> for LoadAttr {
+    fn from(value: u32) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<LoadAttr> for u32 {
+    fn from(value: LoadAttr) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct LoadAttrBuilder {
+    name_idx: u32,
+    is_method: bool,
+}
+
+impl LoadAttrBuilder {
+    #[must_use]
+    pub const fn build(self) -> LoadAttr {
+        let value = (self.name_idx << 1) | (self.is_method as u32);
+        LoadAttr::new(value)
+    }
+
+    #[must_use]
+    pub const fn name_idx(mut self, value: u32) -> Self {
+        self.name_idx = value;
+        self
+    }
+
+    #[must_use]
+    pub const fn is_method(mut self, value: bool) -> Self {
+        self.is_method = value;
+        self
     }
 }

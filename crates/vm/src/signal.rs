@@ -1,16 +1,19 @@
 #![cfg_attr(target_os = "wasi", allow(dead_code))]
 use crate::{PyResult, VirtualMachine};
 use alloc::fmt;
+use core::cell::Cell;
 #[cfg(windows)]
 use core::sync::atomic::AtomicIsize;
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::cell::Cell;
 use std::sync::mpsc;
 
 pub(crate) const NSIG: usize = 64;
 static ANY_TRIGGERED: AtomicBool = AtomicBool::new(false);
 // hack to get around const array repeat expressions, rust issue #79270
-#[allow(clippy::declare_interior_mutable_const)]
+#[allow(
+    clippy::declare_interior_mutable_const,
+    reason = "workaround for const array repeat limitation (rust issue #79270)"
+)]
 const ATOMIC_FALSE: AtomicBool = AtomicBool::new(false);
 pub(crate) static TRIGGERS: [AtomicBool; NSIG] = [ATOMIC_FALSE; NSIG];
 
@@ -80,6 +83,7 @@ pub(crate) fn set_triggered() {
 /// Reset all signal trigger state after fork in child process.
 /// Stale triggers from the parent must not fire in the child.
 #[cfg(unix)]
+#[cfg(feature = "host_env")]
 pub(crate) fn clear_after_fork() {
     ANY_TRIGGERED.store(false, Ordering::Release);
     for trigger in &TRIGGERS {
@@ -99,7 +103,7 @@ pub fn assert_in_range(signum: i32, vm: &VirtualMachine) -> PyResult<()> {
 ///
 /// Missing signal handler for the given signal number is silently ignored.
 #[allow(dead_code)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "host_env"))]
 pub fn set_interrupt_ex(signum: i32, vm: &VirtualMachine) -> PyResult<()> {
     use crate::stdlib::signal::_signal::{SIG_DFL, SIG_IGN, run_signal};
     assert_in_range(signum, vm)?;

@@ -30,8 +30,8 @@ use rustpython_compiler_core::{
     bytecode::{
         self, AnyInstruction, Arg as OpArgMarker, BinaryOperator, BuildSliceArgCount, CodeObject,
         ComparisonOperator, ConstantData, ConvertValueOparg, Instruction, IntrinsicFunction1,
-        Invert, LoadSuperAttr, OpArg, OpArgType, PseudoInstruction, SpecialMethod, UnpackExArgs,
-        encode_load_attr_arg,
+        Invert, LoadAttr, LoadSuperAttr, OpArg, OpArgType, PseudoInstruction, SpecialMethod,
+        UnpackExArgs,
     },
 };
 use rustpython_wtf8::Wtf8Buf;
@@ -1165,7 +1165,7 @@ impl Compiler {
                 arg: OpArgMarker::marker(),
             }
             .into(),
-            arg: OpArg(u32::from(bytecode::ResumeType::AtFuncStart)),
+            arg: OpArg::new(u32::from(bytecode::ResumeType::AtFuncStart)),
             target: BlockIdx::NULL,
             location,
             end_location,
@@ -5524,8 +5524,8 @@ impl Compiler {
                 "too many sub-patterns in mapping pattern".to_string(),
             )));
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let size = size as u32; // checked right before
+        #[allow(clippy::cast_possible_truncation, reason = "checked right before")]
+        let size = size as u32;
 
         // Step 2: If we have keys to match
         if size > 0 {
@@ -7397,7 +7397,7 @@ impl Compiler {
         let return_none = init_collection.is_none();
         // Create empty object of proper type:
         if let Some(init_collection) = init_collection {
-            self._emit(init_collection, OpArg(0), BlockIdx::NULL)
+            self._emit(init_collection, OpArg::new(0), BlockIdx::NULL)
         }
 
         let mut loop_labels = vec![];
@@ -7593,7 +7593,7 @@ impl Compiler {
         // Step 4: Create the collection (list/set/dict)
         // For generator expressions, init_collection is None
         if let Some(init_collection) = init_collection {
-            self._emit(init_collection, OpArg(0), BlockIdx::NULL);
+            self._emit(init_collection, OpArg::new(0), BlockIdx::NULL);
             // SWAP to get iterator on top
             emit!(self, Instruction::Swap { index: 2 });
         }
@@ -7767,7 +7767,7 @@ impl Compiler {
     }
 
     fn emit_no_arg<I: Into<AnyInstruction>>(&mut self, ins: I) {
-        self._emit(ins, OpArg::null(), BlockIdx::NULL)
+        self._emit(ins, OpArg::NULL, BlockIdx::NULL)
     }
 
     fn emit_arg<A: OpArgType, T: EmitArg<A>, I: Into<AnyInstruction>>(
@@ -7799,14 +7799,20 @@ impl Compiler {
     /// Emit LOAD_ATTR for attribute access (method=false).
     /// Encodes: (name_idx << 1) | 0
     fn emit_load_attr(&mut self, name_idx: u32) {
-        let encoded = encode_load_attr_arg(name_idx, false);
+        let encoded = LoadAttr::builder()
+            .name_idx(name_idx)
+            .is_method(false)
+            .build();
         self.emit_arg(encoded, |arg| Instruction::LoadAttr { idx: arg })
     }
 
     /// Emit LOAD_ATTR with method flag set (for method calls).
     /// Encodes: (name_idx << 1) | 1
     fn emit_load_attr_method(&mut self, name_idx: u32) {
-        let encoded = encode_load_attr_arg(name_idx, true);
+        let encoded = LoadAttr::builder()
+            .name_idx(name_idx)
+            .is_method(true)
+            .build();
         self.emit_arg(encoded, |arg| Instruction::LoadAttr { idx: arg })
     }
 
@@ -8328,7 +8334,7 @@ impl Compiler {
         }
 
         // Add trailing string
-        all_strings.push(std::mem::take(&mut current_string));
+        all_strings.push(core::mem::take(&mut current_string));
 
         // Now build the Template:
         // Stack currently has all interpolations from compile_tstring_into calls
@@ -8372,7 +8378,7 @@ impl Compiler {
                 }
                 ast::InterpolatedStringElement::Interpolation(interp) => {
                     // Finish current string segment
-                    strings.push(std::mem::take(current_string));
+                    strings.push(core::mem::take(current_string));
 
                     // Compile the interpolation value
                     self.compile_expression(&interp.expression)?;
@@ -8449,7 +8455,7 @@ impl EmitArg<bytecode::Label> for BlockIdx {
         self,
         f: impl FnOnce(OpArgMarker<bytecode::Label>) -> I,
     ) -> (AnyInstruction, OpArg, BlockIdx) {
-        (f(OpArgMarker::marker()).into(), OpArg::null(), self)
+        (f(OpArgMarker::marker()).into(), OpArg::NULL, self)
     }
 }
 
