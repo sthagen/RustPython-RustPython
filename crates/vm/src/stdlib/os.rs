@@ -274,7 +274,7 @@ pub(super) mod _os {
                 crt_fd::open(&name, flags, mode)
             }
         };
-        fd.map_err(|err| OSErrorBuilder::with_filename(&err, name, vm))
+        fd.map_err(|err| OSErrorBuilder::with_filename_from_errno(&err, name, vm))
     }
 
     #[pyfunction]
@@ -657,16 +657,28 @@ pub(super) mod _os {
                     vm,
                 )
             };
-            let lstat = || self.lstat.get_or_try_init(|| do_stat(false));
+            let lstat = || match self.lstat.get() {
+                Some(val) => Ok(val),
+                None => {
+                    let val = do_stat(false)?;
+                    let _ = self.lstat.set(val);
+                    Ok(self.lstat.get().unwrap())
+                }
+            };
             let stat = if follow_symlinks.0 {
                 // if follow_symlinks == true and we aren't a symlink, cache both stat and lstat
-                self.stat.get_or_try_init(|| {
-                    if self.is_symlink(vm)? {
-                        do_stat(true)
-                    } else {
-                        lstat().cloned()
+                match self.stat.get() {
+                    Some(val) => val,
+                    None => {
+                        let val = if self.is_symlink(vm)? {
+                            do_stat(true)?
+                        } else {
+                            lstat()?.clone()
+                        };
+                        let _ = self.stat.set(val);
+                        self.stat.get().unwrap()
                     }
-                })?
+                }
             } else {
                 lstat()?
             };

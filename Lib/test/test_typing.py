@@ -986,7 +986,6 @@ class GenericAliasSubstitutionTests(BaseTestCase):
                         )
 
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_two_parameters(self):
         T1 = TypeVar('T1')
         T2 = TypeVar('T2')
@@ -4210,7 +4209,6 @@ class ProtocolTests(BaseTestCase):
         Alias2 = typing.Union[P, typing.Iterable]
         self.assertEqual(Alias, Alias2)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_protocols_pickleable(self):
         global P, CP  # pickle wants to reference the class by name
         T = TypeVar('T')
@@ -5288,7 +5286,6 @@ class GenericTests(BaseTestCase):
                     self.assertNotEqual(repr(base), '')
                     self.assertEqual(base, base)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_pickle(self):
         global C  # pickle wants to reference the class by name
         T = TypeVar('T')
@@ -5975,7 +5972,6 @@ class FinalDecoratorTests(BaseTestCase):
         def func(x): ...
         self.assertIs(func, final(func))
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_dunder_final(self):
         @final
         def func(): ...
@@ -6707,7 +6703,6 @@ class GetTypeHintsTests(BaseTestCase):
                      'default_b': Optional[mod_generics_cache.B]}
         self.assertEqual(gth(mod_generics_cache), mgc_hints)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; + {'x': <class 'int'>}
     def test_get_type_hints_classes(self):
         self.assertEqual(gth(ann_module.C),  # gth will find the right globalns
                          {'y': Optional[ann_module.C]})
@@ -7418,7 +7413,6 @@ class EvaluateForwardRefTests(BaseTestCase):
             list[EqualToForwardRef('A')],
         )
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; ImportError: cannot import name 'fwdref_module'
     def test_with_module(self):
         from test.typinganndata import fwdref_module
 
@@ -8441,7 +8435,6 @@ class NamedTupleTests(BaseTestCase):
         self.assertIsInstance(bar.attr, Vanilla)
         self.assertEqual(bar.attr.name, "attr")
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_setname_raises_the_same_as_on_other_classes(self):
         class CustomException(BaseException): pass
 
@@ -8908,14 +8901,12 @@ class TypedDictTests(BaseTestCase):
         # The TypedDict constructor is not itself a TypedDict
         self.assertIs(is_typeddict(TypedDict), False)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_get_type_hints(self):
         self.assertEqual(
             get_type_hints(Bar),
             {'a': typing.Optional[int], 'b': int}
         )
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_get_type_hints_generic(self):
         self.assertEqual(
             get_type_hints(BarGeneric),
@@ -9071,7 +9062,6 @@ class TypedDictTests(BaseTestCase):
         with self.assertRaises(TypeError):
             WithImplicitAny[str]
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_non_generic_subscript(self):
         # For backward compatibility, subscription works
         # on arbitrary TypedDict types.
@@ -9199,7 +9189,6 @@ class TypedDictTests(BaseTestCase):
         self.assertEqual(Child.__readonly_keys__, frozenset())
         self.assertEqual(Child.__mutable_keys__, frozenset({'a'}))
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_combine_qualifiers(self):
         class AllTheThings(TypedDict):
             a: Annotated[Required[ReadOnly[int]], "why not"]
@@ -9441,7 +9430,6 @@ class RETests(BaseTestCase):
         self.assertEqual(repr(Match[str]), 'typing.Match[str]')
         self.assertEqual(repr(Match[bytes]), 'typing.Match[bytes]')
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_cannot_subclass(self):
         with self.assertRaisesRegex(
             TypeError,
@@ -10853,7 +10841,6 @@ class NoDefaultTests(BaseTestCase):
         with self.assertRaises(TypeError):
             NoDefault()
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_no_attributes(self):
         with self.assertRaises(AttributeError):
             NoDefault.foo = 3

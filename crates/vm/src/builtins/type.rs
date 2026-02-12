@@ -605,10 +605,10 @@ impl PyType {
         static_f: impl FnOnce(&'static str) -> R,
         heap_f: impl FnOnce(&'a HeapTypeExt) -> R,
     ) -> R {
-        if !self.slots.flags.has_feature(PyTypeFlags::HEAPTYPE) {
-            static_f(self.slots.name)
+        if let Some(ref ext) = self.heaptype_ext {
+            heap_f(ext)
         } else {
-            heap_f(self.heaptype_ext.as_ref().unwrap())
+            static_f(self.slots.name)
         }
     }
 
@@ -849,13 +849,7 @@ impl PyType {
 
     #[pygetset(setter)]
     fn set___qualname__(&self, value: PySetterValue, vm: &VirtualMachine) -> PyResult<()> {
-        // TODO: we should replace heaptype flag check to immutable flag check
-        if !self.slots.flags.has_feature(PyTypeFlags::HEAPTYPE) {
-            return Err(vm.new_type_error(format!(
-                "cannot set '__qualname__' attribute of immutable type '{}'",
-                self.name()
-            )));
-        };
+        self.check_set_special_type_attr(identifier!(vm, __qualname__), vm)?;
         let value = value.ok_or_else(|| {
             vm.new_type_error(format!(
                 "cannot delete '__qualname__' attribute of immutable type '{}'",
@@ -865,10 +859,12 @@ impl PyType {
 
         let str_value = downcast_qualname(value, vm)?;
 
-        let heap_type = self
-            .heaptype_ext
-            .as_ref()
-            .expect("HEAPTYPE should have heaptype_ext");
+        let heap_type = self.heaptype_ext.as_ref().ok_or_else(|| {
+            vm.new_type_error(format!(
+                "cannot set '__qualname__' attribute of immutable type '{}'",
+                self.name()
+            ))
+        })?;
 
         // Use std::mem::replace to swap the new value in and get the old value out,
         // then drop the old value after releasing the lock
@@ -927,10 +923,11 @@ impl PyType {
         }
 
         let mut attrs = self.attributes.write();
-        // Store to __annotate_func__
+        // Clear cached annotations only when setting to a new callable
+        if !vm.is_none(&value) {
+            attrs.swap_remove(identifier!(vm, __annotations_cache__));
+        }
         attrs.insert(identifier!(vm, __annotate_func__), value.clone());
-        // Always clear cached annotations when __annotate__ is updated
-        attrs.swap_remove(identifier!(vm, __annotations_cache__));
 
         Ok(())
     }
@@ -999,7 +996,11 @@ impl PyType {
     }
 
     #[pygetset(setter)]
-    fn set___annotations__(&self, value: Option<PyObjectRef>, vm: &VirtualMachine) -> PyResult<()> {
+    fn set___annotations__(
+        &self,
+        value: crate::function::PySetterValue<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
         if self.slots.flags.has_feature(PyTypeFlags::IMMUTABLETYPE) {
             return Err(vm.new_type_error(format!(
                 "cannot set '__annotations__' attribute of immutable type '{}'",
@@ -1008,33 +1009,40 @@ impl PyType {
         }
 
         let mut attrs = self.attributes.write();
-        // conditional update based on __annotations__ presence
         let has_annotations = attrs.contains_key(identifier!(vm, __annotations__));
 
-        if has_annotations {
-            // If __annotations__ is in dict, update it
-            if let Some(value) = value {
-                attrs.insert(identifier!(vm, __annotations__), value);
-            } else if attrs
-                .swap_remove(identifier!(vm, __annotations__))
-                .is_none()
-            {
-                return Err(vm.new_attribute_error("__annotations__".to_owned()));
+        match value {
+            crate::function::PySetterValue::Assign(value) => {
+                // SET path: store the value (including None)
+                let key = if has_annotations {
+                    identifier!(vm, __annotations__)
+                } else {
+                    identifier!(vm, __annotations_cache__)
+                };
+                attrs.insert(key, value);
+                if has_annotations {
+                    attrs.swap_remove(identifier!(vm, __annotations_cache__));
+                }
             }
-            // Also clear __annotations_cache__
-            attrs.swap_remove(identifier!(vm, __annotations_cache__));
-        } else {
-            // Otherwise update only __annotations_cache__
-            if let Some(value) = value {
-                attrs.insert(identifier!(vm, __annotations_cache__), value);
-            } else if attrs
-                .swap_remove(identifier!(vm, __annotations_cache__))
-                .is_none()
-            {
-                return Err(vm.new_attribute_error("__annotations__".to_owned()));
+            crate::function::PySetterValue::Delete => {
+                // DELETE path: remove the key
+                let removed = if has_annotations {
+                    attrs
+                        .swap_remove(identifier!(vm, __annotations__))
+                        .is_some()
+                } else {
+                    attrs
+                        .swap_remove(identifier!(vm, __annotations_cache__))
+                        .is_some()
+                };
+                if !removed {
+                    return Err(vm.new_attribute_error("__annotations__".to_owned()));
+                }
+                if has_annotations {
+                    attrs.swap_remove(identifier!(vm, __annotations_cache__));
+                }
             }
         }
-        // Always clear __annotate_func__ and __annotate__
         attrs.swap_remove(identifier!(vm, __annotate_func__));
         attrs.swap_remove(identifier!(vm, __annotate__));
 
@@ -1055,7 +1063,15 @@ impl PyType {
                     Some(found)
                 }
             })
-            .unwrap_or_else(|| vm.ctx.new_str(ascii!("builtins")).into())
+            .unwrap_or_else(|| {
+                // For non-heap types, extract module from tp_name (e.g. "typing.TypeAliasType" -> "typing")
+                let slot_name = self.slot_name();
+                if let Some((module, _)) = slot_name.rsplit_once('.') {
+                    vm.ctx.intern_str(module).to_object()
+                } else {
+                    vm.ctx.new_str(ascii!("builtins")).into()
+                }
+            })
     }
 
     #[pygetset(setter)]
@@ -1140,10 +1156,17 @@ impl PyType {
         }
         name.ensure_valid_utf8(vm)?;
 
+        let heap_type = self.heaptype_ext.as_ref().ok_or_else(|| {
+            vm.new_type_error(format!(
+                "cannot set '__name__' attribute of immutable type '{}'",
+                self.slot_name()
+            ))
+        })?;
+
         // Use std::mem::replace to swap the new value in and get the old value out,
-        // then drop the old value after releasing the lock (similar to CPython's Py_SETREF)
+        // then drop the old value after releasing the lock
         let _old_name = {
-            let mut name_guard = self.heaptype_ext.as_ref().unwrap().name.write();
+            let mut name_guard = heap_type.name.write();
             core::mem::replace(&mut *name_guard, name)
         };
         // old_name is dropped here, outside the lock scope
@@ -1609,7 +1632,7 @@ impl Constructor for PyType {
                 // PEP 678: Add a note to the original exception instead of wrapping it
                 // (Python 3.12+, gh-77757)
                 let note = format!(
-                    "Error calling __set_name__ on '{}' instance {} in '{}'",
+                    "Error calling __set_name__ on '{}' instance '{}' in '{}'",
                     obj.class().name(),
                     name,
                     typ.name()
@@ -1838,6 +1861,13 @@ impl SetAttr for PyType {
     ) -> PyResult<()> {
         // TODO: pass PyRefExact instead of &str
         let attr_name = vm.ctx.intern_str(attr_name.as_str());
+        if zelf.slots.flags.has_feature(PyTypeFlags::IMMUTABLETYPE) {
+            return Err(vm.new_type_error(format!(
+                "cannot set '{}' attribute of immutable type '{}'",
+                attr_name,
+                zelf.slot_name()
+            )));
+        }
         if let Some(attr) = zelf.get_class_attr(attr_name) {
             let descr_set = attr.class().slots.descr_set.load();
             if let Some(descriptor) = descr_set {
@@ -2102,9 +2132,10 @@ fn linearise_mro(mut bases: Vec<Vec<PyTypeRef>>) -> Result<Vec<PyTypeRef>, Strin
             // We start at index 1 to skip direct bases.
             // This will not catch duplicate bases, but such a thing is already tested for.
             if later_mro[1..].iter().any(|cls| cls.is(base)) {
-                return Err(
-                    "Unable to find mro order which keeps local precedence ordering".to_owned(),
-                );
+                return Err(format!(
+                    "Cannot create a consistent method resolution order (MRO) for bases {}",
+                    bases.iter().map(|x| x.first().unwrap()).format(", ")
+                ));
             }
         }
     }

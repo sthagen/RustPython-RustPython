@@ -718,19 +718,23 @@ impl PyFunction {
         value: PySetterValue<Option<PyObjectRef>>,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        let annotations = match value {
+        match value {
             PySetterValue::Assign(Some(value)) => {
                 let annotations = value.downcast::<crate::builtins::PyDict>().map_err(|_| {
                     vm.new_type_error("__annotations__ must be set to a dict object")
                 })?;
-                Some(annotations)
+                *self.annotations.lock() = Some(annotations);
+                *self.annotate.lock() = None;
             }
-            PySetterValue::Assign(None) | PySetterValue::Delete => None,
-        };
-        *self.annotations.lock() = annotations;
-
-        // Clear __annotate__ when __annotations__ is set
-        *self.annotate.lock() = None;
+            PySetterValue::Assign(None) => {
+                *self.annotations.lock() = None;
+                *self.annotate.lock() = None;
+            }
+            PySetterValue::Delete => {
+                // del only clears cached annotations; __annotate__ is preserved
+                *self.annotations.lock() = None;
+            }
+        }
         Ok(())
     }
 
@@ -812,15 +816,16 @@ impl PyFunction {
     #[cfg(feature = "jit")]
     #[pymethod]
     fn __jit__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<()> {
-        zelf.jitted_code
-            .get_or_try_init(|| {
-                let arg_types = jit::get_jit_arg_types(&zelf, vm)?;
-                let ret_type = jit::jit_ret_type(&zelf, vm)?;
-                let code = zelf.code.lock();
-                rustpython_jit::compile(&code.code, &arg_types, ret_type)
-                    .map_err(|err| jit::new_jit_error(err.to_string(), vm))
-            })
-            .map(drop)
+        if zelf.jitted_code.get().is_some() {
+            return Ok(());
+        }
+        let arg_types = jit::get_jit_arg_types(&zelf, vm)?;
+        let ret_type = jit::jit_ret_type(&zelf, vm)?;
+        let code = zelf.code.lock();
+        let compiled = rustpython_jit::compile(&code.code, &arg_types, ret_type)
+            .map_err(|err| jit::new_jit_error(err.to_string(), vm))?;
+        let _ = zelf.jitted_code.set(compiled);
+        Ok(())
     }
 }
 
