@@ -1852,7 +1852,8 @@ impl Compiler {
             .code_stack
             .last()
             .and_then(|info| info.private.as_deref());
-        symboltable::mangle_name(private, name)
+        let mangled_names = self.current_symbol_table().mangled_names.as_ref();
+        symboltable::maybe_mangle_name(private, mangled_names, name)
     }
 
     // = compiler_nameop
@@ -3716,7 +3717,7 @@ impl Compiler {
             // Compile kwdefaults and build dict
             for (arg, default) in &kw_with_defaults {
                 self.emit_load_const(ConstantData::Str {
-                    value: arg.name.as_str().into(),
+                    value: self.mangle(arg.name.as_str()).into_owned().into(),
                 });
                 self.compile_expression(default)?;
             }
@@ -6982,7 +6983,7 @@ impl Compiler {
                     let default_kw_count = kw_with_defaults.len();
                     for (arg, default) in &kw_with_defaults {
                         self.emit_load_const(ConstantData::Str {
-                            value: arg.name.as_str().into(),
+                            value: self.mangle(arg.name.as_str()).into_owned().into(),
                         });
                         self.compile_expression(default)?;
                     }

@@ -4359,7 +4359,6 @@ class ProtocolTests(BaseTestCase):
         self.assertNotIsSubclass(C, ReleasableBuffer)
         self.assertNotIsInstance(C(), ReleasableBuffer)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AttributeError: module 'io' has no attribute 'Reader'
     def test_io_reader_protocol_allowed(self):
         @runtime_checkable
         class CustomReader(io.Reader[bytes], Protocol):
@@ -4377,7 +4376,6 @@ class ProtocolTests(BaseTestCase):
         self.assertNotIsSubclass(A, CustomReader)
         self.assertNotIsInstance(A(), CustomReader)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AttributeError: module 'io' has no attribute 'Writer'
     def test_io_writer_protocol_allowed(self):
         @runtime_checkable
         class CustomWriter(io.Writer[bytes], Protocol):
@@ -10916,7 +10914,6 @@ class TypeIterationTests(BaseTestCase):
         Annotated[T, ''],
     )
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_cannot_iterate(self):
         expected_error_regex = "object is not iterable"
         for test_type in self._UNITERABLE_TYPES:
