@@ -6611,33 +6611,45 @@ impl Compiler {
     /// Compile a boolean operation as an expression.
     /// This means, that the last value remains on the stack.
     fn compile_bool_op(&mut self, op: &ast::BoolOp, values: &[ast::Expr]) -> CompileResult<()> {
-        let after_block = self.new_block();
+        self.compile_bool_op_with_target(op, values, None)
+    }
 
+    /// Compile a boolean operation as an expression, with an optional
+    /// short-circuit target override. When `short_circuit_target` is `Some`,
+    /// the short-circuit jumps go to that block instead of the default
+    /// `after_block`, enabling jump threading to avoid redundant `__bool__` calls.
+    fn compile_bool_op_with_target(
+        &mut self,
+        op: &ast::BoolOp,
+        values: &[ast::Expr],
+        short_circuit_target: Option<BlockIdx>,
+    ) -> CompileResult<()> {
+        let after_block = self.new_block();
         let (last_value, values) = values.split_last().unwrap();
+        let jump_target = short_circuit_target.unwrap_or(after_block);
 
         for value in values {
-            self.compile_expression(value)?;
-
-            emit!(self, Instruction::Copy { index: 1_u32 });
-            match op {
-                ast::BoolOp::And => {
-                    emit!(
-                        self,
-                        Instruction::PopJumpIfFalse {
-                            target: after_block,
-                        }
-                    );
-                }
-                ast::BoolOp::Or => {
-                    emit!(
-                        self,
-                        Instruction::PopJumpIfTrue {
-                            target: after_block,
-                        }
-                    );
-                }
+            // Optimization: when a non-last value is a BoolOp with the opposite
+            // operator, redirect its short-circuit exits to skip the outer's
+            // redundant __bool__ test (jump threading).
+            if short_circuit_target.is_none()
+                && let ast::Expr::BoolOp(ast::ExprBoolOp {
+                    op: inner_op,
+                    values: inner_values,
+                    ..
+                }) = value
+                && inner_op != op
+            {
+                let pop_block = self.new_block();
+                self.compile_bool_op_with_target(inner_op, inner_values, Some(pop_block))?;
+                self.emit_short_circuit_test(op, after_block);
+                self.switch_to_block(pop_block);
+                emit!(self, Instruction::PopTop);
+                continue;
             }
 
+            self.compile_expression(value)?;
+            self.emit_short_circuit_test(op, jump_target);
             emit!(self, Instruction::PopTop);
         }
 
@@ -6645,6 +6657,20 @@ impl Compiler {
         self.compile_expression(last_value)?;
         self.switch_to_block(after_block);
         Ok(())
+    }
+
+    /// Emit `Copy 1` + conditional jump for short-circuit evaluation.
+    /// For `And`, emits `PopJumpIfFalse`; for `Or`, emits `PopJumpIfTrue`.
+    fn emit_short_circuit_test(&mut self, op: &ast::BoolOp, target: BlockIdx) {
+        emit!(self, Instruction::Copy { index: 1_u32 });
+        match op {
+            ast::BoolOp::And => {
+                emit!(self, Instruction::PopJumpIfFalse { target });
+            }
+            ast::BoolOp::Or => {
+                emit!(self, Instruction::PopJumpIfTrue { target });
+            }
+        }
     }
 
     fn compile_dict(&mut self, items: &[ast::DictItem]) -> CompileResult<()> {
@@ -8450,7 +8476,12 @@ impl Compiler {
                     if let Some(ast::DebugText { leading, trailing }) = &fstring_expr.debug_text {
                         let range = fstring_expr.expression.range();
                         let source = self.source_file.slice(range);
-                        let text = [leading, source, trailing].concat();
+                        let text = [
+                            strip_fstring_debug_comments(leading).as_str(),
+                            source,
+                            strip_fstring_debug_comments(trailing).as_str(),
+                        ]
+                        .concat();
 
                         self.emit_load_const(ConstantData::Str { value: text.into() });
                         element_count += 1;
@@ -8786,6 +8817,27 @@ impl ToU32 for usize {
     }
 }
 
+/// Strip Python comments from f-string debug text (leading/trailing around `=`).
+/// A comment starts with `#` and extends to the end of the line.
+/// The newline character itself is preserved.
+fn strip_fstring_debug_comments(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_comment = false;
+    for ch in text.chars() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                result.push(ch);
+            }
+        } else if ch == '#' {
+            in_comment = true;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod ruff_tests {
     use super::*;
@@ -8976,6 +9028,15 @@ if True and False and False:
             "\
 if (True and False) or (False and True):
     pass
+"
+        ));
+    }
+
+    #[test]
+    fn test_nested_bool_op() {
+        assert_dis_snapshot!(compile_exec(
+            "\
+x = Test() and False or False
 "
         ));
     }

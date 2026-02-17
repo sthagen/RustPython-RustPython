@@ -463,7 +463,7 @@ impl ExecutingFrame<'_> {
         // Execute until return or exception:
         let instructions = &self.code.instructions;
         let mut arg_state = bytecode::OpArgState::default();
-        let mut prev_line: usize = 0;
+        let mut prev_line: u32 = 0;
         loop {
             let idx = self.lasti() as usize;
             // Fire 'line' trace event when line number changes.
@@ -472,9 +472,9 @@ impl ExecutingFrame<'_> {
             if vm.use_tracing.get()
                 && !vm.is_none(&self.object.trace.lock())
                 && let Some((loc, _)) = self.code.locations.get(idx)
-                && loc.line.get() != prev_line
+                && loc.line.get() as u32 != prev_line
             {
-                prev_line = loc.line.get();
+                prev_line = loc.line.get() as u32;
                 vm.trace_event(crate::protocol::TraceEvent::Line, None)?;
             }
             self.update_lasti(|i| *i += 1);
@@ -543,13 +543,16 @@ impl ExecutingFrame<'_> {
                     // Check if this is a RERAISE instruction
                     // Both AnyInstruction::Raise { kind: Reraise/ReraiseFromStack } and
                     // AnyInstruction::Reraise are reraise operations that should not add
-                    // new traceback entries
+                    // new traceback entries.
+                    // EndAsyncFor and CleanupThrow also re-raise non-matching exceptions.
                     let is_reraise = match op {
                         Instruction::RaiseVarargs { kind } => matches!(
                             kind.get(arg),
                             bytecode::RaiseKind::BareRaise | bytecode::RaiseKind::ReraiseFromStack
                         ),
-                        Instruction::Reraise { .. } => true,
+                        Instruction::Reraise { .. }
+                        | Instruction::EndAsyncFor
+                        | Instruction::CleanupThrow => true,
                         _ => false,
                     };
 
@@ -653,6 +656,19 @@ impl ExecutingFrame<'_> {
                     Ok(())
                 };
                 if let Err(err) = close_result {
+                    let idx = self.lasti().saturating_sub(1) as usize;
+                    if idx < self.code.locations.len() {
+                        let (loc, _end_loc) = self.code.locations[idx];
+                        let next = err.__traceback__();
+                        let new_traceback = PyTraceback::new(
+                            next,
+                            self.object.to_owned(),
+                            idx as u32 * 2,
+                            loc.line,
+                        );
+                        err.set_traceback_typed(Some(new_traceback.into_ref(&vm.ctx)));
+                    }
+
                     self.push_value(vm.ctx.none());
                     vm.contextualize_exception(&err);
                     return match self.unwind_blocks(vm, UnwindReason::Raising { exception: err }) {
@@ -678,6 +694,23 @@ impl ExecutingFrame<'_> {
                         Either::B(meth) => meth.call((exc_type, exc_val, exc_tb), vm),
                     };
                     return ret.map(ExecutionResult::Yield).or_else(|err| {
+                        // Add traceback entry for the yield-from/await point.
+                        // gen_send_ex2 resumes the frame with a pending exception,
+                        // which goes through error: → PyTraceBack_Here. We add the
+                        // entry here before calling unwind_blocks.
+                        let idx = self.lasti().saturating_sub(1) as usize;
+                        if idx < self.code.locations.len() {
+                            let (loc, _end_loc) = self.code.locations[idx];
+                            let next = err.__traceback__();
+                            let new_traceback = PyTraceback::new(
+                                next,
+                                self.object.to_owned(),
+                                idx as u32 * 2,
+                                loc.line,
+                            );
+                            err.set_traceback_typed(Some(new_traceback.into_ref(&vm.ctx)));
+                        }
+
                         self.push_value(vm.ctx.none());
                         vm.contextualize_exception(&err);
                         match self.unwind_blocks(vm, UnwindReason::Raising { exception: err }) {
@@ -3010,13 +3043,54 @@ impl ExecutingFrame<'_> {
         Ok(None)
     }
 
+    /// _PyEval_UnpackIterableStackRef
     fn unpack_sequence(&mut self, size: u32, vm: &VirtualMachine) -> FrameResult {
         let value = self.pop_value();
+        let size = size as usize;
+
+        // Fast path for exact tuple/list types (not subclasses) — check
+        // length directly without creating an iterator, matching
+        // UNPACK_SEQUENCE_TUPLE / UNPACK_SEQUENCE_LIST specializations.
+        let cls = value.class();
+        let fast_elements: Option<Vec<PyObjectRef>> = if cls.is(vm.ctx.types.tuple_type) {
+            Some(value.downcast_ref::<PyTuple>().unwrap().as_slice().to_vec())
+        } else if cls.is(vm.ctx.types.list_type) {
+            Some(
+                value
+                    .downcast_ref::<PyList>()
+                    .unwrap()
+                    .borrow_vec()
+                    .to_vec(),
+            )
+        } else {
+            None
+        };
+        if let Some(elements) = fast_elements {
+            return match elements.len().cmp(&size) {
+                core::cmp::Ordering::Equal => {
+                    self.state
+                        .stack
+                        .extend(elements.into_iter().rev().map(Some));
+                    Ok(None)
+                }
+                core::cmp::Ordering::Greater => Err(vm.new_value_error(format!(
+                    "too many values to unpack (expected {size}, got {})",
+                    elements.len()
+                ))),
+                core::cmp::Ordering::Less => Err(vm.new_value_error(format!(
+                    "not enough values to unpack (expected {size}, got {})",
+                    elements.len()
+                ))),
+            };
+        }
+
+        // General path — iterate up to `size + 1` elements to avoid
+        // consuming the entire iterator (fixes hang on infinite sequences).
         let not_iterable = value.class().slots.iter.load().is_none()
             && value
                 .get_class_attr(vm.ctx.intern_str("__getitem__"))
                 .is_none();
-        let elements: Vec<_> = value.try_to_value(vm).map_err(|e| {
+        let iter = PyIter::try_from_object(vm, value.clone()).map_err(|e| {
             if not_iterable && e.class().is(vm.ctx.exceptions.type_error) {
                 vm.new_type_error(format!(
                     "cannot unpack non-iterable {} object",
@@ -3026,24 +3100,48 @@ impl ExecutingFrame<'_> {
                 e
             }
         })?;
-        let msg = match elements.len().cmp(&(size as usize)) {
-            core::cmp::Ordering::Equal => {
-                // Wrap each element in Some() for Option<PyObjectRef> stack
+
+        let mut elements = Vec::with_capacity(size);
+        for _ in 0..size {
+            match iter.next(vm)? {
+                PyIterReturn::Return(item) => elements.push(item),
+                PyIterReturn::StopIteration(_) => {
+                    return Err(vm.new_value_error(format!(
+                        "not enough values to unpack (expected {size}, got {})",
+                        elements.len()
+                    )));
+                }
+            }
+        }
+
+        // Check that the iterator is exhausted.
+        match iter.next(vm)? {
+            PyIterReturn::Return(_) => {
+                // For exact dict types, show "got N" using the container's
+                // size (PyDict_Size). Exact tuple/list are handled by the
+                // fast path above and never reach here.
+                let msg = if value.class().is(vm.ctx.types.dict_type) {
+                    if let Ok(got) = value.length(vm) {
+                        if got > size {
+                            format!("too many values to unpack (expected {size}, got {got})")
+                        } else {
+                            format!("too many values to unpack (expected {size})")
+                        }
+                    } else {
+                        format!("too many values to unpack (expected {size})")
+                    }
+                } else {
+                    format!("too many values to unpack (expected {size})")
+                };
+                Err(vm.new_value_error(msg))
+            }
+            PyIterReturn::StopIteration(_) => {
                 self.state
                     .stack
                     .extend(elements.into_iter().rev().map(Some));
-                return Ok(None);
+                Ok(None)
             }
-            core::cmp::Ordering::Greater => {
-                format!("too many values to unpack (expected {size})")
-            }
-            core::cmp::Ordering::Less => format!(
-                "not enough values to unpack (expected {}, got {})",
-                size,
-                elements.len()
-            ),
-        };
-        Err(vm.new_value_error(msg))
+        }
     }
 
     fn convert_value(

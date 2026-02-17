@@ -41,7 +41,7 @@ mod sys {
             hash::{PyHash, PyUHash},
         },
         convert::ToPyObject,
-        frame::FrameRef,
+        frame::{Frame, FrameRef},
         function::{FuncArgs, KwArgs, OptionalArg, PosArgs},
         stdlib::{builtins, warnings::warn},
         types::PyStructSequence,
@@ -825,11 +825,13 @@ mod sys {
         let stderr = super::get_stderr(vm)?;
         match vm.normalize_exception(exc_type.clone(), exc_val.clone(), exc_tb) {
             Ok(exc) => {
-                // Try Python traceback module first for richer output
-                // (enables features like keyword typo suggestions in SyntaxError)
+                // PyErr_Display: try traceback._print_exception_bltin first
                 if let Ok(tb_mod) = vm.import("traceback", 0)
-                    && let Ok(print_exc) = tb_mod.get_attr("print_exception", vm)
-                    && print_exc.call((exc.as_object().to_owned(),), vm).is_ok()
+                    && let Ok(print_exc_builtin) =
+                        tb_mod.get_attr("_print_exception_bltin", vm)
+                    && print_exc_builtin
+                        .call((exc.as_object().to_owned(),), vm)
+                        .is_ok()
                 {
                     return Ok(());
                 }
@@ -971,12 +973,14 @@ mod sys {
     #[pyfunction]
     fn _getframe(offset: OptionalArg<usize>, vm: &VirtualMachine) -> PyResult<FrameRef> {
         let offset = offset.into_option().unwrap_or(0);
-        if offset > vm.frames.borrow().len() - 1 {
+        let frames = vm.frames.borrow();
+        if offset >= frames.len() {
             return Err(vm.new_value_error("call stack is not deep enough"));
         }
-        let idx = vm.frames.borrow().len() - offset - 1;
-        let frame = &vm.frames.borrow()[idx];
-        Ok(frame.clone())
+        let idx = frames.len() - offset - 1;
+        // SAFETY: the FrameRef is alive on the call stack while it's in the Vec
+        let py: &crate::Py<Frame> = unsafe { frames[idx].as_ref() };
+        Ok(py.to_owned())
     }
 
     #[pyfunction]
@@ -984,15 +988,19 @@ mod sys {
         let depth = depth.into_option().unwrap_or(0);
 
         // Get the frame at the specified depth
-        if depth > vm.frames.borrow().len() - 1 {
-            return Ok(vm.ctx.none());
-        }
-
-        let idx = vm.frames.borrow().len() - depth - 1;
-        let frame = &vm.frames.borrow()[idx];
+        let func_obj = {
+            let frames = vm.frames.borrow();
+            if depth >= frames.len() {
+                return Ok(vm.ctx.none());
+            }
+            let idx = frames.len() - depth - 1;
+            // SAFETY: the FrameRef is alive on the call stack while it's in the Vec
+            let frame: &crate::Py<Frame> = unsafe { frames[idx].as_ref() };
+            frame.func_obj.clone()
+        };
 
         // If the frame has a function object, return its __module__ attribute
-        if let Some(func_obj) = &frame.func_obj {
+        if let Some(func_obj) = func_obj {
             match func_obj.get_attr(identifier!(vm, __module__), vm) {
                 Ok(module) => Ok(module),
                 Err(_) => {
