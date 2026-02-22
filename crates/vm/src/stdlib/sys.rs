@@ -33,8 +33,8 @@ mod sys {
     use crate::{
         AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
         builtins::{
-            PyBaseExceptionRef, PyDictRef, PyFrozenSet, PyNamespace, PyStr, PyStrRef, PyTupleRef,
-            PyTypeRef,
+            PyBaseExceptionRef, PyDictRef, PyFrozenSet, PyNamespace, PyStr, PyStrRef, PyTuple,
+            PyTupleRef, PyTypeRef,
         },
         common::{
             ascii,
@@ -73,7 +73,7 @@ mod sys {
         RUST_MULTIARCH.replace("-unknown", "")
     }
 
-    #[pyclass(no_attr, name = "_BootstrapStderr", module = "sys")]
+    #[pyclass(no_attr, name = "_BootstrapStderr")]
     #[derive(Debug, PyPayload)]
     pub(super) struct BootstrapStderr;
 
@@ -95,7 +95,7 @@ mod sys {
 
     /// Lightweight stdio wrapper for sandbox mode (no host_env).
     /// Directly uses Rust's std::io for stdin/stdout/stderr without FileIO.
-    #[pyclass(no_attr, name = "_SandboxStdio", module = "sys")]
+    #[pyclass(no_attr, name = "_SandboxStdio")]
     #[derive(Debug, PyPayload)]
     pub struct SandboxStdio {
         pub fd: i32,
@@ -789,8 +789,22 @@ mod sys {
 
     #[pyfunction]
     fn exit(code: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult {
-        let code = code.unwrap_or_none(vm);
-        Err(vm.new_exception(vm.ctx.exceptions.system_exit.to_owned(), vec![code]))
+        let status = code.unwrap_or_none(vm);
+        let args = if let Some(status_tuple) = status.downcast_ref::<PyTuple>() {
+            status_tuple.as_slice().to_vec()
+        } else {
+            vec![status]
+        };
+        let exc = vm.invoke_exception(vm.ctx.exceptions.system_exit.to_owned(), args)?;
+        Err(exc)
+    }
+
+    #[pyfunction]
+    fn call_tracing(func: PyObjectRef, args: PyTupleRef, vm: &VirtualMachine) -> PyResult {
+        // CPython temporarily enables tracing state around this call.
+        // RustPython does not currently model the full C-level tracing toggles,
+        // but call semantics (func(*args)) are matched.
+        func.call(PosArgs::new(args.as_slice().to_vec()), vm)
     }
 
     #[pyfunction]
@@ -1028,6 +1042,33 @@ mod sys {
             dict.set_item(key.as_object(), frame.into(), vm)?;
         }
 
+        Ok(dict)
+    }
+
+    /// Return a dictionary mapping each thread's identifier to its currently
+    /// active exception, or None if no exception is active.
+    #[cfg(feature = "threading")]
+    #[pyfunction]
+    fn _current_exceptions(vm: &VirtualMachine) -> PyResult<PyDictRef> {
+        use crate::AsObject;
+        use crate::vm::thread::get_all_current_exceptions;
+
+        let dict = vm.ctx.new_dict();
+        for (thread_id, exc) in get_all_current_exceptions(vm) {
+            let key = vm.ctx.new_int(thread_id);
+            let value = exc.map_or_else(|| vm.ctx.none(), |e| e.into());
+            dict.set_item(key.as_object(), value, vm)?;
+        }
+
+        Ok(dict)
+    }
+
+    #[cfg(not(feature = "threading"))]
+    #[pyfunction]
+    fn _current_exceptions(vm: &VirtualMachine) -> PyResult<PyDictRef> {
+        let dict = vm.ctx.new_dict();
+        let key = vm.ctx.new_int(0);
+        dict.set_item(key.as_object(), vm.topmost_exception().to_pyobject(vm), vm)?;
         Ok(dict)
     }
 
@@ -1524,10 +1565,6 @@ mod sys {
         safe_path: bool,
         /// -X warn_default_encoding, PYTHONWARNDEFAULTENCODING
         warn_default_encoding: u8,
-        /// -X thread_inherit_context, whether new threads inherit context from parent
-        thread_inherit_context: bool,
-        /// -X context_aware_warnings, whether warnings are context aware
-        context_aware_warnings: bool,
     }
 
     impl FlagsData {
@@ -1551,13 +1588,11 @@ mod sys {
                 int_max_str_digits: settings.int_max_str_digits,
                 safe_path: settings.safe_path,
                 warn_default_encoding: settings.warn_default_encoding as u8,
-                thread_inherit_context: settings.thread_inherit_context,
-                context_aware_warnings: settings.context_aware_warnings,
             }
         }
     }
 
-    #[pystruct_sequence(name = "flags", module = "sys", data = "FlagsData", no_attr)]
+    #[pystruct_sequence(name = "flags", data = "FlagsData", no_attr)]
     pub(super) struct PyFlags;
 
     #[pyclass(with(PyStructSequence))]
@@ -1565,6 +1600,16 @@ mod sys {
         #[pyslot]
         fn slot_new(_cls: PyTypeRef, _args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             Err(vm.new_type_error("cannot create 'sys.flags' instances"))
+        }
+
+        #[pygetset]
+        fn context_aware_warnings(&self, vm: &VirtualMachine) -> bool {
+            vm.state.config.settings.context_aware_warnings
+        }
+
+        #[pygetset]
+        fn thread_inherit_context(&self, vm: &VirtualMachine) -> bool {
+            vm.state.config.settings.thread_inherit_context
         }
     }
 
@@ -1735,10 +1780,15 @@ mod sys {
         build: u32,
         platform: u32,
         service_pack: String,
+        #[pystruct_sequence(skip)]
         service_pack_major: u16,
+        #[pystruct_sequence(skip)]
         service_pack_minor: u16,
+        #[pystruct_sequence(skip)]
         suite_mask: u16,
+        #[pystruct_sequence(skip)]
         product_type: u8,
+        #[pystruct_sequence(skip)]
         platform_version: (u32, u32, u32),
     }
 
