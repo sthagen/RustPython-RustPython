@@ -101,7 +101,7 @@ mod decl {
         let dur = seconds.try_into_value::<Duration>(vm).map_err(|e| {
             if e.class().is(vm.ctx.exceptions.value_error)
                 && let Some(s) = e.args().first().and_then(|arg| arg.str(vm).ok())
-                && s.as_str() == "negative duration"
+                && s.as_bytes() == b"negative duration"
             {
                 return vm.new_value_error("sleep length must be non-negative");
             }
@@ -434,10 +434,11 @@ mod decl {
 
         #[cfg(unix)]
         {
+            use crate::builtins::PyUtf8StrRef;
             let zone = if t.tm_zone.is(&vm.ctx.none) {
                 None
             } else {
-                let zone: PyStrRef = t
+                let zone: PyUtf8StrRef = t
                     .tm_zone
                     .clone()
                     .try_into_value(vm)
@@ -997,6 +998,7 @@ mod decl {
     }
 
     #[cfg(any(unix, windows))]
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     fn pyobj_to_time_t(value: Either<f64, i64>, vm: &VirtualMachine) -> PyResult<libc::time_t> {
         match value {
             Either::A(float) => {
@@ -1004,14 +1006,17 @@ mod decl {
                     return Err(vm.new_value_error("Invalid value for timestamp"));
                 }
                 let secs = float.floor();
+                #[cfg_attr(target_env = "musl", allow(deprecated))]
                 if secs < libc::time_t::MIN as f64 || secs > libc::time_t::MAX as f64 {
                     return Err(vm.new_overflow_error("timestamp out of range for platform time_t"));
                 }
+                #[cfg_attr(target_env = "musl", allow(deprecated))]
                 Ok(secs as libc::time_t)
             }
             Either::B(int) => {
                 // try_into is needed on 32-bit platforms where time_t != i64
                 #[allow(clippy::useless_conversion)]
+                #[cfg_attr(target_env = "musl", allow(deprecated))]
                 let ts: libc::time_t = int.try_into().map_err(|_| {
                     vm.new_overflow_error("timestamp out of range for platform time_t")
                 })?;
@@ -1047,10 +1052,11 @@ mod platform {
     #[cfg_attr(target_os = "macos", allow(unused_imports))]
     use crate::{
         PyObject, PyRef, PyResult, TryFromBorrowedObject, VirtualMachine,
-        builtins::{PyNamespace, PyStrRef},
+        builtins::{PyNamespace, PyUtf8StrRef},
         convert::IntoPyException,
     };
     use core::time::Duration;
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     use libc::time_t;
     use nix::{sys::time::TimeSpec, time::ClockId};
 
@@ -1115,10 +1121,12 @@ mod platform {
         }
     }
 
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     pub(super) fn current_time_t() -> time_t {
         unsafe { libc::time(core::ptr::null_mut()) }
     }
 
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     pub(super) fn gmtime_from_timestamp(
         when: time_t,
         vm: &VirtualMachine,
@@ -1131,6 +1139,7 @@ mod platform {
         Ok(struct_time_from_tm(vm, unsafe { out.assume_init() }))
     }
 
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     pub(super) fn localtime_from_timestamp(
         when: time_t,
         vm: &VirtualMachine,
@@ -1199,6 +1208,7 @@ mod platform {
 
     #[cfg(not(target_os = "redox"))]
     #[cfg(any(not(target_vendor = "apple"), target_os = "macos"))]
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     #[pyfunction]
     fn clock_settime_ns(clk_id: ClockId, time: libc::time_t, vm: &VirtualMachine) -> PyResult<()> {
         let ts = Duration::from_nanos(time as _).into();
@@ -1216,8 +1226,8 @@ mod platform {
         target_os = "linux",
     ))]
     #[pyfunction]
-    fn get_clock_info(name: PyStrRef, vm: &VirtualMachine) -> PyResult<PyRef<PyNamespace>> {
-        let (adj, imp, mono, res) = match name.as_ref() {
+    fn get_clock_info(name: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<PyRef<PyNamespace>> {
+        let (adj, imp, mono, res) = match name.as_str() {
             "monotonic" | "perf_counter" => (
                 false,
                 "time.clock_gettime(CLOCK_MONOTONIC)",
@@ -1263,7 +1273,7 @@ mod platform {
         target_os = "linux",
     )))]
     #[pyfunction]
-    fn get_clock_info(_name: PyStrRef, vm: &VirtualMachine) -> PyResult<PyRef<PyNamespace>> {
+    fn get_clock_info(_name: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<PyRef<PyNamespace>> {
         Err(vm.new_not_implemented_error("get_clock_info unsupported on this system"))
     }
 
@@ -1330,7 +1340,7 @@ mod platform {
     use super::decl::{MS_TO_NS, SEC_TO_NS, StructTimeData, get_tz_info, time_muldiv};
     use crate::{
         PyRef, PyResult, VirtualMachine,
-        builtins::{PyNamespace, PyStrRef},
+        builtins::{PyNamespace, PyUtf8StrRef},
     };
     use core::time::Duration;
     use windows_sys::Win32::{
@@ -1368,10 +1378,12 @@ mod platform {
         }
     }
 
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     pub(super) fn current_time_t() -> libc::time_t {
         unsafe { libc::time(core::ptr::null_mut()) }
     }
 
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     pub(super) fn gmtime_from_timestamp(
         when: libc::time_t,
         vm: &VirtualMachine,
@@ -1389,6 +1401,7 @@ mod platform {
         ))
     }
 
+    #[cfg_attr(target_env = "musl", allow(deprecated))]
     pub(super) fn localtime_from_timestamp(
         when: libc::time_t,
         vm: &VirtualMachine,
@@ -1500,8 +1513,8 @@ mod platform {
     }
 
     #[pyfunction]
-    fn get_clock_info(name: PyStrRef, vm: &VirtualMachine) -> PyResult<PyRef<PyNamespace>> {
-        let (adj, imp, mono, res) = match name.as_ref() {
+    fn get_clock_info(name: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<PyRef<PyNamespace>> {
+        let (adj, imp, mono, res) = match name.as_str() {
             "monotonic" => (
                 false,
                 "GetTickCount64()",

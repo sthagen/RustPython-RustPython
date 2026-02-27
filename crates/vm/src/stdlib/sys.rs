@@ -1,3 +1,5 @@
+pub(crate) mod monitoring;
+
 use crate::{Py, PyPayload, PyResult, VirtualMachine, builtins::PyModule, convert::ToPyObject};
 
 #[cfg(all(not(feature = "host_env"), feature = "stdio"))]
@@ -34,7 +36,7 @@ mod sys {
         AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyRefExact, PyResult,
         builtins::{
             PyBaseExceptionRef, PyDictRef, PyFrozenSet, PyNamespace, PyStr, PyStrRef, PyTuple,
-            PyTupleRef, PyTypeRef,
+            PyTupleRef, PyTypeRef, PyUtf8StrRef,
         },
         common::{
             ascii,
@@ -72,6 +74,9 @@ mod sys {
     pub(crate) fn multiarch() -> String {
         RUST_MULTIARCH.replace("-unknown", "")
     }
+
+    #[pymodule(name = "monitoring", with(super::monitoring::sys_monitoring))]
+    pub(super) mod monitoring {}
 
     #[pyclass(no_attr, name = "_BootstrapStderr")]
     #[derive(Debug, PyPayload)]
@@ -974,7 +979,7 @@ mod sys {
     }
 
     #[pyfunction]
-    fn getfilesystemencodeerrors(vm: &VirtualMachine) -> PyStrRef {
+    fn getfilesystemencodeerrors(vm: &VirtualMachine) -> PyUtf8StrRef {
         vm.fs_encode_errors().to_owned()
     }
 
@@ -1250,7 +1255,7 @@ mod sys {
         // Print module name (if not builtins or __main__)
         let module_name = unraisable.exc_type.__module__(vm);
         if let Ok(module_str) = module_name.downcast::<PyStr>() {
-            let module = module_str.as_str();
+            let module = module_str.as_wtf8();
             if module != "builtins" && module != "__main__" {
                 write!(stderr, "{}.", module);
             }
@@ -1261,7 +1266,7 @@ mod sys {
         // Print qualname
         let qualname = unraisable.exc_type.__qualname__(vm);
         if let Ok(qualname_str) = qualname.downcast::<PyStr>() {
-            write!(stderr, "{}", qualname_str.as_str());
+            write!(stderr, "{}", qualname_str.as_wtf8());
         } else {
             write!(stderr, "{}", unraisable.exc_type.name());
         }
@@ -1270,7 +1275,7 @@ mod sys {
         if !vm.is_none(&unraisable.exc_value) {
             write!(stderr, ": ");
             if let Ok(str) = unraisable.exc_value.str(vm) {
-                write!(stderr, "{}", str.to_str().unwrap_or("<str with surrogate>"));
+                write!(stderr, "{}", str.as_wtf8());
             } else {
                 write!(stderr, "<exception str() failed>");
             }

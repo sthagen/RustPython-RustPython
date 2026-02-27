@@ -89,7 +89,7 @@ mod _sqlite3 {
                 $(
                     #[allow(dead_code)]
                     fn [<new_ $x:snake>](vm: &VirtualMachine, msg: String) -> PyBaseExceptionRef {
-                        vm.new_exception_msg([<$x:snake _type>]().to_owned(), msg)
+                        vm.new_exception_msg([<$x:snake _type>]().to_owned(), msg.into())
                     }
                     fn [<$x:snake _type>]() -> &'static Py<PyType> {
                         [<$x:snake:upper>].get().expect("exception type not initialize")
@@ -723,7 +723,7 @@ mod _sqlite3 {
         converter: ArgCallable,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
-        let name = typename.as_str().to_uppercase();
+        let name = typename.expect_str().to_uppercase();
         converters().set_item(&name, converter.into(), vm)
     }
 
@@ -1883,9 +1883,16 @@ mod _sqlite3 {
             args: FetchManyArgs,
             vm: &VirtualMachine,
         ) -> PyResult<Vec<PyObjectRef>> {
-            let max_rows = args
-                .size
-                .unwrap_or_else(|| zelf.arraysize.load(Ordering::Relaxed));
+            let max_rows = match args.size {
+                Some(size) => {
+                    if size < 0 {
+                        return Err(vm.new_value_error("fetchmany may not be negative"));
+                    }
+
+                    size
+                }
+                None => zelf.arraysize.load(Ordering::Relaxed),
+            };
 
             let mut list = vec![];
             while let PyIterReturn::Return(row) = Cursor::next(zelf, vm)? {
@@ -1955,9 +1962,16 @@ mod _sqlite3 {
         fn arraysize(&self) -> c_int {
             self.arraysize.load(Ordering::Relaxed)
         }
+
         #[pygetset(setter)]
-        fn set_arraysize(&self, val: c_int) {
+        fn set_arraysize(&self, val: c_int, vm: &VirtualMachine) -> PyResult<()> {
+            if val < 0 {
+                return Err(vm.new_value_error("arraysize may not be negative"));
+            }
+
             self.arraysize.store(val, Ordering::Relaxed);
+
+            Ok(())
         }
 
         fn build_row_cast_map(
@@ -2194,8 +2208,8 @@ mod _sqlite3 {
                     let Some(obj) = obj.downcast_ref::<PyStr>() else {
                         break;
                     };
-                    let a_iter = name.as_str().chars().flat_map(|x| x.to_uppercase());
-                    let b_iter = obj.as_str().chars().flat_map(|x| x.to_uppercase());
+                    let a_iter = name.expect_str().chars().flat_map(|x| x.to_uppercase());
+                    let b_iter = obj.expect_str().chars().flat_map(|x| x.to_uppercase());
 
                     if a_iter.eq(b_iter) {
                         return self.data.getitem_by_index(vm, i);
@@ -2918,7 +2932,7 @@ mod _sqlite3 {
             };
             let mut s = Vec::with_capacity(16);
             s.extend(b"BEGIN ");
-            s.extend(isolation_level.as_str().bytes());
+            s.extend(isolation_level.expect_str().bytes());
             s.push(b'\0');
             self._exec(&s, vm)
         }
@@ -3469,7 +3483,7 @@ mod _sqlite3 {
             return e;
         }
 
-        vm.new_exception_msg_dict(typ, msg, dict)
+        vm.new_exception_msg_dict(typ, msg.into(), dict)
     }
 
     static BEGIN_STATEMENTS: &[&[u8]] = &[

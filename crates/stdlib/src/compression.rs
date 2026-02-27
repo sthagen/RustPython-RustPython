@@ -296,6 +296,11 @@ impl<D: Decompressor> DecompressState<D> {
         self.eof
     }
 
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub const fn decompressor(&self) -> &D {
+        &self.decompress
+    }
+
     pub fn unused_data(&self) -> PyBytesRef {
         self.unused_data.clone()
     }
