@@ -62,6 +62,10 @@ struct FrameState {
     stack: BoxVec<Option<PyObjectRef>>,
     /// Cell and free variable references (cellvars + freevars).
     cells_frees: Box<[PyCellRef]>,
+    /// Previous line number for LINE event suppression.
+    /// Stored here (not on ExecutingFrame) so it persists across
+    /// generator/coroutine suspend and resume.
+    prev_line: u32,
 }
 
 /// Tracks who owns a frame.
@@ -200,6 +204,7 @@ impl Frame {
         let state = FrameState {
             stack: BoxVec::new(code.max_stackdepth as usize),
             cells_frees,
+            prev_line: 0,
         };
 
         Self {
@@ -383,7 +388,6 @@ impl Py<Frame> {
             object: self,
             state: &mut state,
             monitoring_mask: 0,
-            prev_line: 0,
         };
         f(exec)
     }
@@ -430,7 +434,6 @@ impl Py<Frame> {
             object: self,
             state: &mut state,
             monitoring_mask: 0,
-            prev_line: 0,
         };
         exec.yield_from_target().map(PyObject::to_owned)
     }
@@ -467,8 +470,6 @@ struct ExecutingFrame<'a> {
     state: &'a mut FrameState,
     /// Cached monitoring events mask. Reloaded at Resume instruction only,
     monitoring_mask: u32,
-    /// Previous line number for LINE event suppression.
-    prev_line: u32,
 }
 
 impl fmt::Debug for ExecutingFrame<'_> {
@@ -518,6 +519,23 @@ impl ExecutingFrame<'_> {
         }
     }
 
+    /// Fire 'exception' trace event (sys.settrace) with (type, value, traceback) tuple.
+    /// Matches `_PyEval_MonitorRaise` → `PY_MONITORING_EVENT_RAISE` →
+    /// `sys_trace_exception_func` in legacy_tracing.c.
+    fn fire_exception_trace(&self, exc: &PyBaseExceptionRef, vm: &VirtualMachine) -> PyResult<()> {
+        if vm.use_tracing.get() && !vm.is_none(&self.object.trace.lock()) {
+            let exc_type: PyObjectRef = exc.class().to_owned().into();
+            let exc_value: PyObjectRef = exc.clone().into();
+            let exc_tb: PyObjectRef = exc
+                .__traceback__()
+                .map(|tb| -> PyObjectRef { tb.into() })
+                .unwrap_or_else(|| vm.ctx.none());
+            let tuple = vm.ctx.new_tuple(vec![exc_type, exc_value, exc_tb]).into();
+            vm.trace_event(crate::protocol::TraceEvent::Exception, Some(tuple))?;
+        }
+        Ok(())
+    }
+
     fn run(&mut self, vm: &VirtualMachine) -> PyResult<ExecutionResult> {
         flame_guard!(format!(
             "Frame::run({obj_name})",
@@ -545,9 +563,9 @@ impl ExecutingFrame<'_> {
                     Some(Instruction::Resume { .. } | Instruction::InstrumentedResume)
                 )
                 && let Some((loc, _)) = self.code.locations.get(idx)
-                && loc.line.get() as u32 != self.prev_line
+                && loc.line.get() as u32 != self.state.prev_line
             {
-                self.prev_line = loc.line.get() as u32;
+                self.state.prev_line = loc.line.get() as u32;
                 vm.trace_event(crate::protocol::TraceEvent::Line, None)?;
                 // Trace callback may have changed lasti via set_f_lineno.
                 // Re-read and restart the loop from the new position.
@@ -575,10 +593,28 @@ impl ExecutingFrame<'_> {
                     | Instruction::InstrumentedLine
             ) && let Some((loc, _)) = self.code.locations.get(idx)
             {
-                self.prev_line = loc.line.get() as u32;
+                self.state.prev_line = loc.line.get() as u32;
             }
 
+            // Fire 'opcode' trace event for sys.settrace when f_trace_opcodes
+            // is set. Skip RESUME and ExtendedArg (matching CPython's exclusion
+            // of these in _Py_call_instrumentation_instruction).
+            if vm.use_tracing.get()
+                && !vm.is_none(&self.object.trace.lock())
+                && *self.object.trace_opcodes.lock()
+                && !matches!(
+                    op,
+                    Instruction::Resume { .. }
+                        | Instruction::InstrumentedResume
+                        | Instruction::ExtendedArg
+                )
+            {
+                vm.trace_event(crate::protocol::TraceEvent::Opcode, None)?;
+            }
+
+            let lasti_before = self.lasti();
             let result = self.execute_instruction(op, arg, &mut do_extend_arg, vm);
+            self.skip_caches_if_fallthrough(op, lasti_before);
             match result {
                 Ok(None) => {}
                 Ok(Some(value)) => {
@@ -691,6 +727,13 @@ impl ExecutingFrame<'_> {
                         }
                     };
 
+                    // Fire 'exception' trace event for sys.settrace.
+                    // Only for new raises, not re-raises (matching the
+                    // `error` label that calls _PyEval_MonitorRaise).
+                    if !is_reraise {
+                        self.fire_exception_trace(&exception, vm)?;
+                    }
+
                     match handle_exception(self, exception, idx, is_reraise, is_new_raise, vm) {
                         Ok(None) => {}
                         Ok(Some(result)) => break Ok(result),
@@ -747,12 +790,15 @@ impl ExecutingFrame<'_> {
         if let Some(unit) = self.code.instructions.get(lasti) {
             match &unit.op {
                 Instruction::Send { .. } => return Some(self.top_value()),
-                Instruction::Resume { .. } => {
+                Instruction::Resume { .. } | Instruction::InstrumentedResume => {
                     // Check if previous instruction was YIELD_VALUE with arg >= 1
                     // This indicates yield-from/await context
                     if lasti > 0
                         && let Some(prev_unit) = self.code.instructions.get(lasti - 1)
-                        && let Instruction::YieldValue { .. } = &prev_unit.op
+                        && matches!(
+                            &prev_unit.op,
+                            Instruction::YieldValue { .. } | Instruction::InstrumentedYieldValue
+                        )
                     {
                         // YIELD_VALUE arg: 0 = direct yield, >= 1 = yield-from/await
                         // OpArgByte.0 is the raw byte value
@@ -777,6 +823,12 @@ impl ExecutingFrame<'_> {
         exc_tb: PyObjectRef,
     ) -> PyResult<ExecutionResult> {
         self.monitoring_mask = vm.state.monitoring_events.load();
+        // Reset prev_line so that LINE monitoring events fire even if
+        // the exception handler is on the same line as the yield point.
+        // In CPython, _Py_call_instrumentation_line has a special case
+        // for RESUME: it fires LINE even when prev_line == current_line.
+        // Since gen_throw bypasses RESUME, we reset prev_line instead.
+        self.state.prev_line = 0;
         if let Some(jen) = self.yield_from_target() {
             // Check if the exception is GeneratorExit (type or instance).
             // For GeneratorExit, close the sub-iterator instead of throwing.
@@ -1341,8 +1393,10 @@ impl ExecutingFrame<'_> {
                 *extend_arg = true;
                 Ok(None)
             }
-            Instruction::ForIter { target } => {
-                self.execute_for_iter(vm, target.get(arg))?;
+            Instruction::ForIter { .. } => {
+                // Relative forward jump: target = lasti + caches + delta
+                let target = bytecode::Label(self.lasti() + 1 + u32::from(arg));
+                self.execute_for_iter(vm, target)?;
                 Ok(None)
             }
             Instruction::FormatSimple => {
@@ -1515,16 +1569,16 @@ impl ExecutingFrame<'_> {
                 self.push_value(vm.ctx.new_bool(value).into());
                 Ok(None)
             }
-            Instruction::JumpForward { target } => {
-                self.jump(target.get(arg));
+            Instruction::JumpForward { .. } => {
+                self.jump_relative_forward(u32::from(arg), 0);
                 Ok(None)
             }
-            Instruction::JumpBackward { target } => {
-                self.jump(target.get(arg));
+            Instruction::JumpBackward { .. } => {
+                self.jump_relative_backward(u32::from(arg), 1);
                 Ok(None)
             }
-            Instruction::JumpBackwardNoInterrupt { target } => {
-                self.jump(target.get(arg));
+            Instruction::JumpBackwardNoInterrupt { .. } => {
+                self.jump_relative_backward(u32::from(arg), 0);
                 Ok(None)
             }
             Instruction::ListAppend { i } => {
@@ -1815,9 +1869,13 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::LoadGlobal(idx) => {
-                let name = &self.code.names[idx.get(arg) as usize];
+                let oparg = idx.get(arg);
+                let name = &self.code.names[(oparg >> 1) as usize];
                 let x = self.load_global_or_builtin(name, vm)?;
                 self.push_value(x);
+                if (oparg & 1) != 0 {
+                    self.push_value_opt(None);
+                }
                 Ok(None)
             }
             Instruction::LoadName(idx) => {
@@ -2119,19 +2177,19 @@ impl ExecutingFrame<'_> {
 
                 Ok(None)
             }
-            Instruction::PopJumpIfFalse { target } => self.pop_jump_if(vm, target.get(arg), false),
-            Instruction::PopJumpIfTrue { target } => self.pop_jump_if(vm, target.get(arg), true),
-            Instruction::PopJumpIfNone { target } => {
+            Instruction::PopJumpIfFalse { .. } => self.pop_jump_if_relative(vm, arg, 1, false),
+            Instruction::PopJumpIfTrue { .. } => self.pop_jump_if_relative(vm, arg, 1, true),
+            Instruction::PopJumpIfNone { .. } => {
                 let value = self.pop_value();
                 if vm.is_none(&value) {
-                    self.jump(target.get(arg));
+                    self.jump_relative_forward(u32::from(arg), 1);
                 }
                 Ok(None)
             }
-            Instruction::PopJumpIfNotNone { target } => {
+            Instruction::PopJumpIfNotNone { .. } => {
                 let value = self.pop_value();
                 if !vm.is_none(&value) {
-                    self.jump(target.get(arg));
+                    self.jump_relative_forward(u32::from(arg), 1);
                 }
                 Ok(None)
             }
@@ -2167,7 +2225,10 @@ impl ExecutingFrame<'_> {
                     .instrumentation_version
                     .load(atomic::Ordering::Acquire);
                 if code_ver != global_ver {
-                    let events = vm.state.monitoring_events.load();
+                    let events = {
+                        let state = vm.state.monitoring.lock();
+                        state.events_for_code(self.code.get_id())
+                    };
                     monitoring::instrument_code(self.code, events);
                     self.code
                         .instrumentation_version
@@ -2409,12 +2470,13 @@ impl ExecutingFrame<'_> {
                 };
                 Ok(Some(ExecutionResult::Yield(value)))
             }
-            Instruction::Send { target } => {
+            Instruction::Send { .. } => {
                 // (receiver, v -- receiver, retval)
                 // Pops v, sends it to receiver. On yield, pushes retval
                 // (so stack = [..., receiver, retval]). On return/StopIteration,
                 // also pushes retval and jumps to END_SEND which will pop receiver.
-                let exit_label = target.get(arg);
+                // Relative forward: target = lasti + caches(1) + delta
+                let exit_label = bytecode::Label(self.lasti() + 1 + u32::from(arg));
                 let val = self.pop_value();
                 let receiver = self.top_value();
 
@@ -2424,6 +2486,12 @@ impl ExecutingFrame<'_> {
                         Ok(None)
                     }
                     PyIterReturn::StopIteration(value) => {
+                        // Fire 'exception' trace event for StopIteration,
+                        // matching SEND's exception handling.
+                        if vm.use_tracing.get() && !vm.is_none(&self.object.trace.lock()) {
+                            let stop_exc = vm.new_stop_iteration(value.clone());
+                            self.fire_exception_trace(&stop_exc, vm)?;
+                        }
                         let value = vm.unwrap_or_none(value);
                         self.push_value(value);
                         self.jump(exit_label);
@@ -2538,7 +2606,10 @@ impl ExecutingFrame<'_> {
                     .instrumentation_version
                     .load(atomic::Ordering::Acquire);
                 if code_ver != global_ver {
-                    let events = vm.state.monitoring_events.load();
+                    let events = {
+                        let state = vm.state.monitoring.lock();
+                        state.events_for_code(self.code.get_id())
+                    };
                     monitoring::instrument_code(self.code, events);
                     self.code
                         .instrumentation_version
@@ -2637,9 +2708,20 @@ impl ExecutingFrame<'_> {
                     }
                 }
             }
-            Instruction::InstrumentedJumpForward | Instruction::InstrumentedJumpBackward => {
+            Instruction::InstrumentedJumpForward => {
                 let src_offset = (self.lasti() - 1) * 2;
-                let target = bytecode::Label::from(u32::from(arg));
+                let target_idx = self.lasti() + u32::from(arg);
+                let target = bytecode::Label(target_idx);
+                self.jump(target);
+                if self.monitoring_mask & monitoring::EVENT_JUMP != 0 {
+                    monitoring::fire_jump(vm, self.code, src_offset, target.0 * 2)?;
+                }
+                Ok(None)
+            }
+            Instruction::InstrumentedJumpBackward => {
+                let src_offset = (self.lasti() - 1) * 2;
+                let target_idx = self.lasti() + 1 - u32::from(arg);
+                let target = bytecode::Label(target_idx);
                 self.jump(target);
                 if self.monitoring_mask & monitoring::EVENT_JUMP != 0 {
                     monitoring::fire_jump(vm, self.code, src_offset, target.0 * 2)?;
@@ -2648,11 +2730,11 @@ impl ExecutingFrame<'_> {
             }
             Instruction::InstrumentedForIter => {
                 let src_offset = (self.lasti() - 1) * 2;
-                let target = bytecode::Label::from(u32::from(arg));
+                let target = bytecode::Label(self.lasti() + 1 + u32::from(arg));
                 let continued = self.execute_for_iter(vm, target)?;
                 if continued {
                     if self.monitoring_mask & monitoring::EVENT_BRANCH_LEFT != 0 {
-                        let dest_offset = self.lasti() * 2;
+                        let dest_offset = (self.lasti() + 1) * 2; // after caches
                         monitoring::fire_branch_left(vm, self.code, src_offset, dest_offset)?;
                     }
                 } else if self.monitoring_mask & monitoring::EVENT_BRANCH_RIGHT != 0 {
@@ -2694,64 +2776,67 @@ impl ExecutingFrame<'_> {
             }
             Instruction::InstrumentedPopJumpIfTrue => {
                 let src_offset = (self.lasti() - 1) * 2;
-                let target = bytecode::Label::from(u32::from(arg));
+                let target_idx = self.lasti() + 1 + u32::from(arg);
                 let obj = self.pop_value();
                 let value = obj.try_to_bool(vm)?;
                 if value {
-                    self.jump(target);
+                    self.jump(bytecode::Label(target_idx));
                     if self.monitoring_mask & monitoring::EVENT_BRANCH_RIGHT != 0 {
-                        monitoring::fire_branch_right(vm, self.code, src_offset, target.0 * 2)?;
+                        monitoring::fire_branch_right(vm, self.code, src_offset, target_idx * 2)?;
                     }
                 }
                 Ok(None)
             }
             Instruction::InstrumentedPopJumpIfFalse => {
                 let src_offset = (self.lasti() - 1) * 2;
-                let target = bytecode::Label::from(u32::from(arg));
+                let target_idx = self.lasti() + 1 + u32::from(arg);
                 let obj = self.pop_value();
                 let value = obj.try_to_bool(vm)?;
                 if !value {
-                    self.jump(target);
+                    self.jump(bytecode::Label(target_idx));
                     if self.monitoring_mask & monitoring::EVENT_BRANCH_RIGHT != 0 {
-                        monitoring::fire_branch_right(vm, self.code, src_offset, target.0 * 2)?;
+                        monitoring::fire_branch_right(vm, self.code, src_offset, target_idx * 2)?;
                     }
                 }
                 Ok(None)
             }
             Instruction::InstrumentedPopJumpIfNone => {
                 let src_offset = (self.lasti() - 1) * 2;
+                let target_idx = self.lasti() + 1 + u32::from(arg);
                 let value = self.pop_value();
-                let target = bytecode::Label::from(u32::from(arg));
                 if vm.is_none(&value) {
-                    self.jump(target);
+                    self.jump(bytecode::Label(target_idx));
                     if self.monitoring_mask & monitoring::EVENT_BRANCH_RIGHT != 0 {
-                        monitoring::fire_branch_right(vm, self.code, src_offset, target.0 * 2)?;
+                        monitoring::fire_branch_right(vm, self.code, src_offset, target_idx * 2)?;
                     }
                 }
                 Ok(None)
             }
             Instruction::InstrumentedPopJumpIfNotNone => {
                 let src_offset = (self.lasti() - 1) * 2;
+                let target_idx = self.lasti() + 1 + u32::from(arg);
                 let value = self.pop_value();
-                let target = bytecode::Label::from(u32::from(arg));
                 if !vm.is_none(&value) {
-                    self.jump(target);
+                    self.jump(bytecode::Label(target_idx));
                     if self.monitoring_mask & monitoring::EVENT_BRANCH_RIGHT != 0 {
-                        monitoring::fire_branch_right(vm, self.code, src_offset, target.0 * 2)?;
+                        monitoring::fire_branch_right(vm, self.code, src_offset, target_idx * 2)?;
                     }
                 }
                 Ok(None)
             }
             Instruction::InstrumentedNotTaken => {
                 if self.monitoring_mask & monitoring::EVENT_BRANCH_LEFT != 0 {
-                    let offset = (self.lasti() - 1) * 2;
+                    let not_taken_idx = self.lasti() as usize - 1;
+                    // Scan backwards past CACHE entries to find the branch instruction
+                    let mut branch_idx = not_taken_idx.saturating_sub(1);
+                    while branch_idx > 0
+                        && matches!(self.code.instructions[branch_idx].op, Instruction::Cache)
+                    {
+                        branch_idx -= 1;
+                    }
+                    let src_offset = (branch_idx as u32) * 2;
                     let dest_offset = self.lasti() * 2;
-                    monitoring::fire_branch_left(
-                        vm,
-                        self.code,
-                        offset.saturating_sub(2),
-                        dest_offset,
-                    )?;
+                    monitoring::fire_branch_left(vm, self.code, src_offset, dest_offset)?;
                 }
                 Ok(None)
             }
@@ -2809,8 +2894,8 @@ impl ExecutingFrame<'_> {
                 // Fire LINE event only if line changed
                 if let Some((loc, _)) = self.code.locations.get(idx) {
                     let line = loc.line.get() as u32;
-                    if line != self.prev_line && line > 0 {
-                        self.prev_line = line;
+                    if line != self.state.prev_line && line > 0 {
+                        self.state.prev_line = line;
                         monitoring::fire_line(vm, self.code, offset, line)?;
                     }
                 }
@@ -2823,12 +2908,15 @@ impl ExecutingFrame<'_> {
                 // Re-dispatch to the real original opcode
                 let original_op = Instruction::try_from(real_op_byte)
                     .expect("invalid opcode in side-table chain");
-                if original_op.to_base().is_some() {
+                let lasti_before_dispatch = self.lasti();
+                let result = if original_op.to_base().is_some() {
                     self.execute_instrumented(original_op, arg, vm)
                 } else {
                     let mut do_extend_arg = false;
                     self.execute_instruction(original_op, arg, &mut do_extend_arg, vm)
-                }
+                };
+                self.skip_caches_if_fallthrough(original_op, lasti_before_dispatch);
+                result
             }
             Instruction::InstrumentedInstruction => {
                 let idx = self.lasti() as usize - 1;
@@ -2852,12 +2940,15 @@ impl ExecutingFrame<'_> {
                 // Re-dispatch to original opcode
                 let original_op = Instruction::try_from(original_op_byte)
                     .expect("invalid opcode in instruction side-table");
-                if original_op.to_base().is_some() {
+                let lasti_before_dispatch = self.lasti();
+                let result = if original_op.to_base().is_some() {
                     self.execute_instrumented(original_op, arg, vm)
                 } else {
                     let mut do_extend_arg = false;
                     self.execute_instruction(original_op, arg, &mut do_extend_arg, vm)
-                }
+                };
+                self.skip_caches_if_fallthrough(original_op, lasti_before_dispatch);
+                result
             }
             _ => {
                 unreachable!("{instruction:?} instruction should not be executed")
@@ -3499,17 +3590,52 @@ impl ExecutingFrame<'_> {
         self.update_lasti(|i| *i = target_pc);
     }
 
+    /// Jump forward by `delta` code units from after instruction + caches.
+    /// lasti is already at instruction_index + 1, so after = lasti + caches.
+    ///
+    /// Unchecked arithmetic is intentional: the compiler guarantees valid
+    /// targets, and debug builds will catch overflow via Rust's default checks.
     #[inline]
-    fn pop_jump_if(
+    fn jump_relative_forward(&mut self, delta: u32, caches: u32) {
+        let target = self.lasti() + caches + delta;
+        self.update_lasti(|i| *i = target);
+    }
+
+    /// Jump backward by `delta` code units from after instruction + caches.
+    ///
+    /// Unchecked arithmetic is intentional: the compiler guarantees valid
+    /// targets, and debug builds will catch underflow via Rust's default checks.
+    #[inline]
+    fn jump_relative_backward(&mut self, delta: u32, caches: u32) {
+        let target = self.lasti() + caches - delta;
+        self.update_lasti(|i| *i = target);
+    }
+
+    /// Skip past CACHE code units after an instruction, but only if the
+    /// instruction did not modify lasti (i.e., it did not jump).
+    #[inline]
+    fn skip_caches_if_fallthrough(&mut self, op: Instruction, lasti_before: u32) {
+        if self.lasti() == lasti_before {
+            let base = op.to_base().unwrap_or(op);
+            let caches = base.cache_entries();
+            if caches > 0 {
+                self.update_lasti(|i| *i += caches as u32);
+            }
+        }
+    }
+
+    #[inline]
+    fn pop_jump_if_relative(
         &mut self,
         vm: &VirtualMachine,
-        target: bytecode::Label,
+        arg: bytecode::OpArg,
+        caches: u32,
         flag: bool,
     ) -> FrameResult {
         let obj = self.pop_value();
         let value = obj.try_to_bool(vm)?;
         if value == flag {
-            self.jump(target);
+            self.jump_relative_forward(u32::from(arg), caches);
         }
         Ok(None)
     }
@@ -3529,7 +3655,13 @@ impl ExecutingFrame<'_> {
                 self.push_value(value);
                 Ok(true)
             }
-            Ok(PyIterReturn::StopIteration(_)) => {
+            Ok(PyIterReturn::StopIteration(value)) => {
+                // Fire 'exception' trace event for StopIteration, matching
+                // FOR_ITER's inline call to _PyEval_MonitorRaise.
+                if vm.use_tracing.get() && !vm.is_none(&self.object.trace.lock()) {
+                    let stop_exc = vm.new_stop_iteration(value);
+                    self.fire_exception_trace(&stop_exc, vm)?;
+                }
                 // Skip END_FOR (base or instrumented) and jump to POP_ITER.
                 let target_idx = target.0 as usize;
                 let jump_target = if let Some(unit) = self.code.instructions.get(target_idx) {

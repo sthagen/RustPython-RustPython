@@ -36,7 +36,7 @@ class ImportVisitor(ast.NodeVisitor):
         self.__imports = set()
 
     @property
-    def test_imports(self) -> frozenset[str]:
+    def test_imports(self) -> set[str]:
         imports = set()
         for module in self.__imports:
             if not module.startswith("test."):
@@ -48,16 +48,11 @@ class ImportVisitor(ast.NodeVisitor):
 
             imports.add(name)
 
-        return frozenset(imports)
+        return imports
 
     @property
-    def lib_imports(self) -> frozenset[str]:
-        return frozenset(
-            # module.split(".", 1)[0]
-            module
-            for module in self.__imports
-            if not module.startswith("test.")
-        )
+    def lib_imports(self) -> set[str]:
+        return {module for module in self.__imports if not module.startswith("test.")}
 
     def visit_Import(self, node):
         for alias in node.names:
@@ -119,7 +114,7 @@ class ImportVisitor(ast.NodeVisitor):
         self.__imports.add(f"test.{target}")
 
 
-def parse_test_imports(content: str) -> set[str]:
+def parse_test_imports(content: str) -> frozenset[str]:
     """Parse test file content and extract test package dependencies."""
     if not (tree := safe_parse_ast(content)):
         return set()
@@ -129,7 +124,7 @@ def parse_test_imports(content: str) -> set[str]:
     return visitor.test_imports
 
 
-def parse_lib_imports(content: str) -> set[str]:
+def parse_lib_imports(content: str) -> frozenset[str]:
     """Parse library file and extract all imported module names."""
     if not (tree := safe_parse_ast(content)):
         return set()
@@ -147,8 +142,7 @@ TODO_MARKER = "TODO: RUSTPYTHON"
 def filter_rustpython_todo(content: str) -> str:
     """Remove lines containing RustPython TODO markers."""
     lines = content.splitlines(keepends=True)
-    filtered = [line for line in lines if TODO_MARKER not in line]
-    return "".join(filtered)
+    return "".join(line for line in lines if TODO_MARKER not in line)
 
 
 def count_rustpython_todo(content: str) -> int:
@@ -342,7 +336,7 @@ DEPENDENCIES = {
     },
     "codecs": {
         "test": [
-            "test_codecs.py",
+            "test_charmapcodec.py",
             "test_codeccallbacks.py",
             "test_codecencodings_cn.py",
             "test_codecencodings_hk.py",
@@ -355,8 +349,9 @@ DEPENDENCIES = {
             "test_codecmaps_jp.py",
             "test_codecmaps_kr.py",
             "test_codecmaps_tw.py",
-            "test_charmapcodec.py",
+            "test_codecs.py",
             "test_multibytecodec.py",
+            "testcodec.py",
         ],
     },
     # Non-pattern hard_deps (can't be auto-detected)
@@ -423,6 +418,7 @@ DEPENDENCIES = {
             "test_multiprocessing_forkserver",
             "test_multiprocessing_spawn",
             "test_multiprocessing_main_handling.py",
+            "_test_multiprocessing.py",
         ],
     },
     "urllib": {
@@ -745,12 +741,9 @@ def resolve_hard_dep_parent(name: str, cpython_prefix: str) -> str | None:
     # Auto-detect _py{module} or _py_{module} patterns
     # Only if the parent module actually exists
     if name.startswith("_py"):
-        if name.startswith("_py_"):
-            # _py_abc -> abc
-            parent = name[4:]
-        else:
-            # _pydatetime -> datetime
-            parent = name[3:]
+        # _py_abc -> abc
+        # _pydatetime -> datetime
+        parent = name.removeprefix("_py_").removeprefix("_py")
 
         # Verify the parent module exists
         lib_dir = pathlib.Path(cpython_prefix) / "Lib"
@@ -781,7 +774,7 @@ def resolve_test_to_lib(test_name: str) -> str | None:
         tests = dep_info.get("test", [])
         for test_path in tests:
             # test_path is like "test_urllib2.py" or "test_multiprocessing_fork"
-            path_stem = test_path[:-3] if test_path.endswith(".py") else test_path
+            path_stem = test_path.removesuffix(".py")
             if path_stem == test_name:
                 return lib_name
 

@@ -119,6 +119,20 @@ impl MonitoringState {
         let local = self.local_events.values().fold(0, |acc, &e| acc | e);
         global | local
     }
+
+    /// Compute the events that apply to a specific code object:
+    /// global events OR'd with local events registered for that code.
+    /// This prevents events like INSTRUCTION that are local to one code
+    /// from being applied to unrelated code objects.
+    pub fn events_for_code(&self, code_id: usize) -> u32 {
+        let global = self.global_events.iter().fold(0, |acc, &e| acc | e);
+        let local = self
+            .local_events
+            .iter()
+            .filter(|((_, cid), _)| *cid == code_id)
+            .fold(0, |acc, (_, &e)| acc | e);
+        global | local
+    }
 }
 
 /// Global atomic mask: OR of all tools' events. Checked in the hot path
@@ -313,9 +327,12 @@ pub fn instrument_code(code: &PyCode, events: u32) {
             if matches!(op, Instruction::ExtendedArg) {
                 continue;
             }
-            // Excluded: RESUME and END_FOR (and their instrumented variants)
+            // Excluded: RESUME, END_FOR, CACHE (and their instrumented variants)
             let base = op.to_base().map_or(op, |b| b);
-            if matches!(base, Instruction::Resume { .. } | Instruction::EndFor) {
+            if matches!(
+                base,
+                Instruction::Resume { .. } | Instruction::EndFor | Instruction::Cache
+            ) {
                 continue;
             }
             // Store current opcode (may already be INSTRUMENTED_*) and replace
@@ -358,6 +375,7 @@ pub fn instrument_code(code: &PyCode, events: u32) {
                     | Instruction::EndSend
                     | Instruction::PopIter
                     | Instruction::EndAsyncFor
+                    | Instruction::Cache
             ) {
                 continue;
             }
@@ -376,25 +394,34 @@ pub fn instrument_code(code: &PyCode, events: u32) {
         // same source line as the preceding instruction. Critical for loops
         // (JUMP_BACKWARD → FOR_ITER).
         let mut arg_state = bytecode::OpArgState::default();
+        let mut instr_idx = first_traceable;
         for unit in code.code.instructions[first_traceable..len].iter().copied() {
             let (op, arg) = arg_state.get(unit);
             let base = op.to_base().map_or(op, |b| b);
 
-            if matches!(base, Instruction::ExtendedArg) {
+            if matches!(base, Instruction::ExtendedArg) || matches!(base, Instruction::Cache) {
+                instr_idx += 1;
                 continue;
             }
 
+            let caches = base.cache_entries();
+            let after_caches = instr_idx + 1 + caches;
+            let delta = u32::from(arg) as usize;
+
             let target: Option<usize> = match base {
+                // Forward relative jumps
                 Instruction::PopJumpIfFalse { .. }
                 | Instruction::PopJumpIfTrue { .. }
                 | Instruction::PopJumpIfNone { .. }
                 | Instruction::PopJumpIfNotNone { .. }
-                | Instruction::JumpForward { .. }
-                | Instruction::JumpBackward { .. }
-                | Instruction::JumpBackwardNoInterrupt { .. } => Some(u32::from(arg) as usize),
+                | Instruction::JumpForward { .. } => Some(after_caches + delta),
+                // Backward relative jumps
+                Instruction::JumpBackward { .. } | Instruction::JumpBackwardNoInterrupt { .. } => {
+                    Some(after_caches.wrapping_sub(delta))
+                }
                 Instruction::ForIter { .. } | Instruction::Send { .. } => {
                     // Skip over END_FOR/END_SEND
-                    Some(u32::from(arg) as usize + 1)
+                    Some(after_caches + delta + 1)
                 }
                 _ => None,
             };
@@ -407,6 +434,7 @@ pub fn instrument_code(code: &PyCode, events: u32) {
                 let target_base = target_op.to_base().map_or(target_op, |b| b);
                 // Skip POP_ITER targets
                 if matches!(target_base, Instruction::PopIter) {
+                    instr_idx += 1;
                     continue;
                 }
                 if let Some((loc, _)) = code.code.locations.get(target_idx)
@@ -415,6 +443,7 @@ pub fn instrument_code(code: &PyCode, events: u32) {
                     is_line_start[target_idx] = true;
                 }
             }
+            instr_idx += 1;
         }
 
         // Third pass: mark exception handler targets as line starts.
@@ -464,13 +493,17 @@ fn update_events_mask(vm: &VirtualMachine, state: &MonitoringState) {
         + 1;
     // Eagerly re-instrument all frames on the current thread's stack so that
     // code objects already past their RESUME pick up the new event set.
+    // Each code object gets only the events that apply to it (global + its
+    // own local events), preventing e.g. INSTRUCTION from being applied to
+    // unrelated code objects.
     for fp in vm.frames.borrow().iter() {
         // SAFETY: frames in the Vec are alive while their FrameRef is on the call stack.
         let frame = unsafe { fp.as_ref() };
         let code = &frame.code;
         let code_ver = code.instrumentation_version.load(Ordering::Acquire);
         if code_ver != new_ver {
-            instrument_code(code, events);
+            let code_events = state.events_for_code(code.get_id());
+            instrument_code(code, code_events);
             code.instrumentation_version
                 .store(new_ver, Ordering::Release);
         }
