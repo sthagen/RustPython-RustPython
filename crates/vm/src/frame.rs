@@ -1,17 +1,21 @@
 #[cfg(feature = "flame")]
 use crate::bytecode::InstructionMetadata;
 use crate::{
-    AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject, VirtualMachine,
+    AsObject, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, PyStackRef,
+    TryFromObject, VirtualMachine,
     builtins::{
-        PyBaseException, PyBaseExceptionRef, PyCode, PyCoroutine, PyDict, PyDictRef, PyGenerator,
-        PyInterpolation, PyList, PySet, PySlice, PyStr, PyStrInterned, PyTemplate, PyTraceback,
-        PyType, PyUtf8Str,
+        PyBaseException, PyBaseExceptionRef, PyBaseObject, PyCode, PyCoroutine, PyDict, PyDictRef,
+        PyFloat, PyGenerator, PyInt, PyInterpolation, PyList, PySet, PySlice, PyStr, PyStrInterned,
+        PyTemplate, PyTraceback, PyType, PyUtf8Str,
         asyncgenerator::PyAsyncGenWrappedValue,
         frame::stack_analysis,
         function::{PyCell, PyCellRef, PyFunction},
+        range::PyRangeIterator,
         tuple::{PyTuple, PyTupleRef},
     },
-    bytecode::{self, Instruction, LoadAttr, LoadSuperAttr, SpecialMethod},
+    bytecode::{
+        self, ADAPTIVE_BACKOFF_VALUE, Arg, Instruction, LoadAttr, LoadSuperAttr, SpecialMethod,
+    },
     convert::{IntoObject, ToPyResult},
     coroutine::Coro,
     exceptions::ExceptionCtor,
@@ -21,17 +25,19 @@ use crate::{
     protocol::{PyIter, PyIterReturn},
     scope::Scope,
     stdlib::{builtins, sys::monitoring, typing},
-    types::PyTypeFlags,
+    types::{PyComparisonOp, PyTypeFlags},
     vm::{Context, PyMethod},
 };
 use alloc::fmt;
 use bstr::ByteSlice;
+use core::cell::UnsafeCell;
 use core::iter::zip;
 use core::sync::atomic;
 use core::sync::atomic::AtomicPtr;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::Ordering::{Acquire, Relaxed};
 use indexmap::IndexMap;
 use itertools::Itertools;
+use malachite_bigint::BigInt;
 use rustpython_common::atomic::{PyAtomic, Radium};
 use rustpython_common::{
     boxvec::BoxVec,
@@ -59,7 +65,7 @@ enum UnwindReason {
 struct FrameState {
     // We need 1 stack per frame
     /// The main data frame of the stack machine
-    stack: BoxVec<Option<PyObjectRef>>,
+    stack: BoxVec<Option<PyStackRef>>,
     /// Cell and free variable references (cellvars + freevars).
     cells_frees: Box<[PyCellRef]>,
     /// Previous line number for LINE event suppression.
@@ -92,12 +98,62 @@ impl FrameOwner {
     }
 }
 
+/// Lock-free storage for local variables (localsplus).
+///
+/// # Safety
+/// Mutable access is serialized by the frame's state mutex in `with_exec()`.
+/// External readers (e.g. `f_locals`) must use `try_lock` on the state mutex:
+/// if acquired, the frame is not executing and access is exclusive; if not,
+/// the caller is on the same thread as `with_exec()` (trace callback) and
+/// access is safe because frame execution is single-threaded.
+pub struct FastLocals {
+    inner: UnsafeCell<Box<[Option<PyObjectRef>]>>,
+}
+
+// SAFETY: Frame execution is serialized by the state mutex.
+#[cfg(feature = "threading")]
+unsafe impl Send for FastLocals {}
+#[cfg(feature = "threading")]
+unsafe impl Sync for FastLocals {}
+
+impl FastLocals {
+    fn new(data: Box<[Option<PyObjectRef>]>) -> Self {
+        Self {
+            inner: UnsafeCell::new(data),
+        }
+    }
+
+    /// # Safety
+    /// Caller must ensure exclusive access (frame state locked or frame
+    /// not executing).
+    #[inline(always)]
+    pub unsafe fn borrow(&self) -> &[Option<PyObjectRef>] {
+        unsafe { &*self.inner.get() }
+    }
+
+    /// # Safety
+    /// Caller must ensure exclusive mutable access.
+    #[inline(always)]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn borrow_mut(&self) -> &mut [Option<PyObjectRef>] {
+        unsafe { &mut *self.inner.get() }
+    }
+}
+
+unsafe impl Traverse for FastLocals {
+    fn traverse(&self, traverse_fn: &mut TraverseFn<'_>) {
+        // SAFETY: GC runs on the same thread; no concurrent mutation.
+        let data = unsafe { &*self.inner.get() };
+        data.traverse(traverse_fn);
+    }
+}
+
 #[pyclass(module = false, name = "frame", traverse = "manual")]
 pub struct Frame {
     pub code: PyRef<PyCode>,
     pub func_obj: Option<PyObjectRef>,
 
-    pub fastlocals: PyMutex<Box<[Option<PyObjectRef>]>>,
+    pub fastlocals: FastLocals,
     pub locals: ArgMapping,
     pub globals: PyDictRef,
     pub builtins: PyObjectRef,
@@ -208,7 +264,7 @@ impl Frame {
         };
 
         Self {
-            fastlocals: PyMutex::new(fastlocals_vec.into_boxed_slice()),
+            fastlocals: FastLocals::new(fastlocals_vec.into_boxed_slice()),
             locals: scope.locals,
             globals: scope.globals,
             builtins,
@@ -241,7 +297,8 @@ impl Frame {
     /// Releases references held by the frame, matching _PyFrame_ClearLocals.
     pub(crate) fn clear_locals_and_stack(&self) {
         self.clear_stack_and_cells();
-        let mut fastlocals = self.fastlocals.lock();
+        // SAFETY: Frame is not executing (generator closed).
+        let fastlocals = unsafe { self.fastlocals.borrow_mut() };
         for slot in fastlocals.iter_mut() {
             *slot = None;
         }
@@ -250,7 +307,8 @@ impl Frame {
     /// Get cell contents by cell index. Reads through fastlocals (no state lock needed).
     pub(crate) fn get_cell_contents(&self, cell_idx: usize) -> Option<PyObjectRef> {
         let nlocals = self.code.varnames.len();
-        let fastlocals = self.fastlocals.lock();
+        // SAFETY: Frame not executing; no concurrent mutation.
+        let fastlocals = unsafe { self.fastlocals.borrow() };
         fastlocals
             .get(nlocals + cell_idx)
             .and_then(|slot| slot.as_ref())
@@ -318,7 +376,8 @@ impl Frame {
             return Ok(());
         }
         let code = &**self.code;
-        let mut fastlocals = self.fastlocals.lock();
+        // SAFETY: Called before generator resume; no concurrent access.
+        let fastlocals = unsafe { self.fastlocals.borrow_mut() };
         for (i, &varname) in code.varnames.iter().enumerate() {
             if i >= fastlocals.len() {
                 break;
@@ -334,13 +393,19 @@ impl Frame {
     }
 
     pub fn locals(&self, vm: &VirtualMachine) -> PyResult<ArgMapping> {
+        // Acquire the state mutex to synchronize with frame execution.
+        // If try_lock fails, the frame is executing on this thread (e.g.
+        // trace callback accessing f_locals), so fastlocals access is safe.
+        let _guard = self.state.try_lock();
         let locals = &self.locals;
         let code = &**self.code;
         let map = &code.varnames;
         let j = core::cmp::min(map.len(), code.varnames.len());
         if !code.varnames.is_empty() {
-            let fastlocals = self.fastlocals.lock();
-            for (&k, v) in zip(&map[..j], &**fastlocals) {
+            // SAFETY: Either _guard holds the state mutex (frame not executing),
+            // or we're in a trace callback on the same thread that holds it.
+            let fastlocals = unsafe { self.fastlocals.borrow() };
+            for (&k, v) in zip(&map[..j], fastlocals) {
                 match locals.mapping().ass_subscript(k, v.clone(), vm) {
                     Ok(()) => {}
                     Err(e) if e.fast_isinstance(vm.ctx.exceptions.key_error) => {}
@@ -349,8 +414,6 @@ impl Frame {
             }
         }
         if !code.cellvars.is_empty() || !code.freevars.is_empty() {
-            // Access cells through fastlocals to avoid locking state
-            // (state may be held by with_exec during frame execution).
             for (i, &k) in code.cellvars.iter().enumerate() {
                 let cell_value = self.get_cell_contents(i);
                 match locals.mapping().ass_subscript(k, cell_value, vm) {
@@ -376,7 +439,7 @@ impl Frame {
 
 impl Py<Frame> {
     #[inline(always)]
-    fn with_exec<R>(&self, f: impl FnOnce(ExecutingFrame<'_>) -> R) -> R {
+    fn with_exec<R>(&self, vm: &VirtualMachine, f: impl FnOnce(ExecutingFrame<'_>) -> R) -> R {
         let mut state = self.state.lock();
         let exec = ExecutingFrame {
             code: &self.code,
@@ -384,6 +447,14 @@ impl Py<Frame> {
             locals: &self.locals,
             globals: &self.globals,
             builtins: &self.builtins,
+            builtins_dict: if self.globals.class().is(vm.ctx.types.dict_type) {
+                self.builtins
+                    .downcast_ref_if_exact::<PyDict>(vm)
+                    // SAFETY: downcast_ref_if_exact already verified exact type
+                    .map(|d| unsafe { PyExact::ref_unchecked(d) })
+            } else {
+                None
+            },
             lasti: &self.lasti,
             object: self,
             state: &mut state,
@@ -394,7 +465,7 @@ impl Py<Frame> {
 
     // #[cfg_attr(feature = "flame-it", flame("Frame"))]
     pub fn run(&self, vm: &VirtualMachine) -> PyResult<ExecutionResult> {
-        self.with_exec(|mut exec| exec.run(vm))
+        self.with_exec(vm, |mut exec| exec.run(vm))
     }
 
     pub(crate) fn resume(
@@ -402,7 +473,7 @@ impl Py<Frame> {
         value: Option<PyObjectRef>,
         vm: &VirtualMachine,
     ) -> PyResult<ExecutionResult> {
-        self.with_exec(|mut exec| {
+        self.with_exec(vm, |mut exec| {
             if let Some(value) = value {
                 exec.push_value(value)
             }
@@ -417,7 +488,7 @@ impl Py<Frame> {
         exc_val: PyObjectRef,
         exc_tb: PyObjectRef,
     ) -> PyResult<ExecutionResult> {
-        self.with_exec(|mut exec| exec.gen_throw(vm, exc_type, exc_val, exc_tb))
+        self.with_exec(vm, |mut exec| exec.gen_throw(vm, exc_type, exc_val, exc_tb))
     }
 
     pub fn yield_from_target(&self) -> Option<PyObjectRef> {
@@ -430,6 +501,7 @@ impl Py<Frame> {
             locals: &self.locals,
             globals: &self.globals,
             builtins: &self.builtins,
+            builtins_dict: None,
             lasti: &self.lasti,
             object: self,
             state: &mut state,
@@ -461,10 +533,15 @@ impl Py<Frame> {
 /// with the mutable data inside
 struct ExecutingFrame<'a> {
     code: &'a PyRef<PyCode>,
-    fastlocals: &'a PyMutex<Box<[Option<PyObjectRef>]>>,
+    fastlocals: &'a FastLocals,
     locals: &'a ArgMapping,
     globals: &'a PyDictRef,
     builtins: &'a PyObjectRef,
+    /// Cached downcast of builtins to PyDict for fast LOAD_GLOBAL.
+    /// Only set when both globals and builtins are exact dict types (not
+    /// subclasses), so that `__missing__` / `__getitem__` overrides are
+    /// not bypassed.
+    builtins_dict: Option<&'a PyExact<PyDict>>,
     object: &'a Py<Frame>,
     lasti: &'a PyAtomic<u32>,
     state: &'a mut FrameState,
@@ -1047,7 +1124,24 @@ impl ExecutingFrame<'_> {
         }
 
         match instruction {
-            Instruction::BinaryOp { op } => self.execute_bin_op(vm, op.get(arg)),
+            Instruction::BinaryOp { op } => {
+                let op_val = op.get(arg);
+                let instr_idx = self.lasti() as usize - 1;
+                let cache_base = instr_idx + 1;
+
+                let counter = self.code.instructions.read_adaptive_counter(cache_base);
+                if counter > 0 {
+                    unsafe {
+                        self.code
+                            .instructions
+                            .write_adaptive_counter(cache_base, counter - 1);
+                    }
+                } else {
+                    self.specialize_binary_op(vm, op_val, instr_idx, cache_base);
+                }
+
+                self.execute_bin_op(vm, op_val)
+            }
             // TODO: In CPython, this does in-place unicode concatenation when
             // refcount is 1. Falls back to regular iadd for now.
             Instruction::BinaryOpInplaceAddUnicode => {
@@ -1162,7 +1256,20 @@ impl ExecutingFrame<'_> {
             }
             Instruction::Call { nargs } => {
                 // Stack: [callable, self_or_null, arg1, ..., argN]
-                let args = self.collect_positional_args(nargs.get(arg));
+                let nargs_val = nargs.get(arg);
+                let instr_idx = self.lasti() as usize - 1;
+                let cache_base = instr_idx + 1;
+                let counter = self.code.instructions.read_adaptive_counter(cache_base);
+                if counter > 0 {
+                    unsafe {
+                        self.code
+                            .instructions
+                            .write_adaptive_counter(cache_base, counter - 1);
+                    }
+                } else {
+                    self.specialize_call(vm, nargs_val, instr_idx, cache_base);
+                }
+                let args = self.collect_positional_args(nargs_val);
                 self.execute_call(args, vm)
             }
             Instruction::CallKw { nargs } => {
@@ -1227,14 +1334,9 @@ impl ExecutingFrame<'_> {
                 // This is 1-indexed to match CPython
                 let idx = index.get(arg) as usize;
                 let stack_len = self.state.stack.len();
-                if stack_len < idx {
-                    eprintln!("CopyItem ERROR: stack_len={}, idx={}", stack_len, idx);
-                    eprintln!("  code: {}", self.code.obj_name);
-                    eprintln!("  lasti: {}", self.lasti());
-                    panic!("CopyItem: stack underflow");
-                }
+                debug_assert!(stack_len >= idx, "CopyItem: stack underflow");
                 let value = self.state.stack[stack_len - idx].clone();
-                self.push_value_opt(value);
+                self.push_stackref_opt(value);
                 Ok(None)
             }
             Instruction::CopyFreeVars { .. } => {
@@ -1247,7 +1349,7 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::DeleteFast(idx) => {
-                let mut fastlocals = self.fastlocals.lock();
+                let fastlocals = unsafe { self.fastlocals.borrow_mut() };
                 let idx = idx.get(arg) as usize;
                 if fastlocals[idx].is_none() {
                     return Err(vm.new_exception_msg(
@@ -1620,30 +1722,29 @@ impl ExecutingFrame<'_> {
             Instruction::LoadAttr { idx } => self.load_attr(vm, idx.get(arg)),
             Instruction::LoadSuperAttr { arg: idx } => self.load_super_attr(vm, idx.get(arg)),
             Instruction::LoadBuildClass => {
-                let build_class =
-                    if let Some(builtins_dict) = self.builtins.downcast_ref::<PyDict>() {
-                        builtins_dict
-                            .get_item_opt(identifier!(vm, __build_class__), vm)?
-                            .ok_or_else(|| {
+                let build_class = if let Some(builtins_dict) = self.builtins_dict {
+                    builtins_dict
+                        .get_item_opt(identifier!(vm, __build_class__), vm)?
+                        .ok_or_else(|| {
+                            vm.new_name_error(
+                                "__build_class__ not found".to_owned(),
+                                identifier!(vm, __build_class__).to_owned(),
+                            )
+                        })?
+                } else {
+                    self.builtins
+                        .get_item(identifier!(vm, __build_class__), vm)
+                        .map_err(|e| {
+                            if e.fast_isinstance(vm.ctx.exceptions.key_error) {
                                 vm.new_name_error(
                                     "__build_class__ not found".to_owned(),
                                     identifier!(vm, __build_class__).to_owned(),
                                 )
-                            })?
-                    } else {
-                        self.builtins
-                            .get_item(identifier!(vm, __build_class__), vm)
-                            .map_err(|e| {
-                                if e.fast_isinstance(vm.ctx.exceptions.key_error) {
-                                    vm.new_name_error(
-                                        "__build_class__ not found".to_owned(),
-                                        identifier!(vm, __build_class__).to_owned(),
-                                    )
-                                } else {
-                                    e
-                                }
-                            })?
-                    };
+                            } else {
+                                e
+                            }
+                        })?
+                };
                 self.push_value(build_class);
                 Ok(None)
             }
@@ -1749,7 +1850,7 @@ impl ExecutingFrame<'_> {
                     )
                 }
                 let idx = idx.get(arg) as usize;
-                let x = self.fastlocals.lock()[idx]
+                let x = unsafe { self.fastlocals.borrow() }[idx]
                     .clone()
                     .ok_or_else(|| reference_error(self.code.varnames[idx], vm))?;
                 self.push_value(x);
@@ -1759,7 +1860,7 @@ impl ExecutingFrame<'_> {
                 // Load value and clear the slot (for inlined comprehensions)
                 // If slot is empty, push None (not an error - variable may not exist yet)
                 let idx = idx.get(arg) as usize;
-                let x = self.fastlocals.lock()[idx]
+                let x = unsafe { self.fastlocals.borrow_mut() }[idx]
                     .take()
                     .unwrap_or_else(|| vm.ctx.none());
                 self.push_value(x);
@@ -1769,16 +1870,18 @@ impl ExecutingFrame<'_> {
                 // Same as LoadFast but explicitly checks for unbound locals
                 // (LoadFast in RustPython already does this check)
                 let idx = idx.get(arg) as usize;
-                let x = self.fastlocals.lock()[idx].clone().ok_or_else(|| {
-                    vm.new_exception_msg(
-                        vm.ctx.exceptions.unbound_local_error.to_owned(),
-                        format!(
-                            "local variable '{}' referenced before assignment",
-                            self.code.varnames[idx]
+                let x = unsafe { self.fastlocals.borrow() }[idx]
+                    .clone()
+                    .ok_or_else(|| {
+                        vm.new_exception_msg(
+                            vm.ctx.exceptions.unbound_local_error.to_owned(),
+                            format!(
+                                "local variable '{}' referenced before assignment",
+                                self.code.varnames[idx]
+                            )
+                            .into(),
                         )
-                        .into(),
-                    )
-                })?;
+                    })?;
                 self.push_value(x);
                 Ok(None)
             }
@@ -1788,7 +1891,7 @@ impl ExecutingFrame<'_> {
                 let oparg = packed.get(arg);
                 let idx1 = (oparg >> 4) as usize;
                 let idx2 = (oparg & 15) as usize;
-                let fastlocals = self.fastlocals.lock();
+                let fastlocals = unsafe { self.fastlocals.borrow() };
                 let x1 = fastlocals[idx1].clone().ok_or_else(|| {
                     vm.new_exception_msg(
                         vm.ctx.exceptions.unbound_local_error.to_owned(),
@@ -1809,40 +1912,35 @@ impl ExecutingFrame<'_> {
                         .into(),
                     )
                 })?;
-                drop(fastlocals);
                 self.push_value(x1);
                 self.push_value(x2);
                 Ok(None)
             }
-            // TODO: Implement true borrow optimization (skip Arc::clone).
-            // CPython's LOAD_FAST_BORROW uses PyStackRef_Borrow to avoid refcount
-            // increment for values that are consumed within the same basic block.
-            // Possible approaches:
-            // - Store raw pointers with careful lifetime management
-            // - Add a "borrowed" variant to stack slots
-            // - Use arena allocation for short-lived stack values
-            // Currently this just clones like LoadFast.
+            // Borrow optimization not yet active; falls back to clone.
+            // push_borrowed() is available but disabled until stack
+            // lifetime issues at yield/exception points are resolved.
             Instruction::LoadFastBorrow(idx) => {
                 let idx = idx.get(arg) as usize;
-                let x = self.fastlocals.lock()[idx].clone().ok_or_else(|| {
-                    vm.new_exception_msg(
-                        vm.ctx.exceptions.unbound_local_error.to_owned(),
-                        format!(
-                            "local variable '{}' referenced before assignment",
-                            self.code.varnames[idx]
+                let x = unsafe { self.fastlocals.borrow() }[idx]
+                    .clone()
+                    .ok_or_else(|| {
+                        vm.new_exception_msg(
+                            vm.ctx.exceptions.unbound_local_error.to_owned(),
+                            format!(
+                                "local variable '{}' referenced before assignment",
+                                self.code.varnames[idx]
+                            )
+                            .into(),
                         )
-                        .into(),
-                    )
-                })?;
+                    })?;
                 self.push_value(x);
                 Ok(None)
             }
-            // TODO: Same as LoadFastBorrow - implement true borrow optimization.
             Instruction::LoadFastBorrowLoadFastBorrow { arg: packed } => {
                 let oparg = packed.get(arg);
                 let idx1 = (oparg >> 4) as usize;
                 let idx2 = (oparg & 15) as usize;
-                let fastlocals = self.fastlocals.lock();
+                let fastlocals = unsafe { self.fastlocals.borrow() };
                 let x1 = fastlocals[idx1].clone().ok_or_else(|| {
                     vm.new_exception_msg(
                         vm.ctx.exceptions.unbound_local_error.to_owned(),
@@ -1863,7 +1961,6 @@ impl ExecutingFrame<'_> {
                         .into(),
                     )
                 })?;
-                drop(fastlocals);
                 self.push_value(x1);
                 self.push_value(x2);
                 Ok(None)
@@ -2215,6 +2312,10 @@ impl ExecutingFrame<'_> {
             }
             Instruction::RaiseVarargs { kind } => self.execute_raise(vm, kind.get(arg)),
             Instruction::Resume { .. } => {
+                // Lazy quickening: initialize adaptive counters on first execution
+                if !self.code.quickened.swap(true, atomic::Ordering::Relaxed) {
+                    self.code.instructions.quicken();
+                }
                 // Check if bytecode needs re-instrumentation
                 let global_ver = vm
                     .state
@@ -2347,33 +2448,28 @@ impl ExecutingFrame<'_> {
             }
             Instruction::StoreFast(idx) => {
                 let value = self.pop_value();
-                self.fastlocals.lock()[idx.get(arg) as usize] = Some(value);
+                let fastlocals = unsafe { self.fastlocals.borrow_mut() };
+                fastlocals[idx.get(arg) as usize] = Some(value);
                 Ok(None)
             }
             Instruction::StoreFastLoadFast { var_nums } => {
-                // Store to one slot and load from another (often the same) - for inlined comprehensions
                 let value = self.pop_value();
-                let mut locals = self.fastlocals.lock();
+                let locals = unsafe { self.fastlocals.borrow_mut() };
                 let oparg = var_nums.get(arg);
                 locals[oparg.store_idx() as usize] = Some(value);
                 let load_value = locals[oparg.load_idx() as usize]
                     .clone()
                     .expect("StoreFastLoadFast: load slot should have value after store");
-                drop(locals);
                 self.push_value(load_value);
                 Ok(None)
             }
             Instruction::StoreFastStoreFast { arg: packed } => {
-                // Store two values to two local variables at once
-                // STORE_FAST idx1 executes first: pops TOS -> locals[idx1]
-                // STORE_FAST idx2 executes second: pops new TOS -> locals[idx2]
-                // oparg encoding: (idx1 << 4) | idx2
                 let oparg = packed.get(arg);
                 let idx1 = (oparg >> 4) as usize;
                 let idx2 = (oparg & 15) as usize;
-                let value1 = self.pop_value(); // TOS -> idx1
-                let value2 = self.pop_value(); // second -> idx2
-                let mut fastlocals = self.fastlocals.lock();
+                let value1 = self.pop_value();
+                let value2 = self.pop_value();
+                let fastlocals = unsafe { self.fastlocals.borrow_mut() };
                 fastlocals[idx1] = Some(value1);
                 fastlocals[idx2] = Some(value2);
                 Ok(None)
@@ -2459,6 +2555,14 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::YieldValue { arg: oparg } => {
+                debug_assert!(
+                    self.state
+                        .stack
+                        .iter()
+                        .flatten()
+                        .all(|sr| !sr.is_borrowed()),
+                    "borrowed refs on stack at yield point"
+                );
                 let value = self.pop_value();
                 // arg=0: direct yield (wrapped for async generators)
                 // arg=1: yield from await/yield-from (NOT wrapped)
@@ -2574,6 +2678,298 @@ impl ExecutingFrame<'_> {
                 self.push_value(vm.ctx.new_bool(!value).into());
                 Ok(None)
             }
+            // Specialized LOAD_ATTR opcodes
+            Instruction::LoadAttrMethodNoDict => {
+                let oparg = LoadAttr::new(u32::from(arg));
+                let instr_idx = self.lasti() as usize - 1;
+                let cache_base = instr_idx + 1;
+
+                let owner = self.top_value();
+                let type_version = self.code.instructions.read_cache_u32(cache_base + 1);
+
+                if type_version != 0 && owner.class().tp_version_tag.load(Acquire) == type_version {
+                    // Cache hit: load the cached method descriptor
+                    let descr_ptr = self.code.instructions.read_cache_u64(cache_base + 5);
+                    let func = unsafe { &*(descr_ptr as *const PyObject) }.to_owned();
+                    let owner = self.pop_value();
+                    self.push_value(func);
+                    self.push_value(owner);
+                    Ok(None)
+                } else {
+                    // De-optimize
+                    unsafe {
+                        self.code
+                            .instructions
+                            .replace_op(instr_idx, Instruction::LoadAttr { idx: Arg::marker() });
+                        self.code
+                            .instructions
+                            .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                    }
+                    self.load_attr_slow(vm, oparg)
+                }
+            }
+            Instruction::LoadAttrMethodWithValues => {
+                let oparg = LoadAttr::new(u32::from(arg));
+                let instr_idx = self.lasti() as usize - 1;
+                let cache_base = instr_idx + 1;
+                let attr_name = self.code.names[oparg.name_idx() as usize];
+
+                let owner = self.top_value();
+                let type_version = self.code.instructions.read_cache_u32(cache_base + 1);
+
+                if type_version != 0 && owner.class().tp_version_tag.load(Acquire) == type_version {
+                    // Check instance dict doesn't shadow the method
+                    let shadowed = if let Some(dict) = owner.dict() {
+                        match dict.get_item_opt(attr_name, vm) {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
+                            Err(_) => {
+                                // Dict lookup error → deoptimize to safe path
+                                unsafe {
+                                    self.code.instructions.replace_op(
+                                        instr_idx,
+                                        Instruction::LoadAttr { idx: Arg::marker() },
+                                    );
+                                    self.code
+                                        .instructions
+                                        .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                                }
+                                return self.load_attr_slow(vm, oparg);
+                            }
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !shadowed {
+                        // Cache hit: load the cached method descriptor
+                        let descr_ptr = self.code.instructions.read_cache_u64(cache_base + 5);
+                        let func = unsafe { &*(descr_ptr as *const PyObject) }.to_owned();
+                        let owner = self.pop_value();
+                        self.push_value(func);
+                        self.push_value(owner);
+                        return Ok(None);
+                    }
+                }
+                // De-optimize
+                unsafe {
+                    self.code
+                        .instructions
+                        .replace_op(instr_idx, Instruction::LoadAttr { idx: Arg::marker() });
+                    self.code
+                        .instructions
+                        .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                }
+                self.load_attr_slow(vm, oparg)
+            }
+            Instruction::LoadAttrInstanceValue => {
+                let oparg = LoadAttr::new(u32::from(arg));
+                let instr_idx = self.lasti() as usize - 1;
+                let cache_base = instr_idx + 1;
+                let attr_name = self.code.names[oparg.name_idx() as usize];
+
+                let owner = self.top_value();
+                let type_version = self.code.instructions.read_cache_u32(cache_base + 1);
+
+                if type_version != 0 && owner.class().tp_version_tag.load(Acquire) == type_version {
+                    // Type version matches — no data descriptor for this attr.
+                    // Try direct dict lookup, skipping full descriptor protocol.
+                    if let Some(dict) = owner.dict()
+                        && let Some(value) = dict.get_item_opt(attr_name, vm)?
+                    {
+                        self.pop_value();
+                        self.push_value(value);
+                        return Ok(None);
+                    }
+                    // Not in instance dict — fall through to class lookup via slow path
+                }
+                // De-optimize
+                unsafe {
+                    self.code
+                        .instructions
+                        .replace_op(instr_idx, Instruction::LoadAttr { idx: Arg::marker() });
+                    self.code
+                        .instructions
+                        .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                }
+                self.load_attr_slow(vm, oparg)
+            }
+            // Specialized BINARY_OP opcodes
+            Instruction::BinaryOpAddInt => {
+                let b = self.top_value();
+                let a = self.nth_value(1);
+                if let (Some(a_int), Some(b_int)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    let result = a_int.as_bigint() + b_int.as_bigint();
+                    self.pop_value();
+                    self.pop_value();
+                    self.push_value(vm.ctx.new_bigint(&result).into());
+                    Ok(None)
+                } else {
+                    self.deoptimize_binary_op(bytecode::BinaryOperator::Add);
+                    self.execute_bin_op(vm, bytecode::BinaryOperator::Add)
+                }
+            }
+            Instruction::BinaryOpSubtractInt => {
+                let b = self.top_value();
+                let a = self.nth_value(1);
+                if let (Some(a_int), Some(b_int)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    let result = a_int.as_bigint() - b_int.as_bigint();
+                    self.pop_value();
+                    self.pop_value();
+                    self.push_value(vm.ctx.new_bigint(&result).into());
+                    Ok(None)
+                } else {
+                    self.deoptimize_binary_op(bytecode::BinaryOperator::Subtract);
+                    self.execute_bin_op(vm, bytecode::BinaryOperator::Subtract)
+                }
+            }
+            Instruction::BinaryOpMultiplyInt => {
+                let b = self.top_value();
+                let a = self.nth_value(1);
+                if let (Some(a_int), Some(b_int)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    let result = a_int.as_bigint() * b_int.as_bigint();
+                    self.pop_value();
+                    self.pop_value();
+                    self.push_value(vm.ctx.new_bigint(&result).into());
+                    Ok(None)
+                } else {
+                    self.deoptimize_binary_op(bytecode::BinaryOperator::Multiply);
+                    self.execute_bin_op(vm, bytecode::BinaryOperator::Multiply)
+                }
+            }
+            Instruction::BinaryOpAddFloat => {
+                let b = self.top_value();
+                let a = self.nth_value(1);
+                if let (Some(a_f), Some(b_f)) = (
+                    a.downcast_ref_if_exact::<PyFloat>(vm),
+                    b.downcast_ref_if_exact::<PyFloat>(vm),
+                ) {
+                    let result = a_f.to_f64() + b_f.to_f64();
+                    self.pop_value();
+                    self.pop_value();
+                    self.push_value(vm.ctx.new_float(result).into());
+                    Ok(None)
+                } else {
+                    self.deoptimize_binary_op(bytecode::BinaryOperator::Add);
+                    self.execute_bin_op(vm, bytecode::BinaryOperator::Add)
+                }
+            }
+            Instruction::BinaryOpSubtractFloat => {
+                let b = self.top_value();
+                let a = self.nth_value(1);
+                if let (Some(a_f), Some(b_f)) = (
+                    a.downcast_ref_if_exact::<PyFloat>(vm),
+                    b.downcast_ref_if_exact::<PyFloat>(vm),
+                ) {
+                    let result = a_f.to_f64() - b_f.to_f64();
+                    self.pop_value();
+                    self.pop_value();
+                    self.push_value(vm.ctx.new_float(result).into());
+                    Ok(None)
+                } else {
+                    self.deoptimize_binary_op(bytecode::BinaryOperator::Subtract);
+                    self.execute_bin_op(vm, bytecode::BinaryOperator::Subtract)
+                }
+            }
+            Instruction::BinaryOpMultiplyFloat => {
+                let b = self.top_value();
+                let a = self.nth_value(1);
+                if let (Some(a_f), Some(b_f)) = (
+                    a.downcast_ref_if_exact::<PyFloat>(vm),
+                    b.downcast_ref_if_exact::<PyFloat>(vm),
+                ) {
+                    let result = a_f.to_f64() * b_f.to_f64();
+                    self.pop_value();
+                    self.pop_value();
+                    self.push_value(vm.ctx.new_float(result).into());
+                    Ok(None)
+                } else {
+                    self.deoptimize_binary_op(bytecode::BinaryOperator::Multiply);
+                    self.execute_bin_op(vm, bytecode::BinaryOperator::Multiply)
+                }
+            }
+            Instruction::CallPyExactArgs => {
+                let instr_idx = self.lasti() as usize - 1;
+                let cache_base = instr_idx + 1;
+                let cached_version = self.code.instructions.read_cache_u32(cache_base + 1);
+                let nargs: u32 = arg.into();
+                // Stack: [callable, self_or_null, arg1, ..., argN]
+                let callable = self.nth_value(nargs + 1);
+                if let Some(func) = callable.downcast_ref::<PyFunction>()
+                    && func.func_version() == cached_version
+                    && cached_version != 0
+                {
+                    let args: Vec<PyObjectRef> = self.pop_multiple(nargs as usize).collect();
+                    let _null = self.pop_value_opt(); // self_or_null (NULL)
+                    let callable = self.pop_value();
+                    let func = callable.downcast_ref::<PyFunction>().unwrap();
+                    let result = func.invoke_exact_args(&args, vm)?;
+                    self.push_value(result);
+                    Ok(None)
+                } else {
+                    // Deoptimize
+                    unsafe {
+                        self.code.instructions.replace_op(
+                            instr_idx,
+                            Instruction::Call {
+                                nargs: Arg::marker(),
+                            },
+                        );
+                        self.code
+                            .instructions
+                            .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                    }
+                    let args = self.collect_positional_args(nargs);
+                    self.execute_call(args, vm)
+                }
+            }
+            Instruction::CallBoundMethodExactArgs => {
+                let instr_idx = self.lasti() as usize - 1;
+                let cache_base = instr_idx + 1;
+                let cached_version = self.code.instructions.read_cache_u32(cache_base + 1);
+                let nargs: u32 = arg.into();
+                // Stack: [callable, self_val, arg1, ..., argN]
+                let callable = self.nth_value(nargs + 1);
+                if let Some(func) = callable.downcast_ref::<PyFunction>()
+                    && func.func_version() == cached_version
+                    && cached_version != 0
+                {
+                    let pos_args: Vec<PyObjectRef> = self.pop_multiple(nargs as usize).collect();
+                    let self_val = self.pop_value();
+                    let callable = self.pop_value();
+                    let func = callable.downcast_ref::<PyFunction>().unwrap();
+                    let mut all_args = Vec::with_capacity(pos_args.len() + 1);
+                    all_args.push(self_val);
+                    all_args.extend(pos_args);
+                    let result = func.invoke_exact_args(&all_args, vm)?;
+                    self.push_value(result);
+                    Ok(None)
+                } else {
+                    // Deoptimize
+                    unsafe {
+                        self.code.instructions.replace_op(
+                            instr_idx,
+                            Instruction::Call {
+                                nargs: Arg::marker(),
+                            },
+                        );
+                        self.code
+                            .instructions
+                            .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                    }
+                    let args = self.collect_positional_args(nargs);
+                    self.execute_call(args, vm)
+                }
+            }
             // All INSTRUMENTED_* opcodes delegate to a cold function to keep
             // the hot instruction loop free of monitoring overhead.
             _ => self.execute_instrumented(instruction, arg, vm),
@@ -2638,6 +3034,14 @@ impl ExecutingFrame<'_> {
                 self.unwind_blocks(vm, UnwindReason::Returning { value })
             }
             Instruction::InstrumentedYieldValue => {
+                debug_assert!(
+                    self.state
+                        .stack
+                        .iter()
+                        .flatten()
+                        .all(|sr| !sr.is_borrowed()),
+                    "borrowed refs on stack at yield point"
+                );
                 let value = self.pop_value();
                 if self.monitoring_mask & monitoring::EVENT_PY_YIELD != 0 {
                     let offset = (self.lasti() - 1) * 2;
@@ -2958,10 +3362,12 @@ impl ExecutingFrame<'_> {
 
     #[inline]
     fn load_global_or_builtin(&self, name: &Py<PyStr>, vm: &VirtualMachine) -> PyResult {
-        if let Some(builtins_dict) = self.builtins.downcast_ref::<PyDict>() {
-            // Fast path: builtins is a dict
-            self.globals
-                .get_chain(builtins_dict, name, vm)?
+        if let Some(builtins_dict) = self.builtins_dict {
+            // Fast path: both globals and builtins are exact dicts
+            // SAFETY: builtins_dict is only set when globals is also exact dict
+            let globals_exact = unsafe { PyExact::ref_unchecked(self.globals.as_ref()) };
+            globals_exact
+                .get_chain_exact(builtins_dict, name, vm)?
                 .ok_or_else(|| {
                     vm.new_name_error(format!("name '{name}' is not defined"), name.to_owned())
                 })
@@ -3389,12 +3795,9 @@ impl ExecutingFrame<'_> {
         let callable = self.pop_value();
 
         let final_args = if let Some(self_val) = self_or_null {
-            let mut all_args = vec![self_val];
-            all_args.extend(args.args);
-            FuncArgs {
-                args: all_args,
-                kwargs: args.kwargs,
-            }
+            let mut args = args;
+            args.prepend_arg(self_val);
+            args
         } else {
             args
         };
@@ -3410,12 +3813,9 @@ impl ExecutingFrame<'_> {
         let callable = self.pop_value();
 
         let final_args = if let Some(self_val) = self_or_null {
-            let mut all_args = vec![self_val];
-            all_args.extend(args.args);
-            FuncArgs {
-                args: all_args,
-                kwargs: args.kwargs,
-            }
+            let mut args = args;
+            args.prepend_arg(self_val);
+            args
         } else {
             args
         };
@@ -3567,18 +3967,24 @@ impl ExecutingFrame<'_> {
 
         let mut elements = elements;
         // Elements on stack from right-to-left:
-        self.state
-            .stack
-            .extend(elements.drain(before + middle..).rev().map(Some));
+        self.state.stack.extend(
+            elements
+                .drain(before + middle..)
+                .rev()
+                .map(|e| Some(PyStackRef::new_owned(e))),
+        );
 
         let middle_elements = elements.drain(before..).collect();
         let t = vm.ctx.new_list(middle_elements);
         self.push_value(t.into());
 
         // Lastly the first reversed values:
-        self.state
-            .stack
-            .extend(elements.into_iter().rev().map(Some));
+        self.state.stack.extend(
+            elements
+                .into_iter()
+                .rev()
+                .map(|e| Some(PyStackRef::new_owned(e))),
+        );
 
         Ok(None)
     }
@@ -3647,7 +4053,23 @@ impl ExecutingFrame<'_> {
         vm: &VirtualMachine,
         target: bytecode::Label,
     ) -> Result<bool, PyBaseExceptionRef> {
-        let top_of_stack = PyIter::new(self.top_value());
+        let top = self.top_value();
+
+        // FOR_ITER_RANGE: bypass generic iterator protocol for range iterators
+        if let Some(range_iter) = top.downcast_ref_if_exact::<PyRangeIterator>(vm) {
+            if let Some(value) = range_iter.next_fast() {
+                self.push_value(vm.ctx.new_int(value).into());
+                return Ok(true);
+            }
+            if vm.use_tracing.get() && !vm.is_none(&self.object.trace.lock()) {
+                let stop_exc = vm.new_stop_iteration(None);
+                self.fire_exception_trace(&stop_exc, vm)?;
+            }
+            self.jump(self.for_iter_jump_target(target));
+            return Ok(false);
+        }
+
+        let top_of_stack = PyIter::new(top);
         let next_obj = top_of_stack.next(vm);
 
         match next_obj {
@@ -3662,21 +4084,7 @@ impl ExecutingFrame<'_> {
                     let stop_exc = vm.new_stop_iteration(value);
                     self.fire_exception_trace(&stop_exc, vm)?;
                 }
-                // Skip END_FOR (base or instrumented) and jump to POP_ITER.
-                let target_idx = target.0 as usize;
-                let jump_target = if let Some(unit) = self.code.instructions.get(target_idx) {
-                    if matches!(
-                        unit.op,
-                        bytecode::Instruction::EndFor | bytecode::Instruction::InstrumentedEndFor
-                    ) {
-                        bytecode::Label(target.0 + 1)
-                    } else {
-                        target
-                    }
-                } else {
-                    target
-                };
-                self.jump(jump_target);
+                self.jump(self.for_iter_jump_target(target));
                 Ok(false)
             }
             Err(next_error) => {
@@ -3684,6 +4092,20 @@ impl ExecutingFrame<'_> {
                 Err(next_error)
             }
         }
+    }
+
+    /// Compute the jump target for FOR_ITER exhaustion: skip END_FOR and jump to POP_ITER.
+    fn for_iter_jump_target(&self, target: bytecode::Label) -> bytecode::Label {
+        let target_idx = target.0 as usize;
+        if let Some(unit) = self.code.instructions.get(target_idx)
+            && matches!(
+                unit.op,
+                bytecode::Instruction::EndFor | bytecode::Instruction::InstrumentedEndFor
+            )
+        {
+            return bytecode::Label(target.0 + 1);
+        }
+        target
     }
     fn execute_make_function(&mut self, vm: &VirtualMachine) -> FrameResult {
         // MakeFunction only takes code object, no flags
@@ -3733,8 +4155,33 @@ impl ExecutingFrame<'_> {
         let b_ref = &self.pop_value();
         let a_ref = &self.pop_value();
         let value = match op {
-            bytecode::BinaryOperator::Subtract => vm._sub(a_ref, b_ref),
-            bytecode::BinaryOperator::Add => vm._add(a_ref, b_ref),
+            // BINARY_OP_ADD_INT / BINARY_OP_SUBTRACT_INT fast paths:
+            // bypass binary_op1 dispatch for exact int types, use i64 arithmetic
+            // when possible to avoid BigInt heap allocation.
+            bytecode::BinaryOperator::Add | bytecode::BinaryOperator::InplaceAdd => {
+                if let (Some(a), Some(b)) = (
+                    a_ref.downcast_ref_if_exact::<PyInt>(vm),
+                    b_ref.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    Ok(self.int_add(a.as_bigint(), b.as_bigint(), vm))
+                } else if matches!(op, bytecode::BinaryOperator::Add) {
+                    vm._add(a_ref, b_ref)
+                } else {
+                    vm._iadd(a_ref, b_ref)
+                }
+            }
+            bytecode::BinaryOperator::Subtract | bytecode::BinaryOperator::InplaceSubtract => {
+                if let (Some(a), Some(b)) = (
+                    a_ref.downcast_ref_if_exact::<PyInt>(vm),
+                    b_ref.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    Ok(self.int_sub(a.as_bigint(), b.as_bigint(), vm))
+                } else if matches!(op, bytecode::BinaryOperator::Subtract) {
+                    vm._sub(a_ref, b_ref)
+                } else {
+                    vm._isub(a_ref, b_ref)
+                }
+            }
             bytecode::BinaryOperator::Multiply => vm._mul(a_ref, b_ref),
             bytecode::BinaryOperator::MatrixMultiply => vm._matmul(a_ref, b_ref),
             bytecode::BinaryOperator::Power => vm._pow(a_ref, b_ref, vm.ctx.none.as_object()),
@@ -3746,8 +4193,6 @@ impl ExecutingFrame<'_> {
             bytecode::BinaryOperator::Xor => vm._xor(a_ref, b_ref),
             bytecode::BinaryOperator::Or => vm._or(a_ref, b_ref),
             bytecode::BinaryOperator::And => vm._and(a_ref, b_ref),
-            bytecode::BinaryOperator::InplaceSubtract => vm._isub(a_ref, b_ref),
-            bytecode::BinaryOperator::InplaceAdd => vm._iadd(a_ref, b_ref),
             bytecode::BinaryOperator::InplaceMultiply => vm._imul(a_ref, b_ref),
             bytecode::BinaryOperator::InplaceMatrixMultiply => vm._imatmul(a_ref, b_ref),
             bytecode::BinaryOperator::InplacePower => {
@@ -3766,6 +4211,30 @@ impl ExecutingFrame<'_> {
 
         self.push_value(value);
         Ok(None)
+    }
+
+    /// Int addition with i64 fast path to avoid BigInt heap allocation.
+    #[inline]
+    fn int_add(&self, a: &BigInt, b: &BigInt, vm: &VirtualMachine) -> PyObjectRef {
+        use num_traits::ToPrimitive;
+        if let (Some(av), Some(bv)) = (a.to_i64(), b.to_i64())
+            && let Some(result) = av.checked_add(bv)
+        {
+            return vm.ctx.new_int(result).into();
+        }
+        vm.ctx.new_int(a + b).into()
+    }
+
+    /// Int subtraction with i64 fast path to avoid BigInt heap allocation.
+    #[inline]
+    fn int_sub(&self, a: &BigInt, b: &BigInt, vm: &VirtualMachine) -> PyObjectRef {
+        use num_traits::ToPrimitive;
+        if let (Some(av), Some(bv)) = (a.to_i64(), b.to_i64())
+            && let Some(result) = av.checked_sub(bv)
+        {
+            return vm.ctx.new_int(result).into();
+        }
+        vm.ctx.new_int(a - b).into()
     }
 
     #[cold]
@@ -3797,40 +4266,18 @@ impl ExecutingFrame<'_> {
         let value = self.pop_value();
         let size = size as usize;
 
-        // Fast path for exact tuple/list types (not subclasses) — check
-        // length directly without creating an iterator, matching
-        // UNPACK_SEQUENCE_TUPLE / UNPACK_SEQUENCE_LIST specializations.
+        // Fast path for exact tuple/list types (not subclasses) — push
+        // elements directly from the slice without intermediate Vec allocation,
+        // matching UNPACK_SEQUENCE_TUPLE / UNPACK_SEQUENCE_LIST specializations.
         let cls = value.class();
-        let fast_elements: Option<Vec<PyObjectRef>> = if cls.is(vm.ctx.types.tuple_type) {
-            Some(value.downcast_ref::<PyTuple>().unwrap().as_slice().to_vec())
-        } else if cls.is(vm.ctx.types.list_type) {
-            Some(
-                value
-                    .downcast_ref::<PyList>()
-                    .unwrap()
-                    .borrow_vec()
-                    .to_vec(),
-            )
-        } else {
-            None
-        };
-        if let Some(elements) = fast_elements {
-            return match elements.len().cmp(&size) {
-                core::cmp::Ordering::Equal => {
-                    self.state
-                        .stack
-                        .extend(elements.into_iter().rev().map(Some));
-                    Ok(None)
-                }
-                core::cmp::Ordering::Greater => Err(vm.new_value_error(format!(
-                    "too many values to unpack (expected {size}, got {})",
-                    elements.len()
-                ))),
-                core::cmp::Ordering::Less => Err(vm.new_value_error(format!(
-                    "not enough values to unpack (expected {size}, got {})",
-                    elements.len()
-                ))),
-            };
+        if cls.is(vm.ctx.types.tuple_type) {
+            let tuple = value.downcast_ref::<PyTuple>().unwrap();
+            return self.unpack_fast(tuple.as_slice(), size, vm);
+        }
+        if cls.is(vm.ctx.types.list_type) {
+            let list = value.downcast_ref::<PyList>().unwrap();
+            let borrowed = list.borrow_vec();
+            return self.unpack_fast(&borrowed, size, vm);
         }
 
         // General path — iterate up to `size + 1` elements to avoid
@@ -3885,11 +4332,38 @@ impl ExecutingFrame<'_> {
                 Err(vm.new_value_error(msg))
             }
             PyIterReturn::StopIteration(_) => {
-                self.state
-                    .stack
-                    .extend(elements.into_iter().rev().map(Some));
+                self.state.stack.extend(
+                    elements
+                        .into_iter()
+                        .rev()
+                        .map(|e| Some(PyStackRef::new_owned(e))),
+                );
                 Ok(None)
             }
+        }
+    }
+
+    fn unpack_fast(
+        &mut self,
+        elements: &[PyObjectRef],
+        size: usize,
+        vm: &VirtualMachine,
+    ) -> FrameResult {
+        match elements.len().cmp(&size) {
+            core::cmp::Ordering::Equal => {
+                for elem in elements.iter().rev() {
+                    self.push_value(elem.clone());
+                }
+                Ok(None)
+            }
+            core::cmp::Ordering::Greater => Err(vm.new_value_error(format!(
+                "too many values to unpack (expected {size}, got {})",
+                elements.len()
+            ))),
+            core::cmp::Ordering::Less => Err(vm.new_value_error(format!(
+                "not enough values to unpack (expected {size}, got {})",
+                elements.len()
+            ))),
         }
     }
 
@@ -3934,12 +4408,163 @@ impl ExecutingFrame<'_> {
     ) -> FrameResult {
         let b = self.pop_value();
         let a = self.pop_value();
-        let value = a.rich_compare(b, op.into(), vm)?;
+        let cmp_op: PyComparisonOp = op.into();
+
+        // COMPARE_OP_INT: leaf type, cannot recurse — skip rich_compare dispatch
+        if let (Some(a_int), Some(b_int)) = (
+            a.downcast_ref_if_exact::<PyInt>(vm),
+            b.downcast_ref_if_exact::<PyInt>(vm),
+        ) {
+            let result = cmp_op.eval_ord(a_int.as_bigint().cmp(b_int.as_bigint()));
+            self.push_value(vm.ctx.new_bool(result).into());
+            return Ok(None);
+        }
+        // COMPARE_OP_FLOAT: leaf type, cannot recurse — skip rich_compare dispatch.
+        // Falls through on NaN (partial_cmp returns None) for correct != semantics.
+        if let (Some(a_f), Some(b_f)) = (
+            a.downcast_ref_if_exact::<PyFloat>(vm),
+            b.downcast_ref_if_exact::<PyFloat>(vm),
+        ) && let Some(ord) = a_f.to_f64().partial_cmp(&b_f.to_f64())
+        {
+            let result = cmp_op.eval_ord(ord);
+            self.push_value(vm.ctx.new_bool(result).into());
+            return Ok(None);
+        }
+
+        let value = a.rich_compare(b, cmp_op, vm)?;
         self.push_value(value);
         Ok(None)
     }
 
     fn load_attr(&mut self, vm: &VirtualMachine, oparg: LoadAttr) -> FrameResult {
+        let instr_idx = self.lasti() as usize - 1;
+        let cache_base = instr_idx + 1;
+
+        let counter = self.code.instructions.read_adaptive_counter(cache_base);
+        if counter > 0 {
+            unsafe {
+                self.code
+                    .instructions
+                    .write_adaptive_counter(cache_base, counter - 1);
+            }
+        } else {
+            self.specialize_load_attr(vm, oparg, instr_idx, cache_base);
+        }
+
+        self.load_attr_slow(vm, oparg)
+    }
+
+    fn specialize_load_attr(
+        &mut self,
+        _vm: &VirtualMachine,
+        oparg: LoadAttr,
+        instr_idx: usize,
+        cache_base: usize,
+    ) {
+        let obj = self.top_value();
+        let cls = obj.class();
+
+        // Only specialize if getattro is the default (PyBaseObject::getattro)
+        let is_default_getattro = cls
+            .slots
+            .getattro
+            .load()
+            .is_some_and(|f| f as usize == PyBaseObject::getattro as *const () as usize);
+        if !is_default_getattro {
+            unsafe {
+                self.code
+                    .instructions
+                    .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+            }
+            return;
+        }
+
+        // Get or assign type version
+        let mut type_version = cls.tp_version_tag.load(Acquire);
+        if type_version == 0 {
+            type_version = cls.assign_version_tag();
+        }
+        if type_version == 0 {
+            // Version counter overflow — backoff to avoid re-attempting every execution
+            unsafe {
+                self.code
+                    .instructions
+                    .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+            }
+            return;
+        }
+
+        let attr_name = self.code.names[oparg.name_idx() as usize];
+
+        // Look up attr in class via MRO
+        let cls_attr = cls.get_attr(attr_name);
+        let has_dict = obj.dict().is_some();
+
+        if oparg.is_method() {
+            // Method specialization
+            if let Some(ref descr) = cls_attr
+                && descr
+                    .class()
+                    .slots
+                    .flags
+                    .has_feature(PyTypeFlags::METHOD_DESCRIPTOR)
+            {
+                let descr_ptr = &**descr as *const PyObject as u64;
+                unsafe {
+                    self.code
+                        .instructions
+                        .write_cache_u32(cache_base + 1, type_version);
+                    self.code
+                        .instructions
+                        .write_cache_u64(cache_base + 5, descr_ptr);
+                }
+
+                let new_op = if !has_dict {
+                    Instruction::LoadAttrMethodNoDict
+                } else {
+                    Instruction::LoadAttrMethodWithValues
+                };
+                unsafe {
+                    self.code.instructions.replace_op(instr_idx, new_op);
+                }
+                return;
+            }
+            // Can't specialize this method call
+            unsafe {
+                self.code
+                    .instructions
+                    .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+            }
+        } else {
+            // Regular attribute access
+            let has_data_descr = cls_attr.as_ref().is_some_and(|descr| {
+                let descr_cls = descr.class();
+                descr_cls.slots.descr_get.load().is_some()
+                    && descr_cls.slots.descr_set.load().is_some()
+            });
+
+            if !has_data_descr && has_dict {
+                // Instance attribute access — skip class descriptor check
+                unsafe {
+                    self.code
+                        .instructions
+                        .write_cache_u32(cache_base + 1, type_version);
+                    self.code
+                        .instructions
+                        .replace_op(instr_idx, Instruction::LoadAttrInstanceValue);
+                }
+            } else {
+                // Data descriptor or no dict — can't easily specialize
+                unsafe {
+                    self.code
+                        .instructions
+                        .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                }
+            }
+        }
+    }
+
+    fn load_attr_slow(&mut self, vm: &VirtualMachine, oparg: LoadAttr) -> FrameResult {
         let attr_name = self.code.names[oparg.name_idx() as usize];
         let parent = self.pop_value();
 
@@ -3962,6 +4587,141 @@ impl ExecutingFrame<'_> {
             self.push_value(obj);
         }
         Ok(None)
+    }
+
+    fn specialize_binary_op(
+        &mut self,
+        vm: &VirtualMachine,
+        op: bytecode::BinaryOperator,
+        instr_idx: usize,
+        cache_base: usize,
+    ) {
+        let b = self.top_value();
+        let a = self.nth_value(1);
+
+        let new_op = match op {
+            bytecode::BinaryOperator::Add => {
+                if a.downcast_ref_if_exact::<PyInt>(vm).is_some()
+                    && b.downcast_ref_if_exact::<PyInt>(vm).is_some()
+                {
+                    Some(Instruction::BinaryOpAddInt)
+                } else if a.downcast_ref_if_exact::<PyFloat>(vm).is_some()
+                    && b.downcast_ref_if_exact::<PyFloat>(vm).is_some()
+                {
+                    Some(Instruction::BinaryOpAddFloat)
+                } else {
+                    None
+                }
+            }
+            bytecode::BinaryOperator::Subtract => {
+                if a.downcast_ref_if_exact::<PyInt>(vm).is_some()
+                    && b.downcast_ref_if_exact::<PyInt>(vm).is_some()
+                {
+                    Some(Instruction::BinaryOpSubtractInt)
+                } else if a.downcast_ref_if_exact::<PyFloat>(vm).is_some()
+                    && b.downcast_ref_if_exact::<PyFloat>(vm).is_some()
+                {
+                    Some(Instruction::BinaryOpSubtractFloat)
+                } else {
+                    None
+                }
+            }
+            bytecode::BinaryOperator::Multiply => {
+                if a.downcast_ref_if_exact::<PyInt>(vm).is_some()
+                    && b.downcast_ref_if_exact::<PyInt>(vm).is_some()
+                {
+                    Some(Instruction::BinaryOpMultiplyInt)
+                } else if a.downcast_ref_if_exact::<PyFloat>(vm).is_some()
+                    && b.downcast_ref_if_exact::<PyFloat>(vm).is_some()
+                {
+                    Some(Instruction::BinaryOpMultiplyFloat)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(new_op) = new_op {
+            unsafe {
+                self.code.instructions.replace_op(instr_idx, new_op);
+            }
+        } else {
+            unsafe {
+                self.code
+                    .instructions
+                    .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+            }
+        }
+    }
+
+    fn deoptimize_binary_op(&mut self, _op: bytecode::BinaryOperator) {
+        let instr_idx = self.lasti() as usize - 1;
+        let cache_base = instr_idx + 1;
+        unsafe {
+            self.code
+                .instructions
+                .replace_op(instr_idx, Instruction::BinaryOp { op: Arg::marker() });
+            self.code
+                .instructions
+                .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+        }
+    }
+
+    fn specialize_call(
+        &mut self,
+        _vm: &VirtualMachine,
+        nargs: u32,
+        instr_idx: usize,
+        cache_base: usize,
+    ) {
+        // Stack: [callable, self_or_null, arg1, ..., argN]
+        // callable is at position nargs + 1 from top
+        // self_or_null is at position nargs from top
+        let stack = &self.state.stack;
+        let stack_len = stack.len();
+        let self_or_null_is_some = stack[stack_len - nargs as usize - 1].is_some();
+        let callable = self.nth_value(nargs + 1);
+
+        if let Some(func) = callable.downcast_ref::<PyFunction>() {
+            let version = func.func_version();
+            if version == 0 {
+                unsafe {
+                    self.code
+                        .instructions
+                        .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+                }
+                return;
+            }
+
+            let effective_nargs = if self_or_null_is_some {
+                nargs + 1
+            } else {
+                nargs
+            };
+
+            if func.can_specialize_call(effective_nargs) {
+                let new_op = if self_or_null_is_some {
+                    Instruction::CallBoundMethodExactArgs
+                } else {
+                    Instruction::CallPyExactArgs
+                };
+                unsafe {
+                    self.code.instructions.replace_op(instr_idx, new_op);
+                    // Store func_version in cache (after counter)
+                    self.code
+                        .instructions
+                        .write_cache_u32(cache_base + 1, version);
+                }
+                return;
+            }
+        }
+
+        unsafe {
+            self.code
+                .instructions
+                .write_adaptive_counter(cache_base, ADAPTIVE_BACKOFF_VALUE);
+        }
     }
 
     fn load_super_attr(&mut self, vm: &VirtualMachine, oparg: LoadSuperAttr) -> FrameResult {
@@ -4020,8 +4780,8 @@ impl ExecutingFrame<'_> {
     // Block stack functions removed - exception table handles all exception/cleanup
 
     #[inline]
-    #[track_caller] // not a real track_caller but push_value is less useful for debugging
-    fn push_value_opt(&mut self, obj: Option<PyObjectRef>) {
+    #[track_caller]
+    fn push_stackref_opt(&mut self, obj: Option<PyStackRef>) {
         match self.state.stack.try_push(obj) {
             Ok(()) => {}
             Err(_e) => self.fatal("tried to push value onto stack but overflowed max_stackdepth"),
@@ -4029,32 +4789,64 @@ impl ExecutingFrame<'_> {
     }
 
     #[inline]
+    #[track_caller] // not a real track_caller but push_value is less useful for debugging
+    fn push_value_opt(&mut self, obj: Option<PyObjectRef>) {
+        self.push_stackref_opt(obj.map(PyStackRef::new_owned));
+    }
+
+    #[inline]
     #[track_caller]
     fn push_value(&mut self, obj: PyObjectRef) {
-        self.push_value_opt(Some(obj));
+        self.push_stackref_opt(Some(PyStackRef::new_owned(obj)));
+    }
+
+    /// Push a borrowed reference onto the stack (no refcount increment).
+    ///
+    /// # Safety
+    /// The object must remain alive until the borrowed ref is consumed.
+    /// The compiler guarantees consumption within the same basic block.
+    #[inline]
+    #[track_caller]
+    #[allow(dead_code)]
+    unsafe fn push_borrowed(&mut self, obj: &PyObject) {
+        self.push_stackref_opt(Some(unsafe { PyStackRef::new_borrowed(obj) }));
     }
 
     #[inline]
     fn push_null(&mut self) {
-        self.push_value_opt(None);
+        self.push_stackref_opt(None);
     }
 
-    /// Pop a value from the stack, returning None if the stack slot is NULL
+    /// Pop a raw stackref from the stack, returning None if the stack slot is NULL.
     #[inline]
-    fn pop_value_opt(&mut self) -> Option<PyObjectRef> {
+    fn pop_stackref_opt(&mut self) -> Option<PyStackRef> {
         match self.state.stack.pop() {
-            Some(slot) => slot, // slot is Option<PyObjectRef>
+            Some(slot) => slot,
             None => self.fatal("tried to pop from empty stack"),
         }
+    }
+
+    /// Pop a raw stackref from the stack. Panics if NULL.
+    #[inline]
+    #[track_caller]
+    fn pop_stackref(&mut self) -> PyStackRef {
+        expect_unchecked(
+            self.pop_stackref_opt(),
+            "pop stackref but null found. This is a compiler bug.",
+        )
+    }
+
+    /// Pop a value from the stack, returning None if the stack slot is NULL.
+    /// Automatically promotes borrowed refs to owned.
+    #[inline]
+    fn pop_value_opt(&mut self) -> Option<PyObjectRef> {
+        self.pop_stackref_opt().map(|sr| sr.to_pyobj())
     }
 
     #[inline]
     #[track_caller]
     fn pop_value(&mut self) -> PyObjectRef {
-        expect_unchecked(
-            self.pop_value_opt(),
-            "pop value but null found. This is a compiler bug.",
-        )
+        self.pop_stackref().to_pyobj()
     }
 
     fn call_intrinsic_1(
@@ -4225,22 +5017,23 @@ impl ExecutingFrame<'_> {
             );
         }
         self.state.stack.drain(stack_len - count..).map(|obj| {
-            expect_unchecked(obj, "pop_multiple but null found. This is a compiler bug.")
+            expect_unchecked(obj, "pop_multiple but null found. This is a compiler bug.").to_pyobj()
         })
     }
 
     #[inline]
-    fn replace_top(&mut self, mut top: Option<PyObjectRef>) -> Option<PyObjectRef> {
+    fn replace_top(&mut self, top: Option<PyObjectRef>) -> Option<PyObjectRef> {
+        let mut slot = top.map(PyStackRef::new_owned);
         let last = self.state.stack.last_mut().unwrap();
-        core::mem::swap(last, &mut top);
-        top
+        core::mem::swap(last, &mut slot);
+        slot.map(|sr| sr.to_pyobj())
     }
 
     #[inline]
     #[track_caller]
     fn top_value(&self) -> &PyObject {
         match &*self.state.stack {
-            [.., Some(last)] => last,
+            [.., Some(last)] => last.as_object(),
             [.., None] => self.fatal("tried to get top of stack but got NULL"),
             [] => self.fatal("tried to get top of stack but stack is empty"),
         }
@@ -4251,7 +5044,7 @@ impl ExecutingFrame<'_> {
     fn nth_value(&self, depth: u32) -> &PyObject {
         let stack = &self.state.stack;
         match &stack[stack.len() - depth as usize - 1] {
-            Some(obj) => obj,
+            Some(obj) => obj.as_object(),
             None => unsafe { core::hint::unreachable_unchecked() },
         }
     }
@@ -4378,7 +5171,7 @@ fn is_module_initializing(module: &PyObject, vm: &VirtualMachine) -> bool {
     initializing_attr.try_to_bool(vm).unwrap_or(false)
 }
 
-fn expect_unchecked(optional: Option<PyObjectRef>, err_msg: &'static str) -> PyObjectRef {
+fn expect_unchecked<T: fmt::Debug>(optional: Option<T>, err_msg: &'static str) -> T {
     if cfg!(debug_assertions) {
         optional.expect(err_msg)
     } else {
