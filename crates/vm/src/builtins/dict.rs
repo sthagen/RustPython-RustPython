@@ -79,6 +79,11 @@ impl PyDict {
         &self.entries
     }
 
+    /// Monotonically increasing version for mutation tracking.
+    pub(crate) fn version(&self) -> u64 {
+        self.entries.version()
+    }
+
     /// Returns all keys as a Vec, atomically under a single read lock.
     /// Thread-safe: prevents "dictionary changed size during iteration" errors.
     pub fn keys_vec(&self) -> Vec<PyObjectRef> {
@@ -1362,7 +1367,7 @@ fn set_inner_number_or(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyRes
     set_inner_number_op(a, b, |a, b| a.union(b, vm), vm)
 }
 
-pub(crate) fn init(context: &Context) {
+pub(crate) fn init(context: &'static Context) {
     PyDict::extend_class(context, context.types.dict_type);
     PyDictKeys::extend_class(context, context.types.dict_keys_type);
     PyDictKeyIterator::extend_class(context, context.types.dict_keyiterator_type);

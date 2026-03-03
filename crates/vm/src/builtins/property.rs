@@ -133,6 +133,10 @@ impl PyProperty {
         self.getter.read().clone()
     }
 
+    pub(crate) fn get_fget(&self) -> Option<PyObjectRef> {
+        self.getter.read().clone()
+    }
+
     #[pygetset]
     fn fset(&self) -> Option<PyObjectRef> {
         self.setter.read().clone()
@@ -395,7 +399,7 @@ impl Initializer for PyProperty {
     }
 }
 
-pub(crate) fn init(context: &Context) {
+pub(crate) fn init(context: &'static Context) {
     PyProperty::extend_class(context, context.types.property_type);
 
     // This is a bit unfortunate, but this instance attribute overlaps with the
