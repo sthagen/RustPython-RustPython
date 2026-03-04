@@ -347,7 +347,7 @@ impl PyType {
         if old_version == 0 {
             return;
         }
-        self.tp_version_tag.store(0, Ordering::Release);
+        self.tp_version_tag.store(0, Ordering::SeqCst);
         // Release strong references held by cache entries for this version.
         // We hold owned refs that would prevent GC of class attributes after
         // type deletion.
@@ -2168,6 +2168,11 @@ impl SetAttr for PyType {
         }
         let assign = value.is_assign();
 
+        // Invalidate inline caches before modifying attributes.
+        // This ensures other threads see the version invalidation before
+        // any attribute changes, preventing use-after-free of cached descriptors.
+        zelf.modified();
+
         if let PySetterValue::Assign(value) = value {
             zelf.attributes.write().insert(attr_name, value);
         } else {
@@ -2180,8 +2185,6 @@ impl SetAttr for PyType {
                 )));
             }
         }
-        // Invalidate inline caches that depend on this type's attributes
-        zelf.modified();
 
         if attr_name.as_wtf8().starts_with("__") && attr_name.as_wtf8().ends_with("__") {
             if assign {
@@ -2336,8 +2339,37 @@ fn subtype_set_dict(obj: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -
  * The magical type type
  */
 
+/// Vectorcall for PyType (PEP 590).
+/// Fast path: type(x) returns x.__class__ without constructing FuncArgs.
+fn vectorcall_type(
+    zelf_obj: &PyObject,
+    args: Vec<PyObjectRef>,
+    nargs: usize,
+    kwnames: Option<&[PyObjectRef]>,
+    vm: &VirtualMachine,
+) -> PyResult {
+    let zelf: &Py<PyType> = zelf_obj.downcast_ref().unwrap();
+
+    // type(x) fast path: single positional arg, no kwargs
+    if zelf.is(vm.ctx.types.type_type) {
+        let no_kwargs = kwnames.is_none_or(|kw| kw.is_empty());
+        if nargs == 1 && no_kwargs {
+            return Ok(args[0].obj_type());
+        }
+    }
+
+    // Fallback: construct FuncArgs and use standard call
+    let func_args = FuncArgs::from_vectorcall_owned(args, nargs, kwnames);
+    PyType::call(zelf, func_args, vm)
+}
+
 pub(crate) fn init(ctx: &'static Context) {
     PyType::extend_class(ctx, ctx.types.type_type);
+    ctx.types
+        .type_type
+        .slots
+        .vectorcall
+        .store(Some(vectorcall_type));
 }
 
 pub(crate) fn call_slot_new(

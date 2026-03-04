@@ -182,8 +182,8 @@ pub(crate) mod stack_analysis {
                 }
                 oparg = (oparg << 8) | u32::from(u8::from(instructions[i].arg));
 
-                // De-instrument: get the underlying real instruction
-                let opcode = opcode.to_base().unwrap_or(opcode);
+                // De-instrument and de-specialize: get the underlying base instruction
+                let opcode = opcode.to_base().unwrap_or(opcode).deoptimize();
 
                 let caches = opcode.cache_entries();
                 let next_i = i + 1 + caches;
@@ -295,7 +295,7 @@ pub(crate) mod stack_analysis {
                             stacks[next_i] = next_stack;
                         }
                     }
-                    Instruction::LoadGlobal(_) => {
+                    Instruction::LoadGlobal { .. } => {
                         next_stack = push_value(next_stack, Kind::Object as i64);
                         if oparg & 1 != 0 {
                             next_stack = push_value(next_stack, Kind::Null as i64);
@@ -692,7 +692,7 @@ impl Py<Frame> {
         // Clear fastlocals
         // SAFETY: Frame is not executing (detached or stopped).
         {
-            let fastlocals = unsafe { self.fastlocals.borrow_mut() };
+            let fastlocals = unsafe { self.fastlocals_mut() };
             for slot in fastlocals.iter_mut() {
                 *slot = None;
             }

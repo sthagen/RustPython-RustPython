@@ -53,6 +53,9 @@ unsafe impl Traverse for PyTuple {
     }
 }
 
+// No freelist for PyTuple: structseq types (stat_result, struct_time, etc.)
+// are static subtypes sharing the same Rust payload, making type-safe reuse
+// impractical without a type-pointer comparison at push time.
 impl PyPayload for PyTuple {
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
@@ -324,7 +327,13 @@ impl PyTuple {
 
     fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult {
         match SequenceIndex::try_from_borrowed_object(vm, needle, "tuple")? {
-            SequenceIndex::Int(i) => self.elements.getitem_by_index(vm, i),
+            SequenceIndex::Int(i) => {
+                let index = self
+                    .elements
+                    .wrap_index(i)
+                    .ok_or_else(|| vm.new_index_error("tuple index out of range"))?;
+                Ok(self.elements[index].clone())
+            }
             SequenceIndex::Slice(slice) => self
                 .elements
                 .getitem_by_slice(vm, slice)

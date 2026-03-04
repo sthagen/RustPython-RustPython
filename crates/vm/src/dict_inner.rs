@@ -19,7 +19,10 @@ use crate::{
 use alloc::fmt;
 use core::mem::size_of;
 use core::ops::ControlFlow;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{
+    AtomicU64,
+    Ordering::{Acquire, Release},
+};
 use num_traits::ToPrimitive;
 
 // HashIndex is intended to be same size with hash::PyHash
@@ -261,12 +264,12 @@ type PopInnerResult<T> = ControlFlow<Option<DictEntry<T>>>;
 impl<T: Clone> Dict<T> {
     /// Monotonically increasing version counter for mutation tracking.
     pub fn version(&self) -> u64 {
-        self.version.load(Relaxed)
+        self.version.load(Acquire)
     }
 
     /// Bump the version counter after any mutation.
     fn bump_version(&self) {
-        self.version.fetch_add(1, Relaxed);
+        self.version.fetch_add(1, Release);
     }
 
     fn read(&self) -> PyRwLockReadGuard<'_, DictInner<T>> {
@@ -332,6 +335,50 @@ impl<T: Clone> Dict<T> {
     pub fn get<K: DictKey + ?Sized>(&self, vm: &VirtualMachine, key: &K) -> PyResult<Option<T>> {
         let hash = key.key_hash(vm)?;
         self._get_inner(vm, key, hash)
+    }
+
+    /// Return a stable entry hint for `key` if present.
+    ///
+    /// The hint is the internal entry index and can be used with
+    /// [`Self::get_hint`]. It is invalidated by dict mutations.
+    pub fn hint_for_key<K: DictKey + ?Sized>(
+        &self,
+        vm: &VirtualMachine,
+        key: &K,
+    ) -> PyResult<Option<u16>> {
+        let hash = key.key_hash(vm)?;
+        let (entry, _) = self.lookup(vm, key, hash, None)?;
+        let Some(index) = entry.index() else {
+            return Ok(None);
+        };
+        Ok(u16::try_from(index).ok())
+    }
+
+    /// Fast path lookup using a cached entry index (`hint`).
+    ///
+    /// Returns `None` if the hint is stale or the key no longer matches.
+    pub fn get_hint<K: DictKey + ?Sized>(
+        &self,
+        vm: &VirtualMachine,
+        key: &K,
+        hint: usize,
+    ) -> PyResult<Option<T>> {
+        let (entry_key, entry_value) = {
+            let inner = self.read();
+            let Some(Some(entry)) = inner.entries.get(hint) else {
+                return Ok(None);
+            };
+            if key.key_is(&entry.key) {
+                return Ok(Some(entry.value.clone()));
+            }
+            (entry.key.clone(), entry.value.clone())
+        };
+        // key_eq may run Python __eq__, so must be outside the lock.
+        if key.key_eq(vm, &entry_key)? {
+            Ok(Some(entry_value))
+        } else {
+            Ok(None)
+        }
     }
 
     fn _get_inner<K: DictKey + ?Sized>(

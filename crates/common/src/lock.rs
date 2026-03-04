@@ -10,18 +10,28 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "threading")] {
         pub use parking_lot::{RawMutex, RawRwLock, RawThreadId};
 
-        pub use std::sync::{LazyLock, OnceLock as OnceCell};
+        pub use std::sync::OnceLock as OnceCell;
         pub use core::cell::LazyCell;
     } else {
         mod cell_lock;
         pub use cell_lock::{RawCellMutex as RawMutex, RawCellRwLock as RawRwLock, SingleThreadId as RawThreadId};
 
         pub use core::cell::{LazyCell, OnceCell};
+    }
+}
 
-        /// `core::cell::LazyCell` with `Sync` for use in `static` items.
-        /// SAFETY: Without threading, there can be no concurrent access.
+// LazyLock: uses std::sync::LazyLock when std is available (even without
+// threading, because Rust test runner uses parallel threads).
+// Without std, uses a LazyCell wrapper (truly single-threaded only).
+cfg_if::cfg_if! {
+    if #[cfg(any(feature = "threading", feature = "std"))] {
+        pub use std::sync::LazyLock;
+    } else {
         pub struct LazyLock<T, F = fn() -> T>(core::cell::LazyCell<T, F>);
-        // SAFETY: Without threading, there can be no concurrent access.
+        // SAFETY: This branch is only active when both "std" and "threading"
+        // features are absent — i.e., truly single-threaded no_std environments
+        // (e.g., embedded or bare-metal WASM). Without std, the Rust runtime
+        // cannot spawn threads, so Sync is trivially satisfied.
         unsafe impl<T, F> Sync for LazyLock<T, F> {}
 
         impl<T, F: FnOnce() -> T> LazyLock<T, F> {
@@ -95,4 +105,19 @@ pub unsafe fn reinit_rwlock_after_fork<T: ?Sized>(rwlock: &PyRwLock<T>) {
         let raw = rwlock.raw() as *const RawRwLock as *mut u8;
         core::ptr::write_bytes(raw, 0, core::mem::size_of::<RawRwLock>());
     }
+}
+
+/// Reset a `PyThreadMutex` to its initial (unlocked, unowned) state after `fork()`.
+///
+/// `PyThreadMutex` is used by buffered IO objects (`BufferedReader`,
+/// `BufferedWriter`, `TextIOWrapper`). If a dead parent thread held one of
+/// these locks during `fork()`, the child would deadlock on any IO operation.
+///
+/// # Safety
+///
+/// Must only be called from the single-threaded child process immediately
+/// after `fork()`, before any other thread is created.
+#[cfg(unix)]
+pub unsafe fn reinit_thread_mutex_after_fork<T: ?Sized>(mutex: &PyThreadMutex<T>) {
+    unsafe { mutex.raw().reinit_after_fork() }
 }

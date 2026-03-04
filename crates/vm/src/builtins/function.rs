@@ -5,8 +5,6 @@ use super::{
     PyAsyncGen, PyCode, PyCoroutine, PyDictRef, PyGenerator, PyModule, PyStr, PyStrRef, PyTuple,
     PyTupleRef, PyType,
 };
-#[cfg(feature = "jit")]
-use crate::common::lock::OnceCell;
 use crate::common::lock::PyMutex;
 use crate::function::ArgMapping;
 use crate::object::{PyAtomicRef, Traverse, TraverseFn};
@@ -75,7 +73,7 @@ pub struct PyFunction {
     doc: PyMutex<PyObjectRef>,
     func_version: AtomicU32,
     #[cfg(feature = "jit")]
-    jitted_code: OnceCell<CompiledCode>,
+    jitted_code: PyMutex<Option<CompiledCode>>,
 }
 
 static FUNC_VERSION_COUNTER: AtomicU32 = AtomicU32::new(1);
@@ -214,7 +212,7 @@ impl PyFunction {
             doc: PyMutex::new(doc),
             func_version: AtomicU32::new(next_func_version()),
             #[cfg(feature = "jit")]
-            jitted_code: OnceCell::new(),
+            jitted_code: PyMutex::new(None),
         };
         Ok(func)
     }
@@ -238,7 +236,7 @@ impl PyFunction {
         // https://github.com/python/cpython/blob/main/Python/ceval.c#L3681
 
         // SAFETY: Frame was just created and not yet executing.
-        let fastlocals = unsafe { frame.fastlocals.borrow_mut() };
+        let fastlocals = unsafe { frame.fastlocals_mut() };
 
         let mut args_iter = func_args.args.into_iter();
 
@@ -538,7 +536,7 @@ impl Py<PyFunction> {
         vm: &VirtualMachine,
     ) -> PyResult {
         #[cfg(feature = "jit")]
-        if let Some(jitted_code) = self.jitted_code.get() {
+        if let Some(jitted_code) = self.jitted_code.lock().as_ref() {
             use crate::convert::ToPyObject;
             match jit::get_jit_args(self, &func_args, jitted_code, vm) {
                 Ok(args) => {
@@ -564,6 +562,7 @@ impl Py<PyFunction> {
 
         let is_gen = code.flags.contains(bytecode::CodeFlags::GENERATOR);
         let is_coro = code.flags.contains(bytecode::CodeFlags::COROUTINE);
+        let use_datastack = !(is_gen || is_coro);
 
         // Construct frame:
         let frame = Frame::new(
@@ -572,6 +571,7 @@ impl Py<PyFunction> {
             self.builtins.clone(),
             self.closure.as_ref().map_or(&[], |c| c.as_slice()),
             Some(self.to_owned().into()),
+            use_datastack,
             vm,
         )
         .into_ref(&vm.ctx);
@@ -596,7 +596,16 @@ impl Py<PyFunction> {
                 frame.set_generator(&obj);
                 Ok(obj)
             }
-            (false, false) => vm.run_frame(frame),
+            (false, false) => {
+                let result = vm.run_frame(frame.clone());
+                // Release data stack memory after frame execution completes.
+                unsafe {
+                    if let Some(base) = frame.materialize_localsplus() {
+                        vm.datastack_pop(base);
+                    }
+                }
+                result
+            }
         }
     }
 
@@ -667,13 +676,14 @@ impl Py<PyFunction> {
             self.builtins.clone(),
             self.closure.as_ref().map_or(&[], |c| c.as_slice()),
             Some(self.to_owned().into()),
+            true, // Always use datastack (invoke_exact_args is never gen/coro)
             vm,
         )
         .into_ref(&vm.ctx);
 
         // Move args directly into fastlocals (no clone/refcount needed)
         {
-            let fastlocals = unsafe { frame.fastlocals.borrow_mut() };
+            let fastlocals = unsafe { frame.fastlocals_mut() };
             for (slot, arg) in fastlocals.iter_mut().zip(args.drain(..)) {
                 *slot = Some(arg);
             }
@@ -681,14 +691,20 @@ impl Py<PyFunction> {
 
         // Handle cell2arg
         if let Some(cell2arg) = code.cell2arg.as_deref() {
-            let fastlocals = unsafe { frame.fastlocals.borrow_mut() };
+            let fastlocals = unsafe { frame.fastlocals_mut() };
             for (cell_idx, arg_idx) in cell2arg.iter().enumerate().filter(|(_, i)| **i != -1) {
                 let x = fastlocals[*arg_idx as usize].take();
                 frame.set_cell_contents(cell_idx, x);
             }
         }
 
-        vm.run_frame(frame)
+        let result = vm.run_frame(frame.clone());
+        unsafe {
+            if let Some(base) = frame.materialize_localsplus() {
+                vm.datastack_pop(base);
+            }
+        }
+        result
     }
 }
 
@@ -711,7 +727,13 @@ impl PyFunction {
 
     #[pygetset(setter)]
     fn set___code__(&self, code: PyRef<PyCode>, vm: &VirtualMachine) {
+        #[cfg(feature = "jit")]
+        let mut jit_guard = self.jitted_code.lock();
         self.code.swap_to_temporary_refs(code, vm);
+        #[cfg(feature = "jit")]
+        {
+            *jit_guard = None;
+        }
         self.func_version.store(0, Relaxed);
     }
 
@@ -948,7 +970,8 @@ impl PyFunction {
     #[cfg(feature = "jit")]
     #[pymethod]
     fn __jit__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<()> {
-        if zelf.jitted_code.get().is_some() {
+        let mut jit_guard = zelf.jitted_code.lock();
+        if jit_guard.is_some() {
             return Ok(());
         }
         let arg_types = jit::get_jit_arg_types(&zelf, vm)?;
@@ -956,7 +979,7 @@ impl PyFunction {
         let code: &Py<PyCode> = &zelf.code;
         let compiled = rustpython_jit::compile(&code.code, &arg_types, ret_type)
             .map_err(|err| jit::new_jit_error(err.to_string(), vm))?;
-        let _ = zelf.jitted_code.set(compiled);
+        *jit_guard = Some(compiled);
         Ok(())
     }
 }
@@ -1129,6 +1152,16 @@ impl PyBoundMethod {
         Self { object, function }
     }
 
+    #[inline]
+    pub(crate) fn function_obj(&self) -> &PyObjectRef {
+        &self.function
+    }
+
+    #[inline]
+    pub(crate) fn self_obj(&self) -> &PyObjectRef {
+        &self.object
+    }
+
     #[deprecated(note = "Use `Self::new(object, function).into_ref(ctx)` instead")]
     pub fn new_ref(object: PyObjectRef, function: PyObjectRef, ctx: &Context) -> PyRef<Self> {
         Self::new(object, function).into_ref(ctx)
@@ -1278,37 +1311,44 @@ pub(crate) fn vectorcall_function(
         // FAST PATH: simple positional-only call, exact arg count.
         // Move owned args directly into fastlocals — no clone needed.
         let locals = if code.flags.contains(bytecode::CodeFlags::NEWLOCALS) {
-            ArgMapping::from_dict_exact(vm.ctx.new_dict())
+            None // lazy allocation — most frames never access locals dict
         } else {
-            ArgMapping::from_dict_exact(zelf.globals.clone())
+            Some(ArgMapping::from_dict_exact(zelf.globals.clone()))
         };
 
         let frame = Frame::new(
             code.to_owned(),
-            Scope::new(Some(locals), zelf.globals.clone()),
+            Scope::new(locals, zelf.globals.clone()),
             zelf.builtins.clone(),
             zelf.closure.as_ref().map_or(&[], |c| c.as_slice()),
             Some(zelf.to_owned().into()),
+            true, // Always use datastack (is_simple excludes gen/coro)
             vm,
         )
         .into_ref(&vm.ctx);
 
         {
-            let fastlocals = unsafe { frame.fastlocals.borrow_mut() };
+            let fastlocals = unsafe { frame.fastlocals_mut() };
             for (slot, arg) in fastlocals.iter_mut().zip(args.drain(..nargs)) {
                 *slot = Some(arg);
             }
         }
 
         if let Some(cell2arg) = code.cell2arg.as_deref() {
-            let fastlocals = unsafe { frame.fastlocals.borrow_mut() };
+            let fastlocals = unsafe { frame.fastlocals_mut() };
             for (cell_idx, arg_idx) in cell2arg.iter().enumerate().filter(|(_, i)| **i != -1) {
                 let x = fastlocals[*arg_idx as usize].take();
                 frame.set_cell_contents(cell_idx, x);
             }
         }
 
-        return vm.run_frame(frame);
+        let result = vm.run_frame(frame.clone());
+        unsafe {
+            if let Some(base) = frame.materialize_localsplus() {
+                vm.datastack_pop(base);
+            }
+        }
+        return result;
     }
 
     // SLOW PATH: construct FuncArgs from owned Vec and delegate to invoke()

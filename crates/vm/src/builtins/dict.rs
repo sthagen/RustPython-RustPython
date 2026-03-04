@@ -26,6 +26,8 @@ use crate::{
     vm::VirtualMachine,
 };
 use alloc::fmt;
+use core::cell::Cell;
+use core::ptr::NonNull;
 use rustpython_common::lock::PyMutex;
 use rustpython_common::wtf8::Wtf8Buf;
 
@@ -60,10 +62,42 @@ impl fmt::Debug for PyDict {
     }
 }
 
+thread_local! {
+    static DICT_FREELIST: Cell<crate::object::FreeList<PyDict>> = const { Cell::new(crate::object::FreeList::new()) };
+}
+
 impl PyPayload for PyDict {
+    const MAX_FREELIST: usize = 80;
+    const HAS_FREELIST: bool = true;
+
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.dict_type
+    }
+
+    #[inline]
+    unsafe fn freelist_push(obj: *mut PyObject) -> bool {
+        DICT_FREELIST.with(|fl| {
+            let mut list = fl.take();
+            let stored = if list.len() < Self::MAX_FREELIST {
+                list.push(obj);
+                true
+            } else {
+                false
+            };
+            fl.set(list);
+            stored
+        })
+    }
+
+    #[inline]
+    unsafe fn freelist_pop() -> Option<NonNull<PyObject>> {
+        DICT_FREELIST.with(|fl| {
+            let mut list = fl.take();
+            let result = list.pop().map(|p| unsafe { NonNull::new_unchecked(p) });
+            fl.set(list);
+            result
+        })
     }
 }
 
@@ -631,6 +665,33 @@ impl Py<PyDict> {
                 }
                 Err(e) => Err(e),
             }
+        }
+    }
+
+    /// Return a cached-entry hint for exact dict fast paths.
+    pub(crate) fn hint_for_key<K: DictKey + ?Sized>(
+        &self,
+        key: &K,
+        vm: &VirtualMachine,
+    ) -> PyResult<Option<u16>> {
+        if self.exact_dict(vm) {
+            self.entries.hint_for_key(vm, key)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Fast lookup using a cached entry index hint.
+    pub(crate) fn get_item_opt_hint<K: DictKey + ?Sized>(
+        &self,
+        key: &K,
+        hint: u16,
+        vm: &VirtualMachine,
+    ) -> PyResult<Option<PyObjectRef>> {
+        if self.exact_dict(vm) {
+            self.entries.get_hint(vm, key, usize::from(hint))
+        } else {
+            self.get_item_opt(key, vm)
         }
     }
 
