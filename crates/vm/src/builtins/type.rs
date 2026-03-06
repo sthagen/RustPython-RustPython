@@ -64,10 +64,9 @@ static NEXT_TYPE_VERSION: AtomicU32 = AtomicU32::new(1);
 // Method cache (type_cache / MCACHE): direct-mapped cache keyed by
 // (tp_version_tag, interned_name_ptr).
 //
-// Uses a lock-free SeqLock pattern:
-//  - version acts as both cache key AND sequence counter
-//  - Read: load version (Acquire), read value ptr, re-check version
-//  - Write: set version=0 (invalidate), store value, store version (Release)
+// Uses a lock-free SeqLock pattern for the read/write protocol:
+//  - Readers validate sequence/version/name before and after the value read.
+//  - Writers bracket updates with sequence odd/even transitions.
 // No mutex needed on the hot path (cache hit).
 
 const TYPE_CACHE_SIZE_EXP: u32 = 12;
@@ -75,6 +74,8 @@ const TYPE_CACHE_SIZE: usize = 1 << TYPE_CACHE_SIZE_EXP;
 const TYPE_CACHE_MASK: usize = TYPE_CACHE_SIZE - 1;
 
 struct TypeCacheEntry {
+    /// Sequence lock (odd = write in progress, even = quiescent).
+    sequence: AtomicU32,
     /// tp_version_tag at cache time. 0 = empty/invalid.
     version: AtomicU32,
     /// Interned attribute name pointer (pointer equality check).
@@ -94,10 +95,58 @@ unsafe impl Sync for TypeCacheEntry {}
 impl TypeCacheEntry {
     fn new() -> Self {
         Self {
+            sequence: AtomicU32::new(0),
             version: AtomicU32::new(0),
             name: AtomicPtr::new(core::ptr::null_mut()),
             value: AtomicPtr::new(core::ptr::null_mut()),
         }
+    }
+
+    #[inline]
+    fn begin_write(&self) {
+        let mut seq = self.sequence.load(Ordering::Acquire);
+        loop {
+            while (seq & 1) != 0 {
+                core::hint::spin_loop();
+                seq = self.sequence.load(Ordering::Acquire);
+            }
+            match self.sequence.compare_exchange_weak(
+                seq,
+                seq.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    core::sync::atomic::fence(Ordering::Release);
+                    break;
+                }
+                Err(observed) => {
+                    core::hint::spin_loop();
+                    seq = observed;
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn end_write(&self) {
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    #[inline]
+    fn begin_read(&self) -> u32 {
+        let mut sequence = self.sequence.load(Ordering::Acquire);
+        while (sequence & 1) != 0 {
+            core::hint::spin_loop();
+            sequence = self.sequence.load(Ordering::Acquire);
+        }
+        sequence
+    }
+
+    #[inline]
+    fn end_read(&self, previous: u32) -> bool {
+        core::sync::atomic::fence(Ordering::Acquire);
+        self.sequence.load(Ordering::Relaxed) == previous
     }
 
     /// Take the value out of this entry, returning the owned PyObjectRef.
@@ -137,10 +186,14 @@ fn type_cache_clear_version(version: u32) {
     let mut to_drop = Vec::new();
     for entry in TYPE_CACHE.iter() {
         if entry.version.load(Ordering::Relaxed) == version {
-            entry.version.store(0, Ordering::Release);
-            if let Some(v) = entry.take_value() {
-                to_drop.push(v);
+            entry.begin_write();
+            if entry.version.load(Ordering::Relaxed) == version {
+                entry.version.store(0, Ordering::Release);
+                if let Some(v) = entry.take_value() {
+                    to_drop.push(v);
+                }
             }
+            entry.end_write();
         }
     }
     drop(to_drop);
@@ -158,10 +211,12 @@ pub fn type_cache_clear() {
     // Invalidate all entries and collect values.
     let mut to_drop = Vec::new();
     for entry in TYPE_CACHE.iter() {
+        entry.begin_write();
         entry.version.store(0, Ordering::Release);
         if let Some(v) = entry.take_value() {
             to_drop.push(v);
         }
+        entry.end_write();
     }
     drop(to_drop);
     TYPE_CACHE_CLEARING.store(false, Ordering::Release);
@@ -507,6 +562,14 @@ impl PyType {
             slots.flags |= PyTypeFlags::HAS_DICT
         }
 
+        // Inherit HAS_WEAKREF from any base in MRO that has it
+        if mro
+            .iter()
+            .any(|b| b.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF))
+        {
+            slots.flags |= PyTypeFlags::HAS_WEAKREF
+        }
+
         // Inherit SEQUENCE and MAPPING flags from base classes
         Self::inherit_patma_flags(&mut slots, &bases);
 
@@ -567,6 +630,9 @@ impl PyType {
     ) -> Result<PyRef<Self>, String> {
         if base.slots.flags.has_feature(PyTypeFlags::HAS_DICT) {
             slots.flags |= PyTypeFlags::HAS_DICT
+        }
+        if base.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF) {
+            slots.flags |= PyTypeFlags::HAS_WEAKREF
         }
 
         // Inherit SEQUENCE and MAPPING flags from base class
@@ -701,8 +767,11 @@ impl PyType {
     }
 
     pub fn set_attr(&self, attr_name: &'static PyStrInterned, value: PyObjectRef) {
-        self.attributes.write().insert(attr_name, value);
+        // Invalidate caches BEFORE modifying attributes so that cached
+        // descriptor pointers are still alive when type_cache_clear_version
+        // drops the cache's strong references.
         self.modified();
+        self.attributes.write().insert(attr_name, value);
     }
 
     /// Internal get_attr implementation for fast lookup on a class.
@@ -718,41 +787,43 @@ impl PyType {
     /// find_name_in_mro with method cache (MCACHE).
     /// Looks in tp_dict of types in MRO, bypasses descriptors.
     ///
-    /// Uses a lock-free SeqLock pattern keyed by version:
-    ///   Read:  load version → check name → load value → clone → re-check version
-    ///   Write: version=0 → swap value → set name → version=assigned
+    /// Uses a lock-free SeqLock-style pattern:
+    ///   Read:  load sequence/version/name → load value + try_to_owned →
+    ///          validate value pointer + sequence
+    ///   Write: sequence(begin) → version=0 → swap value/name → version=assigned → sequence(end)
     fn find_name_in_mro(&self, name: &'static PyStrInterned) -> Option<PyObjectRef> {
         let version = self.tp_version_tag.load(Ordering::Acquire);
         if version != 0 {
             let idx = type_cache_hash(version, name);
             let entry = &TYPE_CACHE[idx];
-            let v1 = entry.version.load(Ordering::Acquire);
-            if v1 == version
-                && core::ptr::eq(
-                    entry.name.load(Ordering::Relaxed),
-                    name as *const _ as *mut _,
-                )
-            {
+            let name_ptr = name as *const _ as *mut _;
+            loop {
+                let seq1 = entry.begin_read();
+                let v1 = entry.version.load(Ordering::Acquire);
+                let type_version = self.tp_version_tag.load(Ordering::Acquire);
+                if v1 != type_version
+                    || !core::ptr::eq(entry.name.load(Ordering::Relaxed), name_ptr)
+                {
+                    break;
+                }
                 let ptr = entry.value.load(Ordering::Acquire);
-                if !ptr.is_null() {
-                    // SAFETY: The value pointer was stored via PyObjectRef::into_raw
-                    // and is valid as long as the version hasn't changed. We create
-                    // a temporary reference (ManuallyDrop prevents decrement), clone
-                    // it to get our own strong reference, then re-check the version
-                    // to confirm the entry wasn't invalidated during our read.
-                    let cloned = unsafe {
-                        let tmp = core::mem::ManuallyDrop::new(PyObjectRef::from_raw(
-                            NonNull::new_unchecked(ptr),
-                        ));
-                        (*tmp).clone()
-                    };
-                    // SeqLock validation: if version changed, discard our clone
-                    let v2 = entry.version.load(Ordering::Acquire);
-                    if v2 == v1 {
+                if ptr.is_null() {
+                    if entry.end_read(seq1) {
+                        break;
+                    }
+                    continue;
+                }
+                // _Py_TryIncrefCompare-style validation:
+                // safe_inc via raw pointer, then ensure source is unchanged.
+                if let Some(cloned) = unsafe { PyObject::try_to_owned_from_ptr(ptr) } {
+                    let same_ptr = core::ptr::eq(entry.value.load(Ordering::Relaxed), ptr);
+                    if same_ptr && entry.end_read(seq1) {
                         return Some(cloned);
                     }
                     drop(cloned);
+                    continue;
                 }
+                break;
             }
         }
 
@@ -777,16 +848,17 @@ impl PyType {
         {
             let idx = type_cache_hash(assigned, name);
             let entry = &TYPE_CACHE[idx];
+            let name_ptr = name as *const _ as *mut _;
+            entry.begin_write();
             // Invalidate first to prevent readers from seeing partial state
             entry.version.store(0, Ordering::Release);
             // Swap in new value (refcount held by cache)
             let new_ptr = found.clone().into_raw().as_ptr();
             let old_ptr = entry.value.swap(new_ptr, Ordering::Relaxed);
-            entry
-                .name
-                .store(name as *const _ as *mut _, Ordering::Relaxed);
+            entry.name.store(name_ptr, Ordering::Relaxed);
             // Activate entry — Release ensures value/name writes are visible
             entry.version.store(assigned, Ordering::Release);
+            entry.end_write();
             // Drop previous occupant (its version was already invalidated)
             if !old_ptr.is_null() {
                 unsafe {
@@ -832,20 +904,24 @@ impl PyType {
         if version != 0 {
             let idx = type_cache_hash(version, name);
             let entry = &TYPE_CACHE[idx];
-            let v1 = entry.version.load(Ordering::Acquire);
-            if v1 == version
-                && core::ptr::eq(
-                    entry.name.load(Ordering::Relaxed),
-                    name as *const _ as *mut _,
-                )
-            {
+            let name_ptr = name as *const _ as *mut _;
+            loop {
+                let seq1 = entry.begin_read();
+                let v1 = entry.version.load(Ordering::Acquire);
+                let type_version = self.tp_version_tag.load(Ordering::Acquire);
+                if v1 != type_version
+                    || !core::ptr::eq(entry.name.load(Ordering::Relaxed), name_ptr)
+                {
+                    break;
+                }
                 let ptr = entry.value.load(Ordering::Acquire);
-                if !ptr.is_null() {
-                    let v2 = entry.version.load(Ordering::Acquire);
-                    if v2 == v1 {
+                if entry.end_read(seq1) {
+                    if !ptr.is_null() {
                         return true;
                     }
+                    break;
                 }
+                continue;
             }
         }
 
@@ -1018,7 +1094,7 @@ impl Py<PyType> {
         AsNumber,
         Representable
     ),
-    flags(BASETYPE)
+    flags(BASETYPE, HAS_DICT, HAS_WEAKREF)
 )]
 impl PyType {
     #[pygetset]
@@ -1498,8 +1574,8 @@ impl PyType {
             PySetterValue::Assign(ref val) => {
                 let key = identifier!(vm, __type_params__);
                 self.check_set_special_type_attr(key, vm)?;
-                self.attributes.write().insert(key, val.clone().into());
                 self.modified();
+                self.attributes.write().insert(key, val.clone().into());
             }
             PySetterValue::Delete => {
                 // For delete, we still need to check if the type is immutable
@@ -1510,8 +1586,8 @@ impl PyType {
                     )));
                 }
                 let key = identifier!(vm, __type_params__);
-                self.attributes.write().shift_remove(&key);
                 self.modified();
+                self.attributes.write().shift_remove(&key);
             }
         }
         Ok(())
@@ -1644,140 +1720,124 @@ impl Constructor for PyType {
             attributes.insert(identifier!(vm, __hash__), vm.ctx.none.clone().into());
         }
 
-        let (heaptype_slots, add_dict): (Option<PyRef<PyTuple<PyStrRef>>>, bool) =
-            if let Some(x) = attributes.get(identifier!(vm, __slots__)) {
-                // Check if __slots__ is bytes - not allowed
-                if x.class().is(vm.ctx.types.bytes_type) {
-                    return Err(vm.new_type_error("__slots__ items must be strings, not 'bytes'"));
-                }
+        let (heaptype_slots, add_dict, add_weakref): (
+            Option<PyRef<PyTuple<PyStrRef>>>,
+            bool,
+            bool,
+        ) = if let Some(x) = attributes.get(identifier!(vm, __slots__)) {
+            // Check if __slots__ is bytes - not allowed
+            if x.class().is(vm.ctx.types.bytes_type) {
+                return Err(vm.new_type_error("__slots__ items must be strings, not 'bytes'"));
+            }
 
-                let slots = if x.class().is(vm.ctx.types.str_type) {
-                    let x = unsafe { x.downcast_unchecked_ref::<PyStr>() };
-                    PyTuple::new_ref_typed(vec![x.to_owned()], &vm.ctx)
-                } else {
-                    let iter = x.get_iter(vm)?;
-                    let elements = {
-                        let mut elements = Vec::new();
-                        while let PyIterReturn::Return(element) = iter.next(vm)? {
-                            // Check if any slot item is bytes
-                            if element.class().is(vm.ctx.types.bytes_type) {
-                                return Err(vm.new_type_error(
-                                    "__slots__ items must be strings, not 'bytes'",
-                                ));
-                            }
-                            elements.push(element);
-                        }
-                        elements
-                    };
-                    let tuple = elements.into_pytuple(vm);
-                    tuple.try_into_typed(vm)?
-                };
-
-                // Check if base has itemsize > 0 - can't add arbitrary slots to variable-size types
-                // Types like int, bytes, tuple have itemsize > 0 and don't allow custom slots
-                // But types like weakref.ref have itemsize = 0 and DO allow slots
-                let has_custom_slots = slots
-                    .iter()
-                    .any(|s| !matches!(s.as_bytes(), b"__dict__" | b"__weakref__"));
-                if has_custom_slots && base.slots.itemsize > 0 {
-                    return Err(vm.new_type_error(format!(
-                        "nonempty __slots__ not supported for subtype of '{}'",
-                        base.name()
-                    )));
-                }
-
-                // Validate slot names and track duplicates
-                let mut seen_dict = false;
-                let mut seen_weakref = false;
-                for slot in slots.iter() {
-                    // Use isidentifier for validation (handles Unicode properly)
-                    if !slot.isidentifier() {
-                        return Err(vm.new_type_error("__slots__ must be identifiers"));
-                    }
-
-                    let slot_name = slot.as_bytes();
-
-                    // Check for duplicate __dict__
-                    if slot_name == b"__dict__" {
-                        if seen_dict {
+            let slots = if x.class().is(vm.ctx.types.str_type) {
+                let x = unsafe { x.downcast_unchecked_ref::<PyStr>() };
+                PyTuple::new_ref_typed(vec![x.to_owned()], &vm.ctx)
+            } else {
+                let iter = x.get_iter(vm)?;
+                let elements = {
+                    let mut elements = Vec::new();
+                    while let PyIterReturn::Return(element) = iter.next(vm)? {
+                        // Check if any slot item is bytes
+                        if element.class().is(vm.ctx.types.bytes_type) {
                             return Err(
-                                vm.new_type_error("__dict__ slot disallowed: we already got one")
+                                vm.new_type_error("__slots__ items must be strings, not 'bytes'")
                             );
                         }
-                        seen_dict = true;
+                        elements.push(element);
                     }
+                    elements
+                };
+                let tuple = elements.into_pytuple(vm);
+                tuple.try_into_typed(vm)?
+            };
 
-                    // Check for duplicate __weakref__
-                    if slot_name == b"__weakref__" {
-                        if seen_weakref {
-                            return Err(vm.new_type_error(
-                                "__weakref__ slot disallowed: we already got one",
-                            ));
-                        }
-                        seen_weakref = true;
-                    }
+            // Check if base has itemsize > 0 - can't add arbitrary slots to variable-size types
+            // Types like int, bytes, tuple have itemsize > 0 and don't allow custom slots
+            // But types like weakref.ref have itemsize = 0 and DO allow slots
+            let has_custom_slots = slots
+                .iter()
+                .any(|s| !matches!(s.as_bytes(), b"__dict__" | b"__weakref__"));
+            if has_custom_slots && base.slots.itemsize > 0 {
+                return Err(vm.new_type_error(format!(
+                    "nonempty __slots__ not supported for subtype of '{}'",
+                    base.name()
+                )));
+            }
 
-                    // Check if slot name conflicts with class attributes
-                    if attributes.contains_key(vm.ctx.intern_str(slot.as_wtf8())) {
-                        return Err(vm.new_value_error(format!(
-                            "'{}' in __slots__ conflicts with a class variable",
-                            slot.as_wtf8()
-                        )));
-                    }
+            // Validate slot names and track duplicates
+            let mut seen_dict = false;
+            let mut seen_weakref = false;
+            for slot in slots.iter() {
+                // Use isidentifier for validation (handles Unicode properly)
+                if !slot.isidentifier() {
+                    return Err(vm.new_type_error("__slots__ must be identifiers"));
                 }
 
-                // Check if base class already has __dict__ - can't redefine it
-                if seen_dict && base.slots.flags.has_feature(PyTypeFlags::HAS_DICT) {
-                    return Err(vm.new_type_error("__dict__ slot disallowed: we already got one"));
+                let slot_name = slot.as_bytes();
+
+                // Check for duplicate __dict__
+                if slot_name == b"__dict__" {
+                    if seen_dict {
+                        return Err(
+                            vm.new_type_error("__dict__ slot disallowed: we already got one")
+                        );
+                    }
+                    seen_dict = true;
                 }
 
-                // Check if base class already has __weakref__ - can't redefine it
-                // A base has weakref support if:
-                // 1. It's a heap type without explicit __slots__ (automatic weakref), OR
-                // 2. It's a heap type with __weakref__ in its __slots__
-                if seen_weakref {
-                    let base_has_weakref = if let Some(ref ext) = base.heaptype_ext {
-                        match &ext.slots {
-                            // Heap type without __slots__ - has automatic weakref
-                            None => true,
-                            // Heap type with __slots__ - check if __weakref__ is in slots
-                            Some(base_slots) => {
-                                base_slots.iter().any(|s| s.as_bytes() == b"__weakref__")
-                            }
-                        }
-                    } else {
-                        // Builtin type - check if it has __weakref__ descriptor
-                        let weakref_name = vm.ctx.intern_str("__weakref__");
-                        base.attributes.read().contains_key(weakref_name)
-                    };
-
-                    if base_has_weakref {
+                // Check for duplicate __weakref__
+                if slot_name == b"__weakref__" {
+                    if seen_weakref {
                         return Err(
                             vm.new_type_error("__weakref__ slot disallowed: we already got one")
                         );
                     }
+                    seen_weakref = true;
                 }
 
-                // Check if __dict__ is in slots
-                let dict_name = "__dict__";
-                let has_dict = slots.iter().any(|s| s.as_wtf8() == dict_name);
+                // Check if slot name conflicts with class attributes
+                if attributes.contains_key(vm.ctx.intern_str(slot.as_wtf8())) {
+                    return Err(vm.new_value_error(format!(
+                        "'{}' in __slots__ conflicts with a class variable",
+                        slot.as_wtf8()
+                    )));
+                }
+            }
 
-                // Filter out __dict__ from slots
-                let filtered_slots = if has_dict {
-                    let filtered: Vec<PyStrRef> = slots
-                        .iter()
-                        .filter(|s| s.as_wtf8() != dict_name)
-                        .cloned()
-                        .collect();
-                    PyTuple::new_ref_typed(filtered, &vm.ctx)
-                } else {
-                    slots
-                };
+            // Check if base class already has __dict__ - can't redefine it
+            if seen_dict && base.slots.flags.has_feature(PyTypeFlags::HAS_DICT) {
+                return Err(vm.new_type_error("__dict__ slot disallowed: we already got one"));
+            }
 
-                (Some(filtered_slots), has_dict)
+            // Check if base class already has __weakref__ - can't redefine it
+            if seen_weakref && base.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF) {
+                return Err(vm.new_type_error("__weakref__ slot disallowed: we already got one"));
+            }
+
+            // Check if __dict__ or __weakref__ is in slots
+            let dict_name = "__dict__";
+            let weakref_name = "__weakref__";
+            let has_dict = slots.iter().any(|s| s.as_wtf8() == dict_name);
+            let add_weakref = seen_weakref;
+
+            // Filter out __dict__ and __weakref__ from slots
+            // (they become descriptors, not member slots)
+            let filtered_slots = if has_dict || add_weakref {
+                let filtered: Vec<PyStrRef> = slots
+                    .iter()
+                    .filter(|s| s.as_wtf8() != dict_name && s.as_wtf8() != weakref_name)
+                    .cloned()
+                    .collect();
+                PyTuple::new_ref_typed(filtered, &vm.ctx)
             } else {
-                (None, false)
+                slots
             };
+
+            (Some(filtered_slots), has_dict, add_weakref)
+        } else {
+            (None, false, false)
+        };
 
         // FIXME: this is a temporary fix. multi bases with multiple slots will break object
         let base_member_count = bases
@@ -1800,6 +1860,14 @@ impl Constructor for PyType {
         // 2. __dict__ is in __slots__
         if (heaptype_slots.is_none() && may_add_dict) || add_dict {
             flags |= PyTypeFlags::HAS_DICT | PyTypeFlags::MANAGED_DICT;
+        }
+
+        // Add HAS_WEAKREF if:
+        // 1. __slots__ is not defined (automatic weakref support), OR
+        // 2. __weakref__ is in __slots__
+        let may_add_weakref = !base.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF);
+        if (heaptype_slots.is_none() && may_add_weakref) || add_weakref {
+            flags |= PyTypeFlags::HAS_WEAKREF;
         }
 
         let (slots, heaptype_ext) = {
@@ -1896,6 +1964,29 @@ impl Constructor for PyType {
                         vm.ctx
                             .new_getset("__dict__", &typ, subtype_get_dict, subtype_set_dict);
                     typ.attributes.write().insert(__dict__, descriptor.into());
+                }
+            }
+        }
+
+        // Add __weakref__ descriptor for types with HAS_WEAKREF
+        if typ.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF) {
+            let __weakref__ = vm.ctx.intern_str("__weakref__");
+            let has_inherited_weakref = typ
+                .mro
+                .read()
+                .iter()
+                .any(|base| base.attributes.read().contains_key(&__weakref__));
+            if !typ.attributes.read().contains_key(&__weakref__) && !has_inherited_weakref {
+                unsafe {
+                    let descriptor = vm.ctx.new_getset(
+                        "__weakref__",
+                        &typ,
+                        subtype_get_weakref,
+                        subtype_set_weakref,
+                    );
+                    typ.attributes
+                        .write()
+                        .insert(__weakref__, descriptor.into());
                 }
             }
         }
@@ -2333,6 +2424,21 @@ fn subtype_set_dict(obj: PyObjectRef, value: PyObjectRef, vm: &VirtualMachine) -
         object::object_set_dict(obj, value.try_into_value(vm)?, vm)?;
         Ok(())
     }
+}
+
+// subtype_get_weakref
+fn subtype_get_weakref(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+    // Return the first weakref in the weakref list, or None
+    let weakref = obj.get_weakrefs();
+    Ok(weakref.unwrap_or_else(|| vm.ctx.none()))
+}
+
+// subtype_set_weakref: __weakref__ is read-only
+fn subtype_set_weakref(obj: PyObjectRef, _value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+    Err(vm.new_attribute_error(format!(
+        "attribute '__weakref__' of '{}' objects is not writable",
+        obj.class().name()
+    )))
 }
 
 /*

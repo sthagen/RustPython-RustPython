@@ -22,7 +22,7 @@ use crate::{
         self, PyBaseExceptionRef, PyDict, PyDictRef, PyInt, PyList, PyModule, PyStr, PyStrInterned,
         PyStrRef, PyTypeRef, PyUtf8Str, PyUtf8StrInterned, PyWeak,
         code::PyCode,
-        dict::{PyDictItems, PyDictKeys, PyDictValues},
+        dict::{PyDictItems, PyDictValues},
         pystr::AsPyStr,
         tuple::PyTuple,
     },
@@ -1319,10 +1319,6 @@ impl VirtualMachine {
         } else if cls.is(self.ctx.types.list_type) {
             list_borrow = value.downcast_ref::<PyList>().unwrap().borrow_vec();
             &list_borrow
-        } else if cls.is(self.ctx.types.dict_keys_type) {
-            // Atomic snapshot of dict keys - prevents race condition during iteration
-            let keys = value.downcast_ref::<PyDictKeys>().unwrap().dict.keys_vec();
-            return keys.into_iter().map(func).collect();
         } else if cls.is(self.ctx.types.dict_values_type) {
             // Atomic snapshot of dict values - prevents race condition during iteration
             let values = value
@@ -1479,6 +1475,13 @@ impl VirtualMachine {
     /// Checks for triggered signals and calls the appropriate handlers. A no-op on
     /// platforms where signals are not supported.
     pub fn check_signals(&self) -> PyResult<()> {
+        #[cfg(feature = "threading")]
+        if self.state.finalizing.load(Ordering::Acquire) && !self.is_main_thread() {
+            // once finalization starts,
+            // non-main Python threads should stop running bytecode.
+            return Err(self.new_exception(self.ctx.exceptions.system_exit.to_owned(), vec![]));
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             crate::signal::check_signals(self)
