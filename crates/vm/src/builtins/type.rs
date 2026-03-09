@@ -11,7 +11,7 @@ use crate::{
             MemberGetter, MemberKind, MemberSetter, PyDescriptorOwned, PyMemberDef,
             PyMemberDescriptor,
         },
-        function::PyCellRef,
+        function::{PyCellRef, PyFunction},
         tuple::{IntoPyTuple, PyTuple},
     },
     class::{PyClassImpl, StaticType},
@@ -81,7 +81,12 @@ struct TypeCacheEntry {
     /// Interned attribute name pointer (pointer equality check).
     name: AtomicPtr<PyStrInterned>,
     /// Cached lookup result as raw pointer. null = empty.
-    /// The cache holds a strong reference (refcount incremented).
+    /// The cache holds a **borrowed** pointer (no refcount increment).
+    /// Safety: `type_cache_clear()` nullifies all entries during GC,
+    /// and `type_cache_clear_version()` nullifies entries when a type
+    /// is modified — both before the source dict entry is removed.
+    /// Types are always part of reference cycles (via `mro` self-reference)
+    /// so they are always collected by the cyclic GC (never refcount-freed).
     value: AtomicPtr<PyObject>,
 }
 
@@ -149,13 +154,11 @@ impl TypeCacheEntry {
         self.sequence.load(Ordering::Relaxed) == previous
     }
 
-    /// Take the value out of this entry, returning the owned PyObjectRef.
+    /// Null out the cached value pointer.
     /// Caller must ensure no concurrent reads can observe this entry
     /// (version should be set to 0 first).
-    fn take_value(&self) -> Option<PyObjectRef> {
-        let ptr = self.value.swap(core::ptr::null_mut(), Ordering::Relaxed);
-        // SAFETY: non-null ptr was stored via PyObjectRef::into_raw
-        NonNull::new(ptr).map(|nn| unsafe { PyObjectRef::from_raw(nn) })
+    fn clear_value(&self) {
+        self.value.store(core::ptr::null_mut(), Ordering::Relaxed);
     }
 }
 
@@ -180,45 +183,36 @@ fn type_cache_hash(version: u32, name: &'static PyStrInterned) -> usize {
     ((version ^ name_hash) as usize) & TYPE_CACHE_MASK
 }
 
-/// Invalidate cache entries for a specific version tag and release values.
+/// Invalidate cache entries for a specific version tag.
 /// Called from modified() when a type is changed.
 fn type_cache_clear_version(version: u32) {
-    let mut to_drop = Vec::new();
     for entry in TYPE_CACHE.iter() {
         if entry.version.load(Ordering::Relaxed) == version {
             entry.begin_write();
             if entry.version.load(Ordering::Relaxed) == version {
                 entry.version.store(0, Ordering::Release);
-                if let Some(v) = entry.take_value() {
-                    to_drop.push(v);
-                }
+                entry.clear_value();
             }
             entry.end_write();
         }
     }
-    drop(to_drop);
 }
 
 /// Clear all method cache entries (_PyType_ClearCache).
-/// Called during GC collection to release strong references that might
-/// prevent cycle collection.
+/// Called during GC collection to nullify borrowed pointers before
+/// the collector breaks cycles.
 ///
 /// Sets TYPE_CACHE_CLEARING to suppress cache re-population during the
 /// entire operation, preventing concurrent lookups from repopulating
 /// entries while we're clearing them.
 pub fn type_cache_clear() {
     TYPE_CACHE_CLEARING.store(true, Ordering::Release);
-    // Invalidate all entries and collect values.
-    let mut to_drop = Vec::new();
     for entry in TYPE_CACHE.iter() {
         entry.begin_write();
         entry.version.store(0, Ordering::Release);
-        if let Some(v) = entry.take_value() {
-            to_drop.push(v);
-        }
+        entry.clear_value();
         entry.end_write();
     }
-    drop(to_drop);
     TYPE_CACHE_CLEARING.store(false, Ordering::Release);
 }
 
@@ -233,6 +227,10 @@ unsafe impl crate::object::Traverse for PyType {
             .iter()
             .map(|(_, v)| v.traverse(tracer_fn))
             .count();
+        if let Some(ext) = self.heaptype_ext.as_ref() {
+            ext.specialization_init.read().traverse(tracer_fn);
+            ext.specialization_getitem.read().traverse(tracer_fn);
+        }
     }
 
     /// type_clear: break reference cycles in type objects
@@ -260,6 +258,20 @@ unsafe impl crate::object::Traverse for PyType {
                 out.push(val);
             }
         }
+        if let Some(ext) = self.heaptype_ext.as_ref() {
+            if let Some(mut guard) = ext.specialization_init.try_write()
+                && let Some(init) = guard.take()
+            {
+                out.push(init.into());
+            }
+            if let Some(mut guard) = ext.specialization_getitem.try_write()
+                && let Some(getitem) = guard.take()
+            {
+                out.push(getitem.into());
+                ext.specialization_getitem_version
+                    .store(0, Ordering::Release);
+            }
+        }
     }
 }
 
@@ -269,6 +281,9 @@ pub struct HeapTypeExt {
     pub qualname: PyRwLock<PyStrRef>,
     pub slots: Option<PyRef<PyTuple<PyStrRef>>>,
     pub type_data: PyRwLock<Option<TypeDataSlot>>,
+    pub specialization_init: PyRwLock<Option<PyRef<PyFunction>>>,
+    pub specialization_getitem: PyRwLock<Option<PyRef<PyFunction>>>,
+    pub specialization_getitem_version: AtomicU32,
 }
 
 pub struct PointerSlot<T>(NonNull<T>);
@@ -396,6 +411,12 @@ impl PyType {
 
     /// Invalidate this type's version tag and cascade to all subclasses.
     pub fn modified(&self) {
+        if let Some(ext) = self.heaptype_ext.as_ref() {
+            *ext.specialization_init.write() = None;
+            *ext.specialization_getitem.write() = None;
+            ext.specialization_getitem_version
+                .store(0, Ordering::Release);
+        }
         // If already invalidated, all subclasses must also be invalidated
         // (guaranteed by the MRO invariant in assign_version_tag).
         let old_version = self.tp_version_tag.load(Ordering::Acquire);
@@ -403,9 +424,8 @@ impl PyType {
             return;
         }
         self.tp_version_tag.store(0, Ordering::SeqCst);
-        // Release strong references held by cache entries for this version.
-        // We hold owned refs that would prevent GC of class attributes after
-        // type deletion.
+        // Nullify borrowed pointers in cache entries for this version
+        // so they don't dangle after the dict is modified.
         type_cache_clear_version(old_version);
         let subclasses = self.subclasses.read();
         for weak_ref in subclasses.iter() {
@@ -450,6 +470,9 @@ impl PyType {
             qualname: PyRwLock::new(name),
             slots: None,
             type_data: PyRwLock::new(None),
+            specialization_init: PyRwLock::new(None),
+            specialization_getitem: PyRwLock::new(None),
+            specialization_getitem_version: AtomicU32::new(0),
         };
         let base = bases[0].clone();
 
@@ -562,12 +585,12 @@ impl PyType {
             slots.flags |= PyTypeFlags::HAS_DICT
         }
 
-        // Inherit HAS_WEAKREF from any base in MRO that has it
+        // Inherit HAS_WEAKREF/MANAGED_WEAKREF from any base in MRO that has it
         if mro
             .iter()
             .any(|b| b.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF))
         {
-            slots.flags |= PyTypeFlags::HAS_WEAKREF
+            slots.flags |= PyTypeFlags::HAS_WEAKREF | PyTypeFlags::MANAGED_WEAKREF
         }
 
         // Inherit SEQUENCE and MAPPING flags from base classes
@@ -581,6 +604,11 @@ impl PyType {
         }
 
         Self::inherit_readonly_slots(&mut slots, &base);
+
+        // Normalize: any type with HAS_WEAKREF gets MANAGED_WEAKREF
+        if slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF) {
+            slots.flags |= PyTypeFlags::MANAGED_WEAKREF;
+        }
 
         if let Some(qualname) = attrs.get(identifier!(ctx, __qualname__))
             && !qualname.fast_isinstance(ctx.types.str_type)
@@ -632,7 +660,7 @@ impl PyType {
             slots.flags |= PyTypeFlags::HAS_DICT
         }
         if base.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF) {
-            slots.flags |= PyTypeFlags::HAS_WEAKREF
+            slots.flags |= PyTypeFlags::HAS_WEAKREF | PyTypeFlags::MANAGED_WEAKREF
         }
 
         // Inherit SEQUENCE and MAPPING flags from base class
@@ -644,6 +672,11 @@ impl PyType {
         }
 
         Self::inherit_readonly_slots(&mut slots, &base);
+
+        // Normalize: any type with HAS_WEAKREF gets MANAGED_WEAKREF
+        if slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF) {
+            slots.flags |= PyTypeFlags::MANAGED_WEAKREF;
+        }
 
         let bases = PyRwLock::new(vec![base.clone()]);
         let mro = base.mro_map_collect(|x| x.to_owned());
@@ -677,6 +710,7 @@ impl PyType {
         // slots are fully initialized by make_slots()
 
         Self::set_new(&new_type.slots, &new_type.base);
+        Self::set_alloc(&new_type.slots, &new_type.base);
 
         let weakref_type = super::PyWeak::static_type();
         for base in new_type.bases.read().iter() {
@@ -723,6 +757,7 @@ impl PyType {
         }
 
         Self::set_new(&self.slots, &self.base);
+        Self::set_alloc(&self.slots, &self.base);
     }
 
     fn set_new(slots: &PyTypeSlots, base: &Option<PyTypeRef>) {
@@ -734,6 +769,16 @@ impl PyType {
                     .map(|base| base.slots.new.load())
                     .unwrap_or(None),
             )
+        }
+    }
+
+    fn set_alloc(slots: &PyTypeSlots, base: &Option<PyTypeRef>) {
+        if slots.alloc.load().is_none() {
+            slots.alloc.store(
+                base.as_ref()
+                    .map(|base| base.slots.alloc.load())
+                    .unwrap_or(None),
+            );
         }
     }
 
@@ -767,9 +812,9 @@ impl PyType {
     }
 
     pub fn set_attr(&self, attr_name: &'static PyStrInterned, value: PyObjectRef) {
-        // Invalidate caches BEFORE modifying attributes so that cached
-        // descriptor pointers are still alive when type_cache_clear_version
-        // drops the cache's strong references.
+        // Invalidate caches BEFORE modifying attributes so that borrowed
+        // pointers in cache entries are nullified while the source objects
+        // are still alive.
         self.modified();
         self.attributes.write().insert(attr_name, value);
     }
@@ -778,6 +823,86 @@ impl PyType {
     /// Searches the full MRO (including self) with method cache acceleration.
     pub fn get_attr(&self, attr_name: &'static PyStrInterned) -> Option<PyObjectRef> {
         self.find_name_in_mro(attr_name)
+    }
+
+    /// Cache __init__ for CALL_ALLOC_AND_ENTER_INIT specialization.
+    /// The cache is valid only when guarded by the type version check.
+    pub(crate) fn cache_init_for_specialization(
+        &self,
+        init: PyRef<PyFunction>,
+        tp_version: u32,
+    ) -> bool {
+        let Some(ext) = self.heaptype_ext.as_ref() else {
+            return false;
+        };
+        if tp_version == 0 {
+            return false;
+        }
+        let mut guard = ext.specialization_init.write();
+        if self.tp_version_tag.load(Ordering::Acquire) != tp_version {
+            return false;
+        }
+        *guard = Some(init);
+        true
+    }
+
+    /// Read cached __init__ for CALL_ALLOC_AND_ENTER_INIT specialization.
+    pub(crate) fn get_cached_init_for_specialization(
+        &self,
+        tp_version: u32,
+    ) -> Option<PyRef<PyFunction>> {
+        let ext = self.heaptype_ext.as_ref()?;
+        if tp_version == 0 {
+            return None;
+        }
+        let guard = ext.specialization_init.read();
+        if self.tp_version_tag.load(Ordering::Acquire) != tp_version {
+            return None;
+        }
+        guard.as_ref().map(|init| init.to_owned())
+    }
+
+    /// Cache __getitem__ for BINARY_OP_SUBSCR_GETITEM specialization.
+    /// The cache is valid only when guarded by the type version check.
+    pub(crate) fn cache_getitem_for_specialization(
+        &self,
+        getitem: PyRef<PyFunction>,
+        tp_version: u32,
+    ) -> bool {
+        let Some(ext) = self.heaptype_ext.as_ref() else {
+            return false;
+        };
+        if tp_version == 0 {
+            return false;
+        }
+        let func_version = getitem.get_version_for_current_state();
+        if func_version == 0 {
+            return false;
+        }
+        let mut guard = ext.specialization_getitem.write();
+        if self.tp_version_tag.load(Ordering::Acquire) != tp_version {
+            return false;
+        }
+        *guard = Some(getitem);
+        ext.specialization_getitem_version
+            .store(func_version, Ordering::Release);
+        true
+    }
+
+    /// Read cached __getitem__ for BINARY_OP_SUBSCR_GETITEM specialization.
+    pub(crate) fn get_cached_getitem_for_specialization(&self) -> Option<(PyRef<PyFunction>, u32)> {
+        let ext = self.heaptype_ext.as_ref()?;
+        let cached_version = ext.specialization_getitem_version.load(Ordering::Acquire);
+        if cached_version == 0 {
+            return None;
+        }
+        let guard = ext.specialization_getitem.read();
+        if self.tp_version_tag.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        guard
+            .as_ref()
+            .map(|getitem| (getitem.to_owned(), cached_version))
     }
 
     pub fn get_direct_attr(&self, attr_name: &'static PyStrInterned) -> Option<PyObjectRef> {
@@ -852,19 +977,13 @@ impl PyType {
             entry.begin_write();
             // Invalidate first to prevent readers from seeing partial state
             entry.version.store(0, Ordering::Release);
-            // Swap in new value (refcount held by cache)
-            let new_ptr = found.clone().into_raw().as_ptr();
-            let old_ptr = entry.value.swap(new_ptr, Ordering::Relaxed);
+            // Store borrowed pointer (no refcount increment).
+            let new_ptr = &**found as *const PyObject as *mut PyObject;
+            entry.value.store(new_ptr, Ordering::Relaxed);
             entry.name.store(name_ptr, Ordering::Relaxed);
             // Activate entry — Release ensures value/name writes are visible
             entry.version.store(assigned, Ordering::Release);
             entry.end_write();
-            // Drop previous occupant (its version was already invalidated)
-            if !old_ptr.is_null() {
-                unsafe {
-                    drop(PyObjectRef::from_raw(NonNull::new_unchecked(old_ptr)));
-                }
-            }
         }
 
         result
@@ -1867,7 +1986,7 @@ impl Constructor for PyType {
         // 2. __weakref__ is in __slots__
         let may_add_weakref = !base.slots.flags.has_feature(PyTypeFlags::HAS_WEAKREF);
         if (heaptype_slots.is_none() && may_add_weakref) || add_weakref {
-            flags |= PyTypeFlags::HAS_WEAKREF;
+            flags |= PyTypeFlags::HAS_WEAKREF | PyTypeFlags::MANAGED_WEAKREF;
         }
 
         let (slots, heaptype_ext) = {
@@ -1882,6 +2001,9 @@ impl Constructor for PyType {
                 qualname: PyRwLock::new(qualname),
                 slots: heaptype_slots.clone(),
                 type_data: PyRwLock::new(None),
+                specialization_init: PyRwLock::new(None),
+                specialization_getitem: PyRwLock::new(None),
+                specialization_getitem_version: AtomicU32::new(0),
             };
             (slots, heaptype_ext)
         };
@@ -2214,7 +2336,7 @@ impl Py<PyType> {
 
     #[pymethod]
     fn __instancecheck__(&self, obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
-        // Use real_is_instance to avoid infinite recursion, matching CPython's behavior
+        // Use real_is_instance to avoid infinite recursion
         obj.real_is_instance(self.as_object(), vm)
     }
 

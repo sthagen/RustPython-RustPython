@@ -129,7 +129,7 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-2025]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -211,13 +211,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           target: i686-unknown-linux-gnu
 
       - name: Install gcc-multilib and musl-tools
-        run: sudo apt-get update && sudo apt-get install gcc-multilib musl-tools
+        uses: ./.github/actions/install-linux-deps
+        with:
+          gcc-multilib: true
+          musl-tools: true
+
       - name: Check compilation for x86 32bit
         run: cargo check --target i686-unknown-linux-gnu ${{ env.CARGO_ARGS_NO_SSL }}
 
@@ -244,7 +248,10 @@ jobs:
           target: aarch64-unknown-linux-gnu
 
       - name: Install gcc-aarch64-linux-gnu
-        run: sudo apt install gcc-aarch64-linux-gnu
+        uses: ./.github/actions/install-linux-deps
+        with:
+          gcc-aarch64-linux-gnu: true
+
       - name: Check compilation for aarch64 linux gnu
         run: cargo check --target aarch64-unknown-linux-gnu ${{ env.CARGO_ARGS_NO_SSL }}
 
@@ -291,7 +298,7 @@ jobs:
         - windows-2025
       fail-fast: false
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v6.2.0
@@ -446,7 +453,7 @@ jobs:
     name: Lint Rust & Python code
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -474,7 +481,7 @@ jobs:
       - name: Install ruff
         uses: astral-sh/ruff-action@4919ec5cf1f49eff0871dbcea0da843445b837e6 # v3.6.1
         with:
-          version: "0.15.4"
+          version: "0.15.5"
           args: "--version"
 
       - run: ruff check --diff
@@ -504,7 +511,7 @@ jobs:
     env:
       NIGHTLY_CHANNEL: nightly
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -526,7 +533,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -589,7 +596,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           target: wasm32-wasip1
@@ -597,8 +604,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Setup Wasmer
         uses: wasmerio/setup-wasmer@v3
+
       - name: Install clang
-        run: sudo apt-get update && sudo apt-get install clang -y
+        uses: ./.github/actions/install-linux-deps
+        with:
+          clang: true
+
       - name: build rustpython
         run: cargo build --release --target wasm32-wasip1 --features freeze-stdlib,stdlib --verbose
       - name: run snippets
