@@ -117,14 +117,14 @@ rustix = { workspace = true }
 
 # mmap + socket dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-memmap2 = "0.9.9"
+memmap2 = "0.9.10"
 page_size = "0.6"
 gethostname = "1.0.2"
 socket2 = { version = "0.6.3", features = ["all"] }
 dns-lookup = "3.0"
 
 # OpenSSL dependencies (optional, for ssl-openssl feature)
-openssl = { version = "0.10.72", optional = true }
+openssl = { version = "0.10.76", optional = true }
 openssl-sys = { version = "0.9.110", optional = true }
 openssl-probe = { version = "0.2.1", optional = true }
 foreign-types-shared = { version = "0.1.1", optional = true }
