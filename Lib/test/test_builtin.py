@@ -367,7 +367,6 @@ class BuiltinTest(ComplexesAreIdenticalMixin, unittest.TestCase):
         c3 = C3()
         self.assertTrue(callable(c3))
 
-    @unittest.expectedFailure # TODO: RUSTPYTHON; OverflowError: Python int too large to convert to Rust isize
     def test_chr(self):
         self.assertEqual(chr(0), '\0')
         self.assertEqual(chr(32), ' ')
@@ -728,7 +727,6 @@ class BuiltinTest(ComplexesAreIdenticalMixin, unittest.TestCase):
         self.assertIs(None.__ne__(0), NotImplemented)
         self.assertIs(None.__ne__("abc"), NotImplemented)
 
-    @unittest.expectedFailure # TODO: RUSTPYTHON; wrong error message
     def test_divmod(self):
         self.assertEqual(divmod(12, 7), (1, 5))
         self.assertEqual(divmod(-12, 7), (-2, 2))
@@ -2434,7 +2432,6 @@ class BuiltinTest(ComplexesAreIdenticalMixin, unittest.TestCase):
         with self.assertRaisesRegex(TypeError, msg):
             not NotImplemented
 
-    @unittest.expectedFailure # TODO: RUSTPYTHON; AssertionError: TypeError not raised
     def test_singleton_attribute_access(self):
         for singleton in (NotImplemented, Ellipsis):
             with self.subTest(singleton):
@@ -2941,7 +2938,6 @@ class TestType(unittest.TestCase):
             A.__qualname__ = b'B'
         self.assertEqual(A.__qualname__, 'D.E')
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AssertionError: '__firstlineno__' unexpectedly found in mappingproxy({'__firstlineno__': 42, '__module__': 'testmodule', '__dict__': <attribute '__dict__' of 'A' objects>, '__doc__': None})
     def test_type_firstlineno(self):
         A = type('A', (), {'__firstlineno__': 42})
         self.assertEqual(A.__name__, 'A')
