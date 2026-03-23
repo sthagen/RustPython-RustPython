@@ -141,7 +141,12 @@ jobs:
 
       - name: Install dependencies
         uses: ./.github/actions/install-linux-deps
-        with: ${{ matrix.dependencies || fromJSON('{}') }}
+        # zizmor has an issue with dynamic `with`
+        # with: ${{ matrix.dependencies || fromJSON('{}') }}
+        with:
+          gcc-multilib: ${{ matrix.dependencies.gcc-multilib || false }}
+          musl-tools: ${{ matrix.dependencies.musl-tools || false }}
+          gcc-aarch64-linux-gnu: ${{ matrix.dependencies.gcc-aarch64-linux-gnu || false }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -180,76 +185,13 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip:ci') }}
     env:
       RUST_BACKTRACE: full
-      # PLATFORM_INDEPENDENT_TESTS are tests that do not depend on the underlying OS.
-      # They are currently only run on Linux to speed up the CI.
-      PLATFORM_INDEPENDENT_TESTS: >-
-        test__colorize
-        test_array
-        test_asyncgen
-        test_binop
-        test_bisect
-        test_bool
-        test_bytes
-        test_call
-        test_cmath
-        test_collections
-        test_complex
-        test_contains
-        test_copy
-        test_dataclasses
-        test_decimal
-        test_decorators
-        test_defaultdict
-        test_deque
-        test_dict
-        test_dictcomps
-        test_dictviews
-        test_dis
-        test_enumerate
-        test_exception_variations
-        test_float
-        test_fractions
-        test_genericalias
-        test_genericclass
-        test_grammar
-        test_range
-        test_index
-        test_int
-        test_int_literal
-        test_isinstance
-        test_iter
-        test_iterlen
-        test_itertools
-        test_json
-        test_keyword
-        test_keywordonlyarg
-        test_list
-        test_long
-        test_longexp
-        test_operator
-        test_ordered_dict
-        test_pep646_syntax
-        test_pow
-        test_raise
-        test_richcmp
-        test_scope
-        test_set
-        test_slice
-        test_sort
-        test_string
-        test_string_literals
-        test_strtod
-        test_structseq
-        test_subclassinit
-        test_super
-        test_syntax
-        test_tstring
-        test_tuple
-        test_unary
-        test_unpack
-        test_unpack_ex
-        test_weakref
-        test_yield_from
+      # Tests that can be flaky when running with multiple processes `-j 2`. We will use `-j 1` for these.
+      FLAKY_MP_TESTS: >-
+        test_class
+        test_eintr
+        test_multiprocessing_fork
+        test_multiprocessing_forkserver
+        test_multiprocessing_spawn
     name: Run snippets and cpython tests
     runs-on: ${{ matrix.os }}
     strategy:
@@ -304,17 +246,23 @@ jobs:
         run: python -m pip install -r requirements.txt && pytest -v
         working-directory: ./extra_tests
 
-      - name: run cpython platform-independent tests
-        if: runner.os == 'Linux'
+      - name: Detect available cores
+        id: cores
+        shell: bash
         run: |
-          target/release/rustpython -m test -j 1 -u all --slowest --fail-env-changed --timeout 600 -v ${{ env.PLATFORM_INDEPENDENT_TESTS }}
-        timeout-minutes: 45
+          cores=$(python -c 'print(__import__("os").process_cpu_count())')
+          echo "cores=${cores}" >> $GITHUB_OUTPUT
+
+      - name: Run CPython tests
+        run: |
+          target/release/rustpython -m test -j ${{ steps.cores.outputs.cores }} ${{ join(matrix.extra_test_args, ' ') }} --slowest --fail-env-changed --timeout 600 -v -x ${{ env.FLAKY_MP_TESTS }} ${{ join(matrix.skips, ' ') }}
+        timeout-minutes: ${{ matrix.timeout }}
         env:
           RUSTPYTHON_SKIP_ENV_POLLUTERS: true
 
-      - name: run cpython platform-dependent tests
+      - name: Run flaky MP CPython tests
         run: |
-          target/release/rustpython -m test -j 1 ${{ join(matrix.extra_test_args, ' ') }} --slowest --fail-env-changed --timeout 600 -v -x ${{ env.PLATFORM_INDEPENDENT_TESTS }} ${{ join(matrix.skips, ' ') }}
+          target/release/rustpython -m test -j 1 ${{ join(matrix.extra_test_args, ' ') }} --slowest --fail-env-changed --timeout 600 -v ${{ env.FLAKY_MP_TESTS }}
         timeout-minutes: ${{ matrix.timeout }}
         env:
           RUSTPYTHON_SKIP_ENV_POLLUTERS: true
@@ -411,7 +359,9 @@ jobs:
       - run: ruff format --check
 
       - name: install prettier
-        run: yarn global add prettier && echo "$(yarn global bin)" >>$GITHUB_PATH
+        run: |
+          yarn global add prettier
+          yarn global bin >> "$GITHUB_PATH"
 
       - name: check wasm code with prettier
         # prettier doesn't handle ignore files very well: https://github.com/prettier/prettier/issues/8506
@@ -487,7 +437,8 @@ jobs:
           cache-dependency-path: "wasm/demo/package-lock.json"
       - name: run test
         run: |
-          export PATH=$PATH:`pwd`/../../geckodriver
+          driver_path="$(pwd)/../../geckodriver"
+          export PATH="$PATH:${driver_path}"
           npm install
           npm run test
         env:
@@ -551,6 +502,32 @@ jobs:
       - name: build rustpython
         run: cargo build --release --target wasm32-wasip1 --features freeze-stdlib,stdlib --verbose
       - name: run snippets
-        run: wasmer run --dir `pwd` target/wasm32-wasip1/release/rustpython.wasm -- `pwd`/extra_tests/snippets/stdlib_random.py
+        run: wasmer run --dir $(pwd) target/wasm32-wasip1/release/rustpython.wasm -- "$(pwd)/extra_tests/snippets/stdlib_random.py"
       - name: run cpython unittest
-        run: wasmer run --dir `pwd` target/wasm32-wasip1/release/rustpython.wasm -- `pwd`/Lib/test/test_int.py
+        run: wasmer run --dir $(pwd) target/wasm32-wasip1/release/rustpython.wasm -- "$(pwd)/Lib/test/test_int.py"
+
+  cargo-shear:
+    name: cargo shear
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: cargo-bins/cargo-binstall@1800853f2578f8c34492ec76154caef8e163fbca # v1.17.7
+
+      - run: cargo binstall --no-confirm cargo-shear
+
+      - run: cargo shear
+
+  security-lint:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2

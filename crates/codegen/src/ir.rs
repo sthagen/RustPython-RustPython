@@ -8,9 +8,10 @@ use num_traits::ToPrimitive;
 use rustpython_compiler_core::{
     OneIndexed, SourceLocation,
     bytecode::{
-        AnyInstruction, Arg, CodeFlags, CodeObject, CodeUnit, CodeUnits, ConstantData,
-        ExceptionTableEntry, InstrDisplayContext, Instruction, InstructionMetadata, Label, OpArg,
-        PseudoInstruction, PyCodeLocationInfoKind, encode_exception_table, oparg,
+        AnyInstruction, Arg, CO_FAST_CELL, CO_FAST_FREE, CO_FAST_HIDDEN, CO_FAST_LOCAL, CodeFlags,
+        CodeObject, CodeUnit, CodeUnits, ConstantData, ExceptionTableEntry, InstrDisplayContext,
+        Instruction, InstructionMetadata, Label, OpArg, PseudoInstruction, PyCodeLocationInfoKind,
+        encode_exception_table, oparg,
     },
     varint::{write_signed_varint, write_varint},
 };
@@ -194,8 +195,9 @@ impl CodeInfo {
         self.remove_unused_consts();
         self.remove_nops();
 
+        // DCE always runs (removes dead code after terminal instructions)
+        self.dce();
         if opts.optimize > 0 {
-            self.dce();
             self.peephole_optimize();
         }
 
@@ -207,10 +209,12 @@ impl CodeInfo {
         label_exception_targets(&mut self.blocks);
         push_cold_blocks_to_end(&mut self.blocks);
         normalize_jumps(&mut self.blocks);
+        self.dce(); // re-run within-block DCE after normalize_jumps creates new instructions
+        self.eliminate_unreachable_blocks();
+        duplicate_end_returns(&mut self.blocks);
         self.optimize_load_global_push_null();
 
         let max_stackdepth = self.max_stackdepth()?;
-        let cell2arg = self.cell2arg();
 
         let Self {
             flags,
@@ -236,7 +240,7 @@ impl CodeInfo {
             varnames: varname_cache,
             cellvars: cellvar_cache,
             freevars: freevar_cache,
-            fast_hidden: _,
+            fast_hidden,
             argcount: arg_count,
             posonlyargcount: posonlyarg_count,
             kwonlyargcount: kwonlyarg_count,
@@ -247,8 +251,12 @@ impl CodeInfo {
         let mut locations = Vec::new();
         let mut linetable_locations: Vec<LineTableLocation> = Vec::new();
 
-        // Convert pseudo ops and remove resulting NOPs (keep line-marker NOPs)
-        convert_pseudo_ops(&mut blocks, varname_cache.len() as u32);
+        // Build cellfixedoffsets for cell-local merging
+        let cellfixedoffsets =
+            build_cellfixedoffsets(&varname_cache, &cellvar_cache, &freevar_cache);
+        // Convert pseudo ops (LoadClosure uses cellfixedoffsets) and fixup DEREF opargs
+        convert_pseudo_ops(&mut blocks, &cellfixedoffsets);
+        fixup_deref_opargs(&mut blocks, &cellfixedoffsets);
         // Remove redundant NOPs, keeping line-marker NOPs only when
         // they are needed to preserve tracing.
         let mut block_order = Vec::new();
@@ -325,6 +333,18 @@ impl CodeInfo {
             }
 
             blocks[bi].instructions = kept;
+        }
+
+        // Final DCE: truncate instructions after terminal ops in linearized blocks.
+        // This catches dead code created by normalize_jumps after the initial DCE.
+        for block in blocks.iter_mut() {
+            if let Some(pos) = block
+                .instructions
+                .iter()
+                .position(|ins| ins.instr.is_scope_exit() || ins.instr.is_unconditional_jump())
+            {
+                block.instructions.truncate(pos + 1);
+            }
         }
 
         // Pre-compute cache_entries for real (non-pseudo) instructions
@@ -482,6 +502,41 @@ impl CodeInfo {
         // Generate exception table before moving source_path
         let exceptiontable = generate_exception_table(&blocks, &block_to_index);
 
+        // Build localspluskinds with cell-local merging
+        let nlocals = varname_cache.len();
+        let ncells = cellvar_cache.len();
+        let nfrees = freevar_cache.len();
+        let numdropped = cellvar_cache
+            .iter()
+            .filter(|cv| varname_cache.contains(cv.as_str()))
+            .count();
+        let nlocalsplus = nlocals + ncells - numdropped + nfrees;
+        let mut localspluskinds = vec![0u8; nlocalsplus];
+        // Mark locals
+        for kind in localspluskinds.iter_mut().take(nlocals) {
+            *kind = CO_FAST_LOCAL;
+        }
+        // Mark cells (merged and non-merged)
+        for (i, cellvar) in cellvar_cache.iter().enumerate() {
+            let idx = cellfixedoffsets[i] as usize;
+            if varname_cache.contains(cellvar.as_str()) {
+                localspluskinds[idx] |= CO_FAST_CELL; // merged: LOCAL | CELL
+            } else {
+                localspluskinds[idx] = CO_FAST_CELL;
+            }
+        }
+        // Mark frees
+        for i in 0..nfrees {
+            let idx = cellfixedoffsets[ncells + i] as usize;
+            localspluskinds[idx] = CO_FAST_FREE;
+        }
+        // Apply CO_FAST_HIDDEN for inlined comprehension variables
+        for (name, &hidden) in &fast_hidden {
+            if hidden && let Some(idx) = varname_cache.get_index_of(name.as_str()) {
+                localspluskinds[idx] |= CO_FAST_HIDDEN;
+            }
+        }
+
         Ok(CodeObject {
             flags,
             posonlyarg_count,
@@ -500,44 +555,14 @@ impl CodeInfo {
             varnames: varname_cache.into_iter().collect(),
             cellvars: cellvar_cache.into_iter().collect(),
             freevars: freevar_cache.into_iter().collect(),
-            cell2arg,
+            localspluskinds: localspluskinds.into_boxed_slice(),
             linetable,
             exceptiontable,
         })
     }
 
-    fn cell2arg(&self) -> Option<Box<[i32]>> {
-        if self.metadata.cellvars.is_empty() {
-            return None;
-        }
-
-        let total_args = self.metadata.argcount
-            + self.metadata.kwonlyargcount
-            + self.flags.contains(CodeFlags::VARARGS) as u32
-            + self.flags.contains(CodeFlags::VARKEYWORDS) as u32;
-
-        let mut found_cellarg = false;
-        let cell2arg = self
-            .metadata
-            .cellvars
-            .iter()
-            .map(|var| {
-                self.metadata
-                    .varnames
-                    .get_index_of(var)
-                    // check that it's actually an arg
-                    .filter(|i| *i < total_args as usize)
-                    .map_or(-1, |i| {
-                        found_cellarg = true;
-                        i as i32
-                    })
-            })
-            .collect::<Box<[_]>>();
-
-        if found_cellarg { Some(cell2arg) } else { None }
-    }
-
     fn dce(&mut self) {
+        // Truncate instructions after terminal instructions within each block
         for block in &mut self.blocks {
             let mut last_instr = None;
             for (i, ins) in block.instructions.iter().enumerate() {
@@ -548,6 +573,54 @@ impl CodeInfo {
             }
             if let Some(i) = last_instr {
                 block.instructions.truncate(i + 1);
+            }
+        }
+    }
+
+    /// Clear blocks that are unreachable (not entry, not a jump target,
+    /// and only reachable via fall-through from a terminal block).
+    fn eliminate_unreachable_blocks(&mut self) {
+        let mut reachable = vec![false; self.blocks.len()];
+        reachable[0] = true;
+
+        // Fixpoint: only mark targets of already-reachable blocks
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in 0..self.blocks.len() {
+                if !reachable[i] {
+                    continue;
+                }
+                // Mark jump targets and exception handlers
+                for ins in &self.blocks[i].instructions {
+                    if ins.target != BlockIdx::NULL && !reachable[ins.target.idx()] {
+                        reachable[ins.target.idx()] = true;
+                        changed = true;
+                    }
+                    if let Some(eh) = &ins.except_handler
+                        && !reachable[eh.handler_block.idx()]
+                    {
+                        reachable[eh.handler_block.idx()] = true;
+                        changed = true;
+                    }
+                }
+                // Mark fall-through
+                let next = self.blocks[i].next;
+                if next != BlockIdx::NULL
+                    && !reachable[next.idx()]
+                    && !self.blocks[i].instructions.last().is_some_and(|ins| {
+                        ins.instr.is_scope_exit() || ins.instr.is_unconditional_jump()
+                    })
+                {
+                    reachable[next.idx()] = true;
+                    changed = true;
+                }
+            }
+        }
+
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            if !reachable[i] {
+                block.instructions.clear();
             }
         }
     }
@@ -566,7 +639,20 @@ impl CodeInfo {
                 };
 
                 let tuple_size = u32::from(instr.arg) as usize;
-                if tuple_size == 0 || i < tuple_size {
+                if tuple_size == 0 {
+                    // BUILD_TUPLE 0 → LOAD_CONST ()
+                    let (const_idx, _) = self.metadata.consts.insert_full(ConstantData::Tuple {
+                        elements: Vec::new(),
+                    });
+                    block.instructions[i].instr = Instruction::LoadConst {
+                        consti: Arg::marker(),
+                    }
+                    .into();
+                    block.instructions[i].arg = OpArg::new(const_idx as u32);
+                    i += 1;
+                    continue;
+                }
+                if i < tuple_size {
                     i += 1;
                     continue;
                 }
@@ -1107,12 +1193,19 @@ impl InstrDisplayContext for CodeInfo {
         self.metadata.varnames[var_num.as_usize()].as_ref()
     }
 
-    fn get_cell_name(&self, i: usize) -> &str {
-        self.metadata
-            .cellvars
-            .get_index(i)
-            .unwrap_or_else(|| &self.metadata.freevars[i - self.metadata.cellvars.len()])
-            .as_ref()
+    fn get_localsplus_name(&self, var_num: oparg::VarNum) -> &str {
+        let idx = var_num.as_usize();
+        let nlocals = self.metadata.varnames.len();
+        if idx < nlocals {
+            self.metadata.varnames[idx].as_ref()
+        } else {
+            let cell_idx = idx - nlocals;
+            self.metadata
+                .cellvars
+                .get_index(cell_idx)
+                .unwrap_or_else(|| &self.metadata.freevars[cell_idx - self.metadata.cellvars.len()])
+                .as_ref()
+        }
     }
 }
 
@@ -1632,6 +1725,65 @@ fn normalize_jumps(blocks: &mut [Block]) {
     }
 }
 
+/// Duplicate `LOAD_CONST None + RETURN_VALUE` for blocks that fall through
+/// to the final return block. Matches CPython's behavior of ensuring every
+/// code path that reaches the end of a function/module has its own explicit
+/// return instruction.
+fn duplicate_end_returns(blocks: &mut [Block]) {
+    // Walk the block chain to find the last block
+    let mut last_block = BlockIdx(0);
+    let mut current = BlockIdx(0);
+    while current != BlockIdx::NULL {
+        last_block = current;
+        current = blocks[current.idx()].next;
+    }
+
+    // Check if the last block ends with LOAD_CONST + RETURN_VALUE (the implicit return)
+    let last_insts = &blocks[last_block.idx()].instructions;
+    // Only apply when the last block is EXACTLY a return-None epilogue
+    let is_return_block = last_insts.len() == 2
+        && matches!(
+            last_insts[0].instr,
+            AnyInstruction::Real(Instruction::LoadConst { .. })
+        )
+        && matches!(
+            last_insts[1].instr,
+            AnyInstruction::Real(Instruction::ReturnValue)
+        );
+    if !is_return_block {
+        return;
+    }
+
+    // Get the return instructions to clone
+    let return_insts: Vec<InstructionInfo> = last_insts[last_insts.len() - 2..].to_vec();
+
+    // Find non-cold blocks that fall through to the last block
+    let mut blocks_to_fix = Vec::new();
+    current = BlockIdx(0);
+    while current != BlockIdx::NULL {
+        let block = &blocks[current.idx()];
+        if current != last_block && block.next == last_block && !block.cold && !block.except_handler
+        {
+            let has_fallthrough = block
+                .instructions
+                .last()
+                .map(|ins| !ins.instr.is_scope_exit() && !ins.instr.is_unconditional_jump())
+                .unwrap_or(true);
+            if has_fallthrough {
+                blocks_to_fix.push(current);
+            }
+        }
+        current = blocks[current.idx()].next;
+    }
+
+    // Duplicate the return instructions at the end of fall-through blocks
+    for block_idx in blocks_to_fix {
+        blocks[block_idx.idx()]
+            .instructions
+            .extend_from_slice(&return_insts);
+    }
+}
+
 /// Label exception targets: walk CFG with except stack, set per-instruction
 /// handler info and block preserve_lasti flag. Converts POP_BLOCK to NOP.
 /// flowgraph.c label_exception_targets + push_except_block
@@ -1768,7 +1920,7 @@ pub(crate) fn label_exception_targets(blocks: &mut [Block]) {
 
 /// Convert remaining pseudo ops to real instructions or NOP.
 /// flowgraph.c convert_pseudo_ops
-pub(crate) fn convert_pseudo_ops(blocks: &mut [Block], varnames_len: u32) {
+pub(crate) fn convert_pseudo_ops(blocks: &mut [Block], cellfixedoffsets: &[u32]) {
     for block in blocks.iter_mut() {
         for info in &mut block.instructions {
             let Some(pseudo) = info.instr.pseudo() else {
@@ -1786,9 +1938,10 @@ pub(crate) fn convert_pseudo_ops(blocks: &mut [Block], varnames_len: u32) {
                 PseudoInstruction::PopBlock => {
                     info.instr = Instruction::Nop.into();
                 }
-                // LOAD_CLOSURE → LOAD_FAST (with varnames offset)
+                // LOAD_CLOSURE → LOAD_FAST (using cellfixedoffsets for merged layout)
                 PseudoInstruction::LoadClosure { i } => {
-                    let new_idx = varnames_len + i.get(info.arg);
+                    let cell_relative = i.get(info.arg) as usize;
+                    let new_idx = cellfixedoffsets[cell_relative];
                     info.arg = OpArg::new(new_idx);
                     info.instr = Instruction::LoadFast {
                         var_num: Arg::marker(),
@@ -1804,6 +1957,57 @@ pub(crate) fn convert_pseudo_ops(blocks: &mut [Block], varnames_len: u32) {
                 | PseudoInstruction::StoreFastMaybeNull { .. } => {
                     unreachable!("Unexpected pseudo instruction in convert_pseudo_ops: {pseudo:?}")
                 }
+            }
+        }
+    }
+}
+
+/// Build cellfixedoffsets mapping: cell/free index -> localsplus index.
+/// Merged cells (cellvar also in varnames) get the local slot index.
+/// Non-merged cells get slots after nlocals. Free vars follow.
+pub(crate) fn build_cellfixedoffsets(
+    varnames: &IndexSet<String>,
+    cellvars: &IndexSet<String>,
+    freevars: &IndexSet<String>,
+) -> Vec<u32> {
+    let nlocals = varnames.len();
+    let ncells = cellvars.len();
+    let nfrees = freevars.len();
+    let mut fixed = Vec::with_capacity(ncells + nfrees);
+    let mut numdropped = 0usize;
+    for (i, cellvar) in cellvars.iter().enumerate() {
+        if let Some(local_idx) = varnames.get_index_of(cellvar) {
+            fixed.push(local_idx as u32);
+            numdropped += 1;
+        } else {
+            fixed.push((nlocals + i - numdropped) as u32);
+        }
+    }
+    for i in 0..nfrees {
+        fixed.push((nlocals + ncells - numdropped + i) as u32);
+    }
+    fixed
+}
+
+/// Convert DEREF instruction opargs from cell-relative indices to localsplus indices
+/// using the cellfixedoffsets mapping.
+pub(crate) fn fixup_deref_opargs(blocks: &mut [Block], cellfixedoffsets: &[u32]) {
+    for block in blocks.iter_mut() {
+        for info in &mut block.instructions {
+            let Some(instr) = info.instr.real() else {
+                continue;
+            };
+            let needs_fixup = matches!(
+                instr,
+                Instruction::LoadDeref { .. }
+                    | Instruction::StoreDeref { .. }
+                    | Instruction::DeleteDeref { .. }
+                    | Instruction::LoadFromDictOrDeref { .. }
+                    | Instruction::MakeCell { .. }
+            );
+            if needs_fixup {
+                let cell_relative = u32::from(info.arg) as usize;
+                info.arg = OpArg::new(cellfixedoffsets[cell_relative]);
             }
         }
     }

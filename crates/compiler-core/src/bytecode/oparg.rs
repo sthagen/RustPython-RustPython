@@ -276,16 +276,47 @@ impl fmt::Display for ConvertValueOparg {
     }
 }
 
-oparg_enum!(
-    /// Resume type for the RESUME instruction
-    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-    pub enum ResumeType {
-        AtFuncStart = 0,
-        AfterYield = 1,
-        AfterYieldFrom = 2,
-        AfterAwait = 3,
+/// Resume type for the RESUME instruction
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum ResumeType {
+    AtFuncStart,
+    AfterYield,
+    AfterYieldFrom,
+    AfterAwait,
+    Other(u32),
+}
+
+impl From<u32> for ResumeType {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => Self::AtFuncStart,
+            1 => Self::AfterYield,
+            2 => Self::AfterYieldFrom,
+            3 => Self::AfterAwait,
+            _ => Self::Other(value),
+        }
     }
-);
+}
+
+impl From<ResumeType> for u32 {
+    fn from(typ: ResumeType) -> Self {
+        match typ {
+            ResumeType::AtFuncStart => 0,
+            ResumeType::AfterYield => 1,
+            ResumeType::AfterYieldFrom => 2,
+            ResumeType::AfterAwait => 3,
+            ResumeType::Other(v) => v,
+        }
+    }
+}
+
+impl core::fmt::Display for ResumeType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        u32::from(*self).fmt(f)
+    }
+}
+
+impl OpArgType for ResumeType {}
 
 pub type NameIdx = u32;
 
@@ -354,13 +385,13 @@ bitflagset::bitflag! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     #[repr(u8)]
     pub enum MakeFunctionFlag {
-        Closure = 0,
-        Annotations = 1,
-        KwOnlyDefaults = 2,
-        Defaults = 3,
-        TypeParams = 4,
+        Defaults = 0,
+        KwOnlyDefaults = 1,
+        Annotations = 2,
+        Closure = 3,
         /// PEP 649: __annotate__ function closure (instead of __annotations__ dict)
-        Annotate = 5,
+        Annotate = 4,
+        TypeParams = 5,
     }
 }
 
@@ -372,14 +403,24 @@ bitflagset::bitflagset! {
 impl TryFrom<u32> for MakeFunctionFlag {
     type Error = MarshalError;
 
+    /// Decode from CPython-compatible power-of-two value
     fn try_from(value: u32) -> Result<Self, Self::Error> {
-        Self::try_from(value as u8).map_err(|_| MarshalError::InvalidBytecode)
+        match value {
+            0x01 => Ok(Self::Defaults),
+            0x02 => Ok(Self::KwOnlyDefaults),
+            0x04 => Ok(Self::Annotations),
+            0x08 => Ok(Self::Closure),
+            0x10 => Ok(Self::Annotate),
+            0x20 => Ok(Self::TypeParams),
+            _ => Err(MarshalError::InvalidBytecode),
+        }
     }
 }
 
 impl From<MakeFunctionFlag> for u32 {
+    /// Encode as CPython-compatible power-of-two value
     fn from(flag: MakeFunctionFlag) -> Self {
-        flag as u32
+        1u32 << (flag as u32)
     }
 }
 
@@ -714,6 +755,7 @@ macro_rules! newtype_oparg {
                 self.0.fmt(f)
             }
         }
+
         impl OpArgType for $name {}
     }
 }

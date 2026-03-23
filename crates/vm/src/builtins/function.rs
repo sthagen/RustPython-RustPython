@@ -5,6 +5,7 @@ use super::{
     PyAsyncGen, PyCode, PyCoroutine, PyDictRef, PyGenerator, PyModule, PyStr, PyStrRef, PyTuple,
     PyTupleRef, PyType,
 };
+use crate::common::hash::PyHash;
 use crate::common::lock::PyMutex;
 use crate::function::ArgMapping;
 use crate::object::{PyAtomicRef, Traverse, TraverseFn};
@@ -17,7 +18,8 @@ use crate::{
     function::{FuncArgs, OptionalArg, PyComparisonValue, PySetterValue},
     scope::Scope,
     types::{
-        Callable, Comparable, Constructor, GetAttr, GetDescriptor, PyComparisonOp, Representable,
+        Callable, Comparable, Constructor, GetAttr, GetDescriptor, Hashable, PyComparisonOp,
+        Representable,
     },
 };
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -62,7 +64,7 @@ pub struct PyFunction {
     code: PyAtomicRef<PyCode>,
     globals: PyDictRef,
     builtins: PyObjectRef,
-    closure: Option<PyRef<PyTuple<PyCellRef>>>,
+    pub(crate) closure: Option<PyRef<PyTuple<PyCellRef>>>,
     defaults_and_kwdefaults: PyMutex<(Option<PyTupleRef>, Option<PyDictRef>)>,
     name: PyMutex<PyStrRef>,
     qualname: PyMutex<PyStrRef>,
@@ -441,13 +443,6 @@ impl PyFunction {
             }
         }
 
-        if let Some(cell2arg) = code.cell2arg.as_deref() {
-            for (cell_idx, arg_idx) in cell2arg.iter().enumerate().filter(|(_, i)| **i != -1) {
-                let x = fastlocals[*arg_idx as usize].take();
-                frame.set_cell_contents(cell_idx, x);
-            }
-        }
-
         Ok(())
     }
 
@@ -723,14 +718,6 @@ impl Py<PyFunction> {
             }
         }
 
-        if let Some(cell2arg) = code.cell2arg.as_deref() {
-            let fastlocals = unsafe { frame.fastlocals_mut() };
-            for (cell_idx, arg_idx) in cell2arg.iter().enumerate().filter(|(_, i)| **i != -1) {
-                let x = fastlocals[*arg_idx as usize].take();
-                frame.set_cell_contents(cell_idx, x);
-            }
-        }
-
         frame
     }
 
@@ -778,11 +765,7 @@ pub(crate) fn datastack_frame_size_bytes_for_code(code: &Py<PyCode>) -> Option<u
     {
         return None;
     }
-    let nlocalsplus = code
-        .varnames
-        .len()
-        .checked_add(code.cellvars.len())?
-        .checked_add(code.freevars.len())?;
+    let nlocalsplus = code.localspluskinds.len();
     let capacity = nlocalsplus.checked_add(code.max_stackdepth as usize)?;
     capacity.checked_mul(core::mem::size_of::<usize>())
 }
@@ -1193,6 +1176,14 @@ impl Comparable for PyBoundMethod {
     }
 }
 
+impl Hashable for PyBoundMethod {
+    fn hash(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyHash> {
+        let self_hash = crate::common::hash::hash_object_id_raw(zelf.object.get_id());
+        let func_hash = zelf.function.hash(vm)?;
+        Ok(crate::common::hash::fix_sentinel(self_hash ^ func_hash))
+    }
+}
+
 impl GetAttr for PyBoundMethod {
     fn getattro(zelf: &Py<Self>, name: &Py<PyStr>, vm: &VirtualMachine) -> PyResult {
         let class_attr = vm
@@ -1203,6 +1194,17 @@ impl GetAttr for PyBoundMethod {
             return vm.call_if_get_descriptor(&obj, zelf.to_owned().into());
         }
         zelf.function.get_attr(name, vm)
+    }
+}
+
+impl GetDescriptor for PyBoundMethod {
+    fn descr_get(
+        zelf: PyObjectRef,
+        _obj: Option<PyObjectRef>,
+        _cls: Option<PyObjectRef>,
+        _vm: &VirtualMachine,
+    ) -> PyResult {
+        Ok(zelf)
     }
 }
 
@@ -1220,8 +1222,14 @@ impl Constructor for PyBoundMethod {
     fn py_new(
         _cls: &Py<PyType>,
         Self::Args { function, object }: Self::Args,
-        _vm: &VirtualMachine,
+        vm: &VirtualMachine,
     ) -> PyResult<Self> {
+        if !function.is_callable() {
+            return Err(vm.new_type_error("first argument must be callable".to_owned()));
+        }
+        if vm.is_none(&object) {
+            return Err(vm.new_type_error("instance must not be None".to_owned()));
+        }
         Ok(Self::new(object, function))
     }
 }
@@ -1248,7 +1256,15 @@ impl PyBoundMethod {
 }
 
 #[pyclass(
-    with(Callable, Comparable, GetAttr, Constructor, Representable),
+    with(
+        Callable,
+        Comparable,
+        Hashable,
+        GetAttr,
+        GetDescriptor,
+        Constructor,
+        Representable
+    ),
     flags(IMMUTABLETYPE, HAS_WEAKREF)
 )]
 impl PyBoundMethod {
@@ -1256,11 +1272,11 @@ impl PyBoundMethod {
     fn __reduce__(
         &self,
         vm: &VirtualMachine,
-    ) -> (Option<PyObjectRef>, (PyObjectRef, Option<PyObjectRef>)) {
-        let builtins_getattr = vm.builtins.get_attr("getattr", vm).ok();
+    ) -> PyResult<(PyObjectRef, (PyObjectRef, PyObjectRef))> {
+        let builtins_getattr = vm.builtins.get_attr("getattr", vm)?;
         let func_self = self.object.clone();
-        let func_name = self.function.get_attr("__name__", vm).ok();
-        (builtins_getattr, (func_self, func_name))
+        let func_name = self.function.get_attr("__name__", vm)?;
+        Ok((builtins_getattr, (func_self, func_name)))
     }
 
     #[pygetset]
