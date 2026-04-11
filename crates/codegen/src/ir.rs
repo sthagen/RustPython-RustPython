@@ -125,6 +125,13 @@ pub struct ExceptHandlerInfo {
     pub preserve_lasti: bool,
 }
 
+fn set_to_nop(info: &mut InstructionInfo) {
+    info.instr = Instruction::Nop.into();
+    info.arg = OpArg::new(0);
+    info.target = BlockIdx::NULL;
+    info.cache_entries = 0;
+}
+
 // spell-checker:ignore petgraph
 // TODO: look into using petgraph for handling blocks and stuff? it's heavier than this, but it
 // might enable more analysis/optimizations
@@ -209,6 +216,13 @@ impl CodeInfo {
 
         // DCE always runs (removes dead code after terminal instructions)
         self.dce();
+        // BUILD_TUPLE n + UNPACK_SEQUENCE n → NOP + SWAP (n=2,3) or NOP+NOP (n=1)
+        self.optimize_build_tuple_unpack();
+        // Dead store elimination for duplicate STORE_FAST targets
+        // (apply_static_swaps in CPython's flowgraph.c)
+        self.eliminate_dead_stores();
+        // apply_static_swaps: reorder stores to eliminate SWAPs
+        self.apply_static_swaps();
         // Peephole optimizer creates superinstructions matching CPython
         self.peephole_optimize();
 
@@ -226,6 +240,8 @@ impl CodeInfo {
 
         // Phase 2: _PyCfg_OptimizedCfgToInstructionSequence (flowgraph.c)
         normalize_jumps(&mut self.blocks);
+        reorder_conditional_exit_and_jump_blocks(&mut self.blocks);
+        reorder_conditional_jump_and_exit_blocks(&mut self.blocks);
         inline_small_or_no_lineno_blocks(&mut self.blocks);
         self.dce(); // re-run within-block DCE after normalize_jumps creates new instructions
         self.eliminate_unreachable_blocks();
@@ -233,6 +249,16 @@ impl CodeInfo {
         duplicate_end_returns(&mut self.blocks);
         self.dce(); // truncate after terminal in blocks that got return duplicated
         self.eliminate_unreachable_blocks(); // remove now-unreachable last block
+        remove_redundant_nops_and_jumps(&mut self.blocks);
+        // Some jump-only blocks only appear after late CFG cleanup. Thread them
+        // once more so loop backedges stay direct instead of becoming
+        // JUMP_FORWARD -> JUMP_BACKWARD chains.
+        jump_threading_unconditional(&mut self.blocks);
+        reorder_conditional_exit_and_jump_blocks(&mut self.blocks);
+        reorder_conditional_jump_and_exit_blocks(&mut self.blocks);
+        self.eliminate_unreachable_blocks();
+        remove_redundant_nops_and_jumps(&mut self.blocks);
+        self.add_checks_for_loads_of_uninitialized_variables();
         // optimize_load_fast: after normalize_jumps
         self.optimize_load_fast_borrow();
         self.optimize_load_global_push_null();
@@ -692,7 +718,7 @@ impl CodeInfo {
                     block.instructions[i].arg = OpArg::new(const_idx as u32);
                     // Replace UNARY_NEGATIVE with NOP, inheriting the LOAD_CONST
                     // location so that remove_nops can clean it up
-                    block.instructions[i + 1].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[i + 1]);
                     block.instructions[i + 1].location = load_location;
                     block.instructions[i + 1].end_location = block.instructions[i].end_location;
                     // Skip the NOP, don't re-check
@@ -752,10 +778,10 @@ impl CodeInfo {
                     // NOP out the second and third instructions
                     let loc = block.instructions[i].location;
                     let end_loc = block.instructions[i].end_location;
-                    block.instructions[i + 1].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[i + 1]);
                     block.instructions[i + 1].location = loc;
                     block.instructions[i + 1].end_location = end_loc;
-                    block.instructions[i + 2].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[i + 2]);
                     block.instructions[i + 2].location = loc;
                     block.instructions[i + 2].end_location = end_loc;
                     // Don't advance - check if the result can be folded again
@@ -1017,7 +1043,7 @@ impl CodeInfo {
                 // BUILD_TUPLE location so remove_nops() can eliminate them.
                 let folded_loc = block.instructions[i].location;
                 for j in start_idx..i {
-                    block.instructions[j].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[j]);
                     block.instructions[j].location = folded_loc;
                 }
 
@@ -1116,7 +1142,7 @@ impl CodeInfo {
 
                 // NOP the rest
                 for j in (start_idx + 2)..i {
-                    block.instructions[j].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[j]);
                     block.instructions[j].location = folded_loc;
                 }
 
@@ -1171,9 +1197,9 @@ impl CodeInfo {
                 if is_build && is_const && is_extend && is_iter {
                     // Replace: BUILD_X 0 → NOP, keep LOAD_CONST, LIST_EXTEND → NOP
                     let loc = block.instructions[i].location;
-                    block.instructions[i].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[i]);
                     block.instructions[i].location = loc;
-                    block.instructions[i + 2].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[i + 2]);
                     block.instructions[i + 2].location = loc;
                     i += 4;
                 } else if matches!(
@@ -1207,7 +1233,7 @@ impl CodeInfo {
                             let folded_loc = block.instructions[i].location;
 
                             for j in start_idx..i {
-                                block.instructions[j].instr = Instruction::Nop.into();
+                                set_to_nop(&mut block.instructions[j]);
                                 block.instructions[j].location = folded_loc;
                             }
 
@@ -1314,7 +1340,7 @@ impl CodeInfo {
                 block.instructions[start_idx + 1].except_handler = eh;
 
                 for j in (start_idx + 2)..i {
-                    block.instructions[j].instr = Instruction::Nop.into();
+                    set_to_nop(&mut block.instructions[j]);
                     block.instructions[j].location = folded_loc;
                 }
 
@@ -1322,6 +1348,229 @@ impl CodeInfo {
                 block.instructions[i].arg = OpArg::new(1);
 
                 i += 1;
+            }
+        }
+    }
+
+    /// BUILD_TUPLE n + UNPACK_SEQUENCE n optimization.
+    ///
+    /// Ported from CPython flowgraph.c optimize_basic_block:
+    /// - n == 1: both become NOP (identity operation)
+    /// - n == 2 or 3: BUILD_TUPLE → NOP, UNPACK_SEQUENCE → SWAP
+    fn optimize_build_tuple_unpack(&mut self) {
+        for block in &mut self.blocks {
+            let instrs = &mut block.instructions;
+            let len = instrs.len();
+            for i in 0..len.saturating_sub(1) {
+                let Some(Instruction::BuildTuple { .. }) = instrs[i].instr.real() else {
+                    continue;
+                };
+                let n = u32::from(instrs[i].arg);
+                let Some(Instruction::UnpackSequence { .. }) = instrs[i + 1].instr.real() else {
+                    continue;
+                };
+                if u32::from(instrs[i + 1].arg) != n {
+                    continue;
+                }
+                match n {
+                    1 => {
+                        instrs[i].instr = AnyInstruction::Real(Instruction::Nop);
+                        instrs[i].arg = OpArg::new(0);
+                        instrs[i + 1].instr = AnyInstruction::Real(Instruction::Nop);
+                        instrs[i + 1].arg = OpArg::new(0);
+                    }
+                    2 | 3 => {
+                        instrs[i].instr = AnyInstruction::Real(Instruction::Nop);
+                        instrs[i].arg = OpArg::new(0);
+                        instrs[i + 1].instr =
+                            AnyInstruction::Real(Instruction::Swap { i: Arg::marker() });
+                        instrs[i + 1].arg = OpArg::new(n);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// apply_static_swaps: eliminate SWAPs by reordering target stores/pops.
+    ///
+    /// Ported from CPython Python/flowgraph.c::apply_static_swaps.
+    /// For each SWAP N, find the 1st and N-th swappable instructions after
+    /// it. If both are STORE_FAST/POP_TOP and safe to swap, exchange them
+    /// in the bytecode and replace SWAP with NOP.
+    ///
+    /// Safety: abort if the two stores write the same variable, or if any
+    /// intervening swappable stores to one of the same variables. Do not
+    /// cross line-number boundaries (user-visible name bindings).
+    fn apply_static_swaps(&mut self) {
+        /// Instruction classes that are safe to reorder around SWAP.
+        fn is_swappable(instr: &AnyInstruction) -> bool {
+            matches!(
+                instr,
+                AnyInstruction::Real(Instruction::StoreFast { .. } | Instruction::PopTop)
+            )
+        }
+
+        /// Variable index that a STORE_FAST writes to, or None.
+        fn stores_to(info: &InstructionInfo) -> Option<u32> {
+            match info.instr {
+                AnyInstruction::Real(Instruction::StoreFast { .. }) => Some(u32::from(info.arg)),
+                _ => None,
+            }
+        }
+
+        /// Next swappable index after `i` in `instrs`, skipping NOPs.
+        /// Returns None if a non-NOP non-swappable instruction blocks, or
+        /// if `lineno >= 0` and a different lineno is encountered.
+        fn next_swappable(instrs: &[InstructionInfo], mut i: usize, lineno: i32) -> Option<usize> {
+            loop {
+                i += 1;
+                if i >= instrs.len() {
+                    return None;
+                }
+                let info = &instrs[i];
+                let info_lineno = info.location.line.get() as i32;
+                if lineno >= 0 && info_lineno > 0 && info_lineno != lineno {
+                    return None;
+                }
+                if matches!(info.instr, AnyInstruction::Real(Instruction::Nop)) {
+                    continue;
+                }
+                if is_swappable(&info.instr) {
+                    return Some(i);
+                }
+                return None;
+            }
+        }
+
+        for block in &mut self.blocks {
+            let instrs = &mut block.instructions;
+            let len = instrs.len();
+            // Walk forward; for each SWAP attempt elimination.
+            let mut i = 0;
+            while i < len {
+                let swap_arg = match instrs[i].instr {
+                    AnyInstruction::Real(Instruction::Swap { .. }) => u32::from(instrs[i].arg),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                // SWAP oparg < 2 is a no-op; the compiler should not emit
+                // these, but be defensive.
+                if swap_arg < 2 {
+                    i += 1;
+                    continue;
+                }
+                // Find first swappable after SWAP (lineno = -1 initially).
+                let Some(j) = next_swappable(instrs, i, -1) else {
+                    i += 1;
+                    continue;
+                };
+                let lineno = instrs[j].location.line.get() as i32;
+                // Walk (swap_arg - 1) more swappable instructions, with
+                // lineno constraint.
+                let mut k = j;
+                let mut ok = true;
+                for _ in 1..swap_arg {
+                    match next_swappable(instrs, k, lineno) {
+                        Some(next) => k = next,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    i += 1;
+                    continue;
+                }
+                // Conflict check: if either j or k is a STORE_FAST, no
+                // intervening store may target the same variable, and
+                // they must not target the same variable themselves.
+                let store_j = stores_to(&instrs[j]);
+                let store_k = stores_to(&instrs[k]);
+                if store_j.is_some() || store_k.is_some() {
+                    if store_j == store_k {
+                        i += 1;
+                        continue;
+                    }
+                    let conflict = instrs[(j + 1)..k].iter().any(|info| {
+                        if let Some(store_idx) = stores_to(info) {
+                            Some(store_idx) == store_j || Some(store_idx) == store_k
+                        } else {
+                            false
+                        }
+                    });
+                    if conflict {
+                        i += 1;
+                        continue;
+                    }
+                }
+                // Safe to reorder. SWAP -> NOP, swap j and k.
+                instrs[i].instr = AnyInstruction::Real(Instruction::Nop);
+                instrs[i].arg = OpArg::new(0);
+                instrs.swap(j, k);
+                i += 1;
+            }
+        }
+    }
+
+    /// Eliminate dead stores in STORE_FAST sequences (apply_static_swaps).
+    ///
+    /// In sequences of consecutive STORE_FAST instructions (from tuple unpacking),
+    /// if the same variable is stored to more than once, only the first store
+    /// (which gets TOS — the rightmost value) matters. Later stores to the
+    /// same variable are dead and replaced with POP_TOP.
+    /// Simplified apply_static_swaps (CPython flowgraph.c):
+    /// In STORE_FAST sequences that follow UNPACK_SEQUENCE / UNPACK_EX,
+    /// replace duplicate stores to the same variable with POP_TOP.
+    /// UNPACK pushes values so stores execute left-to-right; the LAST
+    /// store to a variable carries the final value, earlier ones are dead.
+    fn eliminate_dead_stores(&mut self) {
+        for block in &mut self.blocks {
+            let instrs = &mut block.instructions;
+            let len = instrs.len();
+            let mut i = 0;
+            while i < len {
+                // Look for UNPACK_SEQUENCE or UNPACK_EX
+                let is_unpack = matches!(
+                    instrs[i].instr,
+                    AnyInstruction::Real(
+                        Instruction::UnpackSequence { .. } | Instruction::UnpackEx { .. }
+                    )
+                );
+                if !is_unpack {
+                    i += 1;
+                    continue;
+                }
+                // Scan the run of STORE_FAST right after the unpack
+                let run_start = i + 1;
+                let mut run_end = run_start;
+                while run_end < len
+                    && matches!(
+                        instrs[run_end].instr,
+                        AnyInstruction::Real(Instruction::StoreFast { .. })
+                    )
+                {
+                    run_end += 1;
+                }
+                if run_end - run_start >= 2 {
+                    // Pass 1: find the LAST occurrence of each variable
+                    let mut last_occurrence = std::collections::HashMap::new();
+                    for (j, instr) in instrs[run_start..run_end].iter().enumerate() {
+                        last_occurrence.insert(u32::from(instr.arg), j);
+                    }
+                    // Pass 2: non-last stores to the same variable are dead
+                    for (j, instr) in instrs[run_start..run_end].iter_mut().enumerate() {
+                        let idx = u32::from(instr.arg);
+                        if last_occurrence[&idx] != j {
+                            instr.instr = AnyInstruction::Real(Instruction::PopTop);
+                            instr.arg = OpArg::new(0);
+                        }
+                    }
+                }
+                i = run_end.max(i + 1);
             }
         }
     }
@@ -1346,34 +1595,49 @@ impl CodeInfo {
                     match (curr_instr, next_instr) {
                         // LoadFast + LoadFast -> LoadFastLoadFast (if both indices < 16)
                         (Instruction::LoadFast { .. }, Instruction::LoadFast { .. }) => {
-                            let idx1 = u32::from(curr.arg);
-                            let idx2 = u32::from(next.arg);
-                            if idx1 < 16 && idx2 < 16 {
-                                let packed = (idx1 << 4) | idx2;
-                                Some((
-                                    Instruction::LoadFastLoadFast {
-                                        var_nums: Arg::marker(),
-                                    },
-                                    OpArg::new(packed),
-                                ))
-                            } else {
+                            let line1 = curr.location.line.get() as i32;
+                            let line2 = next.location.line.get() as i32;
+                            if line1 > 0 && line2 > 0 && line1 != line2 {
                                 None
+                            } else {
+                                let idx1 = u32::from(curr.arg);
+                                let idx2 = u32::from(next.arg);
+                                if idx1 < 16 && idx2 < 16 {
+                                    let packed = (idx1 << 4) | idx2;
+                                    Some((
+                                        Instruction::LoadFastLoadFast {
+                                            var_nums: Arg::marker(),
+                                        },
+                                        OpArg::new(packed),
+                                    ))
+                                } else {
+                                    None
+                                }
                             }
                         }
                         // StoreFast + StoreFast -> StoreFastStoreFast (if both indices < 16)
+                        // Dead store elimination: if both store to the same variable,
+                        // the first store is dead. Replace it with POP_TOP (like
+                        // apply_static_swaps in CPython's flowgraph.c).
                         (Instruction::StoreFast { .. }, Instruction::StoreFast { .. }) => {
-                            let idx1 = u32::from(curr.arg);
-                            let idx2 = u32::from(next.arg);
-                            if idx1 < 16 && idx2 < 16 {
-                                let packed = (idx1 << 4) | idx2;
-                                Some((
-                                    Instruction::StoreFastStoreFast {
-                                        var_nums: Arg::marker(),
-                                    },
-                                    OpArg::new(packed),
-                                ))
-                            } else {
+                            let line1 = curr.location.line.get() as i32;
+                            let line2 = next.location.line.get() as i32;
+                            if line1 > 0 && line2 > 0 && line1 != line2 {
                                 None
+                            } else {
+                                let idx1 = u32::from(curr.arg);
+                                let idx2 = u32::from(next.arg);
+                                if idx1 < 16 && idx2 < 16 {
+                                    let packed = (idx1 << 4) | idx2;
+                                    Some((
+                                        Instruction::StoreFastStoreFast {
+                                            var_nums: Arg::marker(),
+                                        },
+                                        OpArg::new(packed),
+                                    ))
+                                } else {
+                                    None
+                                }
                             }
                         }
                         // Note: StoreFast + LoadFast → StoreFastLoadFast is done in a
@@ -1597,8 +1861,7 @@ impl CodeInfo {
                     .into();
                     block.instructions[i].arg = OpArg::new(packed);
                     // Replace second instruction with NOP (CPython: INSTR_SET_OP0(inst2, NOP))
-                    block.instructions[i + 1].instr = Instruction::Nop.into();
-                    block.instructions[i + 1].arg = OpArg::new(0);
+                    set_to_nop(&mut block.instructions[i + 1]);
                     i += 2; // skip the NOP
                 } else {
                     i += 1;
@@ -1694,6 +1957,183 @@ impl CodeInfo {
                         .into();
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+
+    fn add_checks_for_loads_of_uninitialized_variables(&mut self) {
+        let nlocals = self.metadata.varnames.len();
+        if nlocals == 0 {
+            return;
+        }
+
+        let mut nparams = self.metadata.argcount as usize + self.metadata.kwonlyargcount as usize;
+        if self.flags.contains(CodeFlags::VARARGS) {
+            nparams += 1;
+        }
+        if self.flags.contains(CodeFlags::VARKEYWORDS) {
+            nparams += 1;
+        }
+        nparams = nparams.min(nlocals);
+
+        let mut in_masks: Vec<Option<Vec<bool>>> = vec![None; self.blocks.len()];
+        let mut start_mask = vec![false; nlocals];
+        for slot in start_mask.iter_mut().skip(nparams) {
+            *slot = true;
+        }
+        in_masks[0] = Some(start_mask);
+
+        let mut worklist = vec![BlockIdx(0)];
+        while let Some(block_idx) = worklist.pop() {
+            let idx = block_idx.idx();
+            let Some(mut unsafe_mask) = in_masks[idx].clone() else {
+                continue;
+            };
+
+            let old_instructions = self.blocks[idx].instructions.clone();
+            let mut new_instructions = Vec::with_capacity(old_instructions.len());
+            let mut changed = false;
+
+            for info in old_instructions {
+                let mut info = info;
+                if let Some(eh) = info.except_handler {
+                    let target = next_nonempty_block(&self.blocks, eh.handler_block);
+                    if target != BlockIdx::NULL
+                        && merge_unsafe_mask(&mut in_masks[target.idx()], &unsafe_mask)
+                    {
+                        worklist.push(target);
+                    }
+                }
+                match info.instr.real() {
+                    Some(Instruction::DeleteFast { var_num }) => {
+                        let var_idx = usize::from(var_num.get(info.arg));
+                        if var_idx < nlocals {
+                            unsafe_mask[var_idx] = true;
+                        }
+                        new_instructions.push(info);
+                    }
+                    Some(Instruction::LoadFastAndClear { var_num }) => {
+                        let var_idx = usize::from(var_num.get(info.arg));
+                        if var_idx < nlocals {
+                            unsafe_mask[var_idx] = true;
+                        }
+                        new_instructions.push(info);
+                    }
+                    Some(Instruction::StoreFast { var_num }) => {
+                        let var_idx = usize::from(var_num.get(info.arg));
+                        if var_idx < nlocals {
+                            unsafe_mask[var_idx] = false;
+                        }
+                        new_instructions.push(info);
+                    }
+                    Some(Instruction::StoreFastStoreFast { var_nums }) => {
+                        let packed = var_nums.get(info.arg);
+                        let (idx1, idx2) = packed.indexes();
+                        let idx1 = usize::from(idx1);
+                        let idx2 = usize::from(idx2);
+                        if idx1 < nlocals {
+                            unsafe_mask[idx1] = false;
+                        }
+                        if idx2 < nlocals {
+                            unsafe_mask[idx2] = false;
+                        }
+                        new_instructions.push(info);
+                    }
+                    Some(Instruction::LoadFastCheck { var_num }) => {
+                        let var_idx = usize::from(var_num.get(info.arg));
+                        if var_idx < nlocals {
+                            unsafe_mask[var_idx] = false;
+                        }
+                        new_instructions.push(info);
+                    }
+                    Some(Instruction::LoadFast { var_num }) => {
+                        let var_idx = usize::from(var_num.get(info.arg));
+                        if var_idx < nlocals && unsafe_mask[var_idx] {
+                            info.instr = Instruction::LoadFastCheck {
+                                var_num: Arg::marker(),
+                            }
+                            .into();
+                            changed = true;
+                        }
+                        if var_idx < nlocals {
+                            unsafe_mask[var_idx] = false;
+                        }
+                        new_instructions.push(info);
+                    }
+                    Some(Instruction::LoadFastLoadFast { var_nums }) => {
+                        let packed = var_nums.get(info.arg);
+                        let (idx1, idx2) = packed.indexes();
+                        let idx1 = usize::from(idx1);
+                        let idx2 = usize::from(idx2);
+                        let needs_check_1 = idx1 < nlocals && unsafe_mask[idx1];
+                        let needs_check_2 = idx2 < nlocals && unsafe_mask[idx2];
+                        if needs_check_1 || needs_check_2 {
+                            let mut first = info;
+                            first.instr = if needs_check_1 {
+                                Instruction::LoadFastCheck {
+                                    var_num: Arg::marker(),
+                                }
+                            } else {
+                                Instruction::LoadFast {
+                                    var_num: Arg::marker(),
+                                }
+                            }
+                            .into();
+                            first.arg = OpArg::new(idx1 as u32);
+
+                            let mut second = info;
+                            second.instr = if needs_check_2 {
+                                Instruction::LoadFastCheck {
+                                    var_num: Arg::marker(),
+                                }
+                            } else {
+                                Instruction::LoadFast {
+                                    var_num: Arg::marker(),
+                                }
+                            }
+                            .into();
+                            second.arg = OpArg::new(idx2 as u32);
+
+                            new_instructions.push(first);
+                            new_instructions.push(second);
+                            changed = true;
+                        } else {
+                            new_instructions.push(info);
+                        }
+                        if idx1 < nlocals {
+                            unsafe_mask[idx1] = false;
+                        }
+                        if idx2 < nlocals {
+                            unsafe_mask[idx2] = false;
+                        }
+                    }
+                    _ => new_instructions.push(info),
+                }
+            }
+
+            if changed {
+                self.blocks[idx].instructions = new_instructions;
+            }
+
+            let block = &self.blocks[idx];
+            if block_has_fallthrough(block) {
+                let next = next_nonempty_block(&self.blocks, block.next);
+                if next != BlockIdx::NULL
+                    && merge_unsafe_mask(&mut in_masks[next.idx()], &unsafe_mask)
+                {
+                    worklist.push(next);
+                }
+            }
+
+            if let Some(last) = block.instructions.last()
+                && is_jump_instruction(last)
+            {
+                let target = next_nonempty_block(&self.blocks, last.target);
+                if target != BlockIdx::NULL
+                    && merge_unsafe_mask(&mut in_masks[target.idx()], &unsafe_mask)
+                {
+                    worklist.push(target);
                 }
             }
         }
@@ -2164,16 +2604,6 @@ fn push_cold_blocks_to_end(blocks: &mut Vec<Block>) {
 
     for (cold_idx, warm_next) in fixups {
         let jump_block_idx = BlockIdx(blocks.len() as u32);
-        let loc = blocks[cold_idx.idx()]
-            .instructions
-            .last()
-            .map(|i| i.location)
-            .unwrap_or_default();
-        let end_loc = blocks[cold_idx.idx()]
-            .instructions
-            .last()
-            .map(|i| i.end_location)
-            .unwrap_or_default();
         let mut jump_block = Block {
             cold: true,
             ..Block::default()
@@ -2185,10 +2615,10 @@ fn push_cold_blocks_to_end(blocks: &mut Vec<Block>) {
             .into(),
             arg: OpArg::new(0),
             target: warm_next,
-            location: loc,
-            end_location: end_loc,
+            location: SourceLocation::default(),
+            end_location: SourceLocation::default(),
             except_handler: None,
-            lineno_override: None,
+            lineno_override: Some(-1),
             cache_entries: 0,
         });
         jump_block.next = blocks[cold_idx.idx()].next;
@@ -2287,6 +2717,14 @@ fn split_blocks_at_jumps(blocks: &mut Vec<Block>) {
 /// instruction is an unconditional jump, redirect to the final target.
 /// flowgraph.c optimize_basic_block + jump_thread
 fn jump_threading(blocks: &mut [Block]) {
+    jump_threading_impl(blocks, true);
+}
+
+fn jump_threading_unconditional(blocks: &mut [Block]) {
+    jump_threading_impl(blocks, false);
+}
+
+fn jump_threading_impl(blocks: &mut [Block], include_conditional: bool) {
     let mut changed = true;
     while changed {
         changed = false;
@@ -2295,23 +2733,50 @@ fn jump_threading(blocks: &mut [Block]) {
                 Some(i) => i,
                 None => continue,
             };
-            let ins = &blocks[bi].instructions[last_idx];
+            let ins = blocks[bi].instructions[last_idx];
             let target = ins.target;
             if target == BlockIdx::NULL {
                 continue;
             }
-            if !ins.instr.is_unconditional_jump() && !is_conditional_jump(&ins.instr) {
+            if !(ins.instr.is_unconditional_jump()
+                || include_conditional && is_conditional_jump(&ins.instr))
+            {
                 continue;
             }
+            if include_conditional && is_conditional_jump(&ins.instr) {
+                let next = next_nonempty_block(blocks, blocks[bi].next);
+                if next != BlockIdx::NULL
+                    && blocks[next.idx()]
+                        .instructions
+                        .last()
+                        .is_some_and(|instr| instr.instr.is_scope_exit())
+                {
+                    continue;
+                }
+            }
             // Check if target block's first instruction is an unconditional jump
-            let target_block = &blocks[target.idx()];
-            if let Some(target_ins) = target_block.instructions.first()
+            let target_jump = blocks[target.idx()]
+                .instructions
+                .iter()
+                .find(|ins| !matches!(ins.instr.real(), Some(Instruction::Nop)))
+                .copied();
+            if let Some(target_ins) = target_jump
                 && target_ins.instr.is_unconditional_jump()
                 && target_ins.target != BlockIdx::NULL
                 && target_ins.target != target
             {
                 let final_target = target_ins.target;
-                blocks[bi].instructions[last_idx].target = final_target;
+                if ins.target == final_target {
+                    continue;
+                }
+                set_to_nop(&mut blocks[bi].instructions[last_idx]);
+                let mut threaded = ins;
+                threaded.arg = OpArg::new(0);
+                threaded.target = final_target;
+                threaded.location = target_ins.location;
+                threaded.end_location = target_ins.end_location;
+                threaded.cache_entries = 0;
+                blocks[bi].instructions.push(threaded);
                 changed = true;
             }
         }
@@ -2380,8 +2845,7 @@ fn normalize_jumps(blocks: &mut Vec<Block>) {
                     && ins.target == next
             });
             if is_jump_to_next && let Some(last_instr) = blocks[idx].instructions.last_mut() {
-                last_instr.instr = Instruction::Nop.into();
-                last_instr.target = BlockIdx::NULL;
+                set_to_nop(last_instr);
             }
         }
 
@@ -2474,51 +2938,6 @@ fn normalize_jumps(blocks: &mut Vec<Block>) {
         current = blocks[current.idx()].next;
     }
 
-    // Replace JUMP → value-producing-instr + RETURN_VALUE with inline return.
-    // This matches CPython's optimize_basic_block: "Replace JUMP to a RETURN".
-    for &block_idx in &visit_order {
-        let idx = block_idx.idx();
-        let mut replacements: Vec<(usize, Vec<InstructionInfo>)> = Vec::new();
-        for (i, ins) in blocks[idx].instructions.iter().enumerate() {
-            if !ins.instr.is_unconditional_jump() || ins.target == BlockIdx::NULL {
-                continue;
-            }
-            // Follow through empty blocks (next_nonempty_block)
-            let mut target_idx = ins.target.idx();
-            while blocks[target_idx].instructions.is_empty()
-                && blocks[target_idx].next != BlockIdx::NULL
-            {
-                target_idx = blocks[target_idx].next.idx();
-            }
-            let target_block = &blocks[target_idx];
-            // Target must be exactly `value; RETURN_VALUE`.
-            if target_block.instructions.len() == 2 {
-                let t0 = &target_block.instructions[0];
-                let t1 = &target_block.instructions[1];
-                if matches!(t0.instr, AnyInstruction::Real(_))
-                    && !t0.instr.is_scope_exit()
-                    && !t0.instr.is_unconditional_jump()
-                    && matches!(t1.instr.real(), Some(Instruction::ReturnValue))
-                {
-                    let mut load = *t0;
-                    let mut ret = *t1;
-                    // Use the jump's location for the inlined return
-                    load.location = ins.location;
-                    load.end_location = ins.end_location;
-                    load.except_handler = ins.except_handler;
-                    ret.location = ins.location;
-                    ret.end_location = ins.end_location;
-                    ret.except_handler = ins.except_handler;
-                    replacements.push((i, vec![load, ret]));
-                }
-            }
-        }
-        // Apply replacements in reverse order
-        for (i, new_insts) in replacements.into_iter().rev() {
-            blocks[idx].instructions.splice(i..i + 1, new_insts);
-        }
-    }
-
     // Resolve JUMP/JUMP_NO_INTERRUPT pseudo instructions before offset fixpoint.
     let mut block_order = vec![0u32; blocks.len()];
     for (pos, &block_idx) in visit_order.iter().enumerate() {
@@ -2605,9 +3024,7 @@ fn inline_small_or_no_lineno_blocks(blocks: &mut [Block]) {
 
             if small_exit_block || no_lineno_no_fallthrough {
                 if let Some(last_instr) = blocks[current.idx()].instructions.last_mut() {
-                    last_instr.instr = Instruction::Nop.into();
-                    last_instr.arg = OpArg::new(0);
-                    last_instr.target = BlockIdx::NULL;
+                    set_to_nop(last_instr);
                 }
                 let appended = blocks[target.idx()].instructions.clone();
                 blocks[current.idx()].instructions.extend(appended);
@@ -2619,6 +3036,124 @@ fn inline_small_or_no_lineno_blocks(blocks: &mut [Block]) {
 
         if !changes {
             break;
+        }
+    }
+}
+
+fn remove_redundant_nops_in_blocks(blocks: &mut [Block]) -> usize {
+    let mut changes = 0;
+    let mut block_order = Vec::new();
+    let mut current = BlockIdx(0);
+    while current != BlockIdx::NULL {
+        block_order.push(current);
+        current = blocks[current.idx()].next;
+    }
+
+    for block_idx in block_order {
+        let bi = block_idx.idx();
+        let mut src_instructions = core::mem::take(&mut blocks[bi].instructions);
+        let mut kept = Vec::with_capacity(src_instructions.len());
+        let mut prev_lineno = -1i32;
+
+        for src in 0..src_instructions.len() {
+            let instr = src_instructions[src];
+            let lineno = instruction_lineno(&instr);
+            let mut remove = false;
+
+            if matches!(instr.instr.real(), Some(Instruction::Nop)) {
+                if lineno < 0 || prev_lineno == lineno {
+                    remove = true;
+                } else if src < src_instructions.len() - 1 {
+                    let next_lineno = instruction_lineno(&src_instructions[src + 1]);
+                    if next_lineno == lineno {
+                        remove = true;
+                    } else if next_lineno < 0 {
+                        src_instructions[src + 1].lineno_override = Some(lineno);
+                        remove = true;
+                    }
+                } else {
+                    let next = next_nonempty_block(blocks, blocks[bi].next);
+                    if next != BlockIdx::NULL {
+                        let mut next_lineno = None;
+                        for next_instr in &blocks[next.idx()].instructions {
+                            let line = instruction_lineno(next_instr);
+                            if matches!(next_instr.instr.real(), Some(Instruction::Nop)) && line < 0
+                            {
+                                continue;
+                            }
+                            next_lineno = Some(line);
+                            break;
+                        }
+                        if next_lineno.is_some_and(|line| line == lineno) {
+                            remove = true;
+                        }
+                    }
+                }
+            }
+
+            if remove {
+                changes += 1;
+            } else {
+                kept.push(instr);
+                prev_lineno = lineno;
+            }
+        }
+
+        blocks[bi].instructions = kept;
+    }
+
+    changes
+}
+
+fn remove_redundant_jumps_in_blocks(blocks: &mut [Block]) -> usize {
+    let mut changes = 0;
+    let mut current = BlockIdx(0);
+    while current != BlockIdx::NULL {
+        let idx = current.idx();
+        let next = next_nonempty_block(blocks, blocks[idx].next);
+        let jump_target = blocks[idx]
+            .instructions
+            .last()
+            .filter(|ins| ins.instr.is_unconditional_jump() && ins.target != BlockIdx::NULL)
+            .map(|ins| ins.target);
+        if next != BlockIdx::NULL
+            && let Some(target) = jump_target
+            && next_nonempty_block(blocks, target) == next
+            && let Some(last_instr) = blocks[idx].instructions.last_mut()
+        {
+            set_to_nop(last_instr);
+            changes += 1;
+        }
+        current = blocks[idx].next;
+    }
+    changes
+}
+
+fn remove_redundant_nops_and_jumps(blocks: &mut [Block]) {
+    loop {
+        let removed_nops = remove_redundant_nops_in_blocks(blocks);
+        let removed_jumps = remove_redundant_jumps_in_blocks(blocks);
+        if removed_nops + removed_jumps == 0 {
+            break;
+        }
+    }
+}
+
+fn merge_unsafe_mask(slot: &mut Option<Vec<bool>>, incoming: &[bool]) -> bool {
+    match slot {
+        Some(existing) => {
+            let mut changed = false;
+            for (dst, src) in existing.iter_mut().zip(incoming.iter().copied()) {
+                if src && !*dst {
+                    *dst = true;
+                    changed = true;
+                }
+            }
+            changed
+        }
+        None => {
+            *slot = Some(incoming.to_vec());
+            true
         }
     }
 }
@@ -2663,6 +3198,210 @@ fn is_exit_without_lineno(block: &Block) -> bool {
         return false;
     };
     !instruction_has_lineno(first) && last.instr.is_scope_exit()
+}
+
+fn is_jump_only_block(block: &Block) -> bool {
+    let [instr] = block.instructions.as_slice() else {
+        return false;
+    };
+    instr.instr.is_unconditional_jump() && instr.target != BlockIdx::NULL
+}
+
+fn is_scope_exit_block(block: &Block) -> bool {
+    block
+        .instructions
+        .last()
+        .is_some_and(|instr| instr.instr.is_scope_exit())
+}
+
+fn trailing_conditional_jump_index(block: &Block) -> Option<usize> {
+    let last_idx = block.instructions.len().checked_sub(1)?;
+    if is_conditional_jump(&block.instructions[last_idx].instr)
+        && block.instructions[last_idx].target != BlockIdx::NULL
+    {
+        return Some(last_idx);
+    }
+
+    let cond_idx = last_idx.checked_sub(1)?;
+    if matches!(
+        block.instructions[last_idx].instr.real(),
+        Some(Instruction::NotTaken)
+    ) && is_conditional_jump(&block.instructions[cond_idx].instr)
+        && block.instructions[cond_idx].target != BlockIdx::NULL
+    {
+        Some(cond_idx)
+    } else {
+        None
+    }
+}
+
+fn reorder_conditional_exit_and_jump_blocks(blocks: &mut [Block]) {
+    let mut current = BlockIdx(0);
+    while current != BlockIdx::NULL {
+        let idx = current.idx();
+        let next = blocks[idx].next;
+        let Some(cond_idx) = trailing_conditional_jump_index(&blocks[idx]) else {
+            current = next;
+            continue;
+        };
+        let last = blocks[idx].instructions[cond_idx];
+
+        let Some(reversed) = reversed_conditional(&last.instr) else {
+            current = next;
+            continue;
+        };
+
+        let exit_start = next;
+        let jump_start = last.target;
+        if exit_start == BlockIdx::NULL || jump_start == BlockIdx::NULL || exit_start == jump_start
+        {
+            current = next;
+            continue;
+        }
+
+        let mut exit_end = BlockIdx::NULL;
+        let mut exit_block = BlockIdx::NULL;
+        let mut cursor = exit_start;
+        let mut exit_segment_valid = true;
+        while cursor != BlockIdx::NULL && cursor != jump_start {
+            if !blocks[cursor.idx()].instructions.is_empty() {
+                if exit_block != BlockIdx::NULL {
+                    exit_segment_valid = false;
+                    break;
+                }
+                exit_block = cursor;
+            }
+            exit_end = cursor;
+            cursor = blocks[cursor.idx()].next;
+        }
+        if !exit_segment_valid
+            || cursor != jump_start
+            || exit_end == BlockIdx::NULL
+            || exit_block == BlockIdx::NULL
+            || !is_scope_exit_block(&blocks[exit_block.idx()])
+        {
+            current = next;
+            continue;
+        }
+
+        let mut jump_end = BlockIdx::NULL;
+        let mut jump_block = BlockIdx::NULL;
+        cursor = jump_start;
+        while cursor != BlockIdx::NULL {
+            jump_end = cursor;
+            if blocks[cursor.idx()].instructions.is_empty() {
+                cursor = blocks[cursor.idx()].next;
+                continue;
+            }
+            if is_jump_only_block(&blocks[cursor.idx()]) {
+                jump_block = cursor;
+            }
+            break;
+        }
+        if jump_block == BlockIdx::NULL {
+            current = next;
+            continue;
+        }
+
+        let after_jump = blocks[jump_end.idx()].next;
+        blocks[idx].next = jump_start;
+        blocks[jump_end.idx()].next = exit_start;
+        blocks[exit_end.idx()].next = after_jump;
+
+        let cond_mut = &mut blocks[idx].instructions[cond_idx];
+        cond_mut.instr = reversed;
+        cond_mut.target = exit_start;
+
+        current = after_jump;
+    }
+}
+
+fn reorder_conditional_jump_and_exit_blocks(blocks: &mut [Block]) {
+    let mut current = BlockIdx(0);
+    while current != BlockIdx::NULL {
+        let idx = current.idx();
+        let next = blocks[idx].next;
+        let Some(cond_idx) = trailing_conditional_jump_index(&blocks[idx]) else {
+            current = next;
+            continue;
+        };
+        let last = blocks[idx].instructions[cond_idx];
+
+        let Some(reversed) = reversed_conditional(&last.instr) else {
+            current = next;
+            continue;
+        };
+
+        let jump_start = next;
+        let exit_start = last.target;
+        if jump_start == BlockIdx::NULL || exit_start == BlockIdx::NULL || jump_start == exit_start
+        {
+            current = next;
+            continue;
+        }
+
+        let mut jump_end = BlockIdx::NULL;
+        let mut jump_block = BlockIdx::NULL;
+        let mut cursor = jump_start;
+        let mut jump_segment_valid = true;
+        while cursor != BlockIdx::NULL && cursor != exit_start {
+            if !blocks[cursor.idx()].instructions.is_empty() {
+                if jump_block != BlockIdx::NULL || !is_jump_only_block(&blocks[cursor.idx()]) {
+                    jump_segment_valid = false;
+                    break;
+                }
+                jump_block = cursor;
+            }
+            jump_end = cursor;
+            cursor = blocks[cursor.idx()].next;
+        }
+        if !jump_segment_valid || cursor != exit_start || jump_block == BlockIdx::NULL {
+            current = next;
+            continue;
+        }
+        let jump_instr = blocks[jump_block.idx()].instructions[0];
+        if !matches!(
+            jump_instr.instr.real(),
+            Some(Instruction::JumpForward { .. })
+        ) {
+            current = next;
+            continue;
+        }
+
+        let mut exit_end = BlockIdx::NULL;
+        let mut exit_block = BlockIdx::NULL;
+        let after_exit = loop {
+            if cursor == BlockIdx::NULL {
+                break BlockIdx::NULL;
+            }
+            if !blocks[cursor.idx()].instructions.is_empty() {
+                if exit_block != BlockIdx::NULL {
+                    break cursor;
+                }
+                if !is_scope_exit_block(&blocks[cursor.idx()]) {
+                    exit_block = BlockIdx::NULL;
+                    break BlockIdx::NULL;
+                }
+                exit_block = cursor;
+            }
+            exit_end = cursor;
+            cursor = blocks[cursor.idx()].next;
+        };
+        if exit_block == BlockIdx::NULL || exit_end == BlockIdx::NULL {
+            current = next;
+            continue;
+        }
+
+        blocks[idx].next = exit_start;
+        blocks[exit_end.idx()].next = jump_start;
+        blocks[jump_end.idx()].next = after_exit;
+
+        let cond_mut = &mut blocks[idx].instructions[cond_idx];
+        cond_mut.instr = reversed;
+        cond_mut.target = jump_start;
+
+        current = after_exit;
+    }
 }
 
 fn maybe_propagate_location(
@@ -2787,6 +3526,45 @@ fn duplicate_exits_without_lineno(blocks: &mut Vec<Block>, predecessors: &mut Ve
     }
 }
 
+fn duplicate_jump_targets_without_lineno(blocks: &mut Vec<Block>, predecessors: &mut Vec<u32>) {
+    let mut current = BlockIdx(0);
+    while current != BlockIdx::NULL {
+        let block = &blocks[current.idx()];
+        let last = match block.instructions.last() {
+            Some(ins) if ins.instr.is_unconditional_jump() && ins.target != BlockIdx::NULL => *ins,
+            _ => {
+                current = blocks[current.idx()].next;
+                continue;
+            }
+        };
+
+        let target = next_nonempty_block(blocks, last.target);
+        if target == BlockIdx::NULL || !is_jump_only_block(&blocks[target.idx()]) {
+            current = blocks[current.idx()].next;
+            continue;
+        }
+        if predecessors[target.idx()] <= 1 {
+            current = blocks[current.idx()].next;
+            continue;
+        }
+
+        let new_idx = BlockIdx(blocks.len() as u32);
+        let mut new_block = blocks[target.idx()].clone();
+        propagate_locations_in_block(&mut new_block, last.location, last.end_location);
+        let old_next = blocks[current.idx()].next;
+        new_block.next = old_next;
+        blocks.push(new_block);
+        blocks[current.idx()].next = new_idx;
+
+        let last_mut = blocks[current.idx()].instructions.last_mut().unwrap();
+        last_mut.target = new_idx;
+        predecessors[target.idx()] -= 1;
+        predecessors.push(1);
+
+        current = old_next;
+    }
+}
+
 fn propagate_line_numbers(blocks: &mut [Block], predecessors: &[u32]) {
     let mut current = BlockIdx(0);
     while current != BlockIdx::NULL {
@@ -2837,6 +3615,7 @@ fn propagate_line_numbers(blocks: &mut [Block], predecessors: &[u32]) {
 fn resolve_line_numbers(blocks: &mut Vec<Block>) {
     let mut predecessors = compute_predecessors(blocks);
     duplicate_exits_without_lineno(blocks, &mut predecessors);
+    duplicate_jump_targets_without_lineno(blocks, &mut predecessors);
     propagate_line_numbers(blocks, &predecessors);
 }
 
@@ -2982,7 +3761,7 @@ pub(crate) fn label_exception_targets(blocks: &mut [Block]) {
                 );
                 stack.pop();
                 // POP_BLOCK → NOP
-                blocks[bi].instructions[i].instr = Instruction::Nop.into();
+                set_to_nop(&mut blocks[bi].instructions[i]);
             } else {
                 // Set except_handler for this instruction from except stack top
                 // stack_depth placeholder: filled by fixup_handler_depths
@@ -3061,12 +3840,12 @@ pub(crate) fn convert_pseudo_ops(blocks: &mut [Block], cellfixedoffsets: &[u32])
                 PseudoInstruction::SetupCleanup { .. }
                 | PseudoInstruction::SetupFinally { .. }
                 | PseudoInstruction::SetupWith { .. } => {
-                    info.instr = Instruction::Nop.into();
+                    set_to_nop(info);
                 }
                 // PopBlock in reachable blocks is converted to NOP by
                 // label_exception_targets. Dead blocks may still have them.
                 PseudoInstruction::PopBlock => {
-                    info.instr = Instruction::Nop.into();
+                    set_to_nop(info);
                 }
                 // LOAD_CLOSURE → LOAD_FAST (using cellfixedoffsets for merged layout)
                 PseudoInstruction::LoadClosure { i } => {

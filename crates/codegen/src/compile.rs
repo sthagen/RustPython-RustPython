@@ -1512,11 +1512,14 @@ impl Compiler {
             }
 
             FBlockType::ForLoop => {
-                // Pop the iterator
+                // When returning from a for-loop, CPython swaps the preserved
+                // value with the iterator and uses POP_TOP for the iterator slot.
                 if preserve_tos {
                     emit!(self, Instruction::Swap { i: 2 });
+                    emit!(self, Instruction::PopTop);
+                } else {
+                    emit!(self, Instruction::PopIter);
                 }
-                emit!(self, Instruction::PopIter);
             }
 
             FBlockType::TryExcept => {
@@ -3128,23 +3131,18 @@ impl Compiler {
                 }
                 self.compile_statements(finalbody)?;
 
-                // Pop FinallyEnd fblock BEFORE emitting RERAISE
-                // This ensures RERAISE routes to outer exception handler, not cleanup block
-                // Cleanup block is only for new exceptions raised during finally body execution
+                // RERAISE must be inside the cleanup handler's exception table
+                // range. When RERAISE re-raises the exception, the cleanup
+                // handler (COPY 3, POP_EXCEPT, RERAISE 1) runs POP_EXCEPT to
+                // restore exc_info before the exception reaches the outer handler.
+                emit!(self, Instruction::Reraise { depth: 0 });
+
+                // PopBlock after RERAISE (dead code, but marks the exception
+                // table range end so the cleanup covers RERAISE).
                 if finally_cleanup_block.is_some() {
                     emit!(self, PseudoInstruction::PopBlock);
                     self.pop_fblock(FBlockType::FinallyEnd);
                 }
-
-                // Restore prev_exc as current exception before RERAISE
-                // Stack: [prev_exc, exc] -> COPY 2 -> [prev_exc, exc, prev_exc]
-                // POP_EXCEPT pops prev_exc and sets exc_info->exc_value = prev_exc
-                // Stack after POP_EXCEPT: [prev_exc, exc]
-                emit!(self, Instruction::Copy { i: 2 });
-                emit!(self, Instruction::PopExcept);
-
-                // RERAISE 0: re-raise the original exception to outer handler
-                emit!(self, Instruction::Reraise { depth: 0 });
             }
 
             if let Some(cleanup) = finally_cleanup_block {
@@ -3170,6 +3168,7 @@ impl Compiler {
         emit!(self, PseudoInstruction::PopBlock);
         self.pop_fblock(FBlockType::TryExcept);
         emit!(self, PseudoInstruction::Jump { delta: else_block });
+        self.set_no_location();
 
         // except handlers:
         self.switch_to_block(handler_block);
@@ -3400,24 +3399,18 @@ impl Compiler {
             // Run finally body
             self.compile_statements(finalbody)?;
 
-            // Pop FinallyEnd fblock BEFORE emitting RERAISE
-            // This ensures RERAISE routes to outer exception handler, not cleanup block
-            // Cleanup block is only for new exceptions raised during finally body execution
+            // RERAISE must be inside the cleanup handler's exception table
+            // range. The cleanup handler (COPY 3, POP_EXCEPT, RERAISE 1)
+            // runs POP_EXCEPT to restore exc_info before re-raising to
+            // the outer handler.
+            emit!(self, Instruction::Reraise { depth: 0 });
+
+            // PopBlock after RERAISE (dead code, but marks the exception
+            // table range end so the cleanup covers RERAISE).
             if finally_cleanup_block.is_some() {
                 emit!(self, PseudoInstruction::PopBlock);
                 self.pop_fblock(FBlockType::FinallyEnd);
             }
-
-            // Restore prev_exc as current exception before RERAISE
-            // Stack: [lasti, prev_exc, exc] -> COPY 2 -> [lasti, prev_exc, exc, prev_exc]
-            // POP_EXCEPT pops prev_exc and sets exc_info->exc_value = prev_exc
-            // Stack after POP_EXCEPT: [lasti, prev_exc, exc]
-            emit!(self, Instruction::Copy { i: 2 });
-            emit!(self, Instruction::PopExcept);
-
-            // RERAISE 0: re-raise the original exception to outer handler
-            // Stack: [lasti, prev_exc, exc] - exception is on top
-            emit!(self, Instruction::Reraise { depth: 0 });
         }
 
         // finally cleanup block
@@ -3448,8 +3441,8 @@ impl Compiler {
     ) -> CompileResult<()> {
         let handler_block = self.new_block();
         let cleanup_block = self.new_block();
-        let orelse_block = self.new_block();
         let end_block = self.new_block();
+        let orelse_block = self.new_block();
 
         emit!(self, Instruction::Nop);
         emit!(
@@ -3598,7 +3591,9 @@ impl Compiler {
 
         self.switch_to_block(orelse_block);
         self.set_no_location();
-        self.compile_statements(orelse)?;
+        if !orelse.is_empty() {
+            self.compile_statements(orelse)?;
+        }
         emit!(
             self,
             PseudoInstruction::JumpNoInterrupt { delta: end_block }
@@ -3620,7 +3615,7 @@ impl Compiler {
         // Stack layout during handler processing: [prev_exc, orig, list, rest]
         let handler_block = self.new_block();
         let finally_block = self.new_block();
-        let else_block = self.new_block();
+        let cleanup_block = self.new_block();
         let end_block = self.new_block();
         let reraise_star_block = self.new_block();
         let reraise_block = self.new_block();
@@ -3630,6 +3625,12 @@ impl Compiler {
             None
         };
         let exit_block = self.new_block();
+        let continuation_block = end_block;
+        let else_block = if orelse.is_empty() && finalbody.is_empty() {
+            continuation_block
+        } else {
+            self.new_block()
+        };
 
         // Emit NOP at the try: line so LINE events fire for it
         emit!(self, Instruction::Nop);
@@ -3667,14 +3668,23 @@ impl Compiler {
         self.switch_to_block(handler_block);
         // Stack: [exc] (from exception table)
 
+        emit!(
+            self,
+            PseudoInstruction::SetupCleanup {
+                delta: cleanup_block
+            }
+        );
+
         // PUSH_EXC_INFO
         emit!(self, Instruction::PushExcInfo);
         // Stack: [prev_exc, exc]
 
         // Push EXCEPTION_GROUP_HANDLER fblock
-        let eg_dummy1 = self.new_block();
-        let eg_dummy2 = self.new_block();
-        self.push_fblock(FBlockType::ExceptionGroupHandler, eg_dummy1, eg_dummy2)?;
+        self.push_fblock(
+            FBlockType::ExceptionGroupHandler,
+            cleanup_block,
+            cleanup_block,
+        )?;
 
         // Initialize handler stack before the loop
         // BUILD_LIST 0 + COPY 2 to set up [prev_exc, orig, list, rest]
@@ -3695,17 +3705,24 @@ impl Compiler {
                     delta: reraise_star_block
                 }
             );
+            self.set_no_location();
         }
         for (i, handler) in handlers.iter().enumerate() {
             let ast::ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler {
                 type_,
                 name,
                 body,
+                range: handler_range,
                 ..
             }) = handler;
+            let is_last_handler = i == n - 1;
 
             let no_match_block = self.new_block();
-            let next_block = self.new_block();
+            let next_handler_block = if is_last_handler {
+                reraise_star_block
+            } else {
+                self.new_block()
+            };
 
             // Compile exception type
             if let Some(exc_type) = type_ {
@@ -3762,7 +3779,7 @@ impl Compiler {
             );
             self.push_fblock_full(
                 FBlockType::HandlerCleanup,
-                next_block,
+                next_handler_block,
                 end_block,
                 if let Some(alias) = name {
                     FBlockDatum::ExceptionName(alias.as_str().to_owned())
@@ -3775,6 +3792,7 @@ impl Compiler {
             self.compile_statements(body)?;
 
             // Handler body completed normally
+            self.set_no_location();
             emit!(self, PseudoInstruction::PopBlock);
             self.pop_fblock(FBlockType::HandlerCleanup);
 
@@ -3785,8 +3803,15 @@ impl Compiler {
                 self.compile_name(alias.as_str(), NameUsage::Delete)?;
             }
 
-            // Jump to next handler
-            emit!(self, PseudoInstruction::Jump { delta: next_block });
+            if is_last_handler {
+                emit!(self, Instruction::ListAppend { i: 1 });
+            }
+            emit!(
+                self,
+                PseudoInstruction::Jump {
+                    delta: next_handler_block
+                }
+            );
 
             // Handler raised an exception (cleanup_end label)
             self.switch_to_block(handler_except_block);
@@ -3794,6 +3819,7 @@ impl Compiler {
             // (lasti is pushed because push_lasti=true in HANDLER_CLEANUP fblock)
 
             // Cleanup name binding
+            self.set_no_location();
             if let Some(alias) = name {
                 self.emit_load_const(ConstantData::None);
                 self.store_name(alias.as_str())?;
@@ -3812,36 +3838,43 @@ impl Compiler {
             emit!(self, Instruction::PopTop);
             // Stack: [prev_exc, orig, list, new_rest]
 
-            // JUMP except_with_error
-            // We directly JUMP to next_block since no_match_block falls through to it
-            emit!(self, PseudoInstruction::Jump { delta: next_block });
-
-            // No match - pop match (None)
-            self.switch_to_block(no_match_block);
-            emit!(self, Instruction::PopTop); // pop match (None)
-            // Stack: [prev_exc, orig, list, new_rest]
-            // Falls through to next_block
-
-            // except_with_error label
-            // All paths merge here at next_block
-            self.switch_to_block(next_block);
-            // Stack: [prev_exc, orig, list, rest]
-
-            // After last handler, append rest to list
-            if i == n - 1 {
-                // Stack: [prev_exc, orig, list, rest]
-                // ADDOP_I(c, NO_LOCATION, LIST_APPEND, 1);
-                // PEEK(1) = stack[len-1] after pop
-                // RustPython nth_value(i) = stack[len-i-1] after pop
-                // For LIST_APPEND 1: stack[len-1] = stack[len-i-1] -> i = 0
+            if is_last_handler {
                 emit!(self, Instruction::ListAppend { i: 1 });
-                // Stack: [prev_exc, orig, list]
                 emit!(
                     self,
                     PseudoInstruction::Jump {
                         delta: reraise_star_block
                     }
                 );
+            } else {
+                emit!(
+                    self,
+                    PseudoInstruction::Jump {
+                        delta: next_handler_block
+                    }
+                );
+            }
+
+            if is_last_handler {
+                self.switch_to_block(no_match_block);
+                self.set_source_range(*handler_range);
+                emit!(self, Instruction::PopTop); // pop match (None)
+                // Stack: [prev_exc, orig, list, new_rest]
+
+                self.set_no_location();
+                emit!(self, Instruction::ListAppend { i: 1 });
+                emit!(
+                    self,
+                    PseudoInstruction::Jump {
+                        delta: reraise_star_block
+                    }
+                );
+            } else {
+                self.switch_to_block(no_match_block);
+                self.set_source_range(*handler_range);
+                emit!(self, Instruction::PopTop); // pop match (None)
+                // Stack: [prev_exc, orig, list, new_rest]
+                self.switch_to_block(next_handler_block);
             }
         }
 
@@ -3851,6 +3884,7 @@ impl Compiler {
         // Reraise star block
         self.switch_to_block(reraise_star_block);
         // Stack: [prev_exc, orig, list]
+        self.set_no_location();
 
         // CALL_INTRINSIC_2 PREP_RERAISE_STAR
         // Takes 2 args (orig, list) and produces result
@@ -3880,7 +3914,7 @@ impl Compiler {
         emit!(self, Instruction::PopTop);
         // Stack: [prev_exc]
 
-        // POP_BLOCK - no-op for us with exception tables (fblocks handle this)
+        emit!(self, PseudoInstruction::PopBlock);
         // POP_EXCEPT - restore previous exception context
         emit!(self, Instruction::PopExcept);
         // Stack: []
@@ -3890,14 +3924,19 @@ impl Compiler {
             self.pop_fblock(FBlockType::FinallyTry);
         }
 
-        emit!(self, PseudoInstruction::Jump { delta: end_block });
+        emit!(
+            self,
+            PseudoInstruction::Jump {
+                delta: continuation_block
+            }
+        );
 
         // Reraise the result
         self.switch_to_block(reraise_block);
         // Stack: [prev_exc, result]
+        self.set_no_location();
 
-        // POP_BLOCK - no-op for us
-        // SWAP 2
+        emit!(self, PseudoInstruction::PopBlock);
         emit!(self, Instruction::Swap { i: 2 });
         // Stack: [result, prev_exc]
 
@@ -3907,6 +3946,12 @@ impl Compiler {
 
         // RERAISE 0
         emit!(self, Instruction::Reraise { depth: 0 });
+
+        self.switch_to_block(cleanup_block);
+        self.set_no_location();
+        emit!(self, Instruction::Copy { i: 3 });
+        emit!(self, Instruction::PopExcept);
+        emit!(self, Instruction::Reraise { depth: 1 });
 
         // try-else path
         // NOTE: When we reach here in compilation, the nothing-to-reraise path above
@@ -3927,19 +3972,26 @@ impl Compiler {
                 FBlockDatum::FinallyBody(finalbody.to_vec()),
             )?;
         }
-        self.switch_to_block(else_block);
-        self.compile_statements(orelse)?;
+        if else_block != continuation_block {
+            self.switch_to_block(else_block);
+            self.compile_statements(orelse)?;
 
-        if !finalbody.is_empty() {
-            // Pop the FinallyTry fblock we just pushed for the else path
-            emit!(self, PseudoInstruction::PopBlock);
-            self.pop_fblock(FBlockType::FinallyTry);
+            if !finalbody.is_empty() {
+                // Pop the FinallyTry fblock we just pushed for the else path
+                emit!(self, PseudoInstruction::PopBlock);
+                self.pop_fblock(FBlockType::FinallyTry);
+            }
+
+            emit!(
+                self,
+                PseudoInstruction::Jump {
+                    delta: continuation_block
+                }
+            );
         }
 
-        emit!(self, PseudoInstruction::Jump { delta: end_block });
-
-        self.switch_to_block(end_block);
         if !finalbody.is_empty() {
+            self.switch_to_block(end_block);
             // Snapshot sub_tables before first finally compilation
             let sub_table_cursor = self.symbol_table_stack.last().map(|t| t.next_sub_table);
 
@@ -3970,8 +4022,6 @@ impl Compiler {
                 self.pop_fblock(FBlockType::FinallyEnd);
             }
 
-            emit!(self, Instruction::Copy { i: 2 });
-            emit!(self, Instruction::PopExcept);
             emit!(self, Instruction::Reraise { depth: 0 });
 
             if let Some(cleanup) = finally_cleanup_block {
@@ -3982,7 +4032,11 @@ impl Compiler {
             }
         }
 
-        self.switch_to_block(exit_block);
+        self.switch_to_block(if finalbody.is_empty() {
+            end_block
+        } else {
+            exit_block
+        });
 
         Ok(())
     }
@@ -5683,6 +5737,7 @@ impl Compiler {
         }
 
         // Pop fblock before normal exit
+        self.set_source_range(with_range);
         emit!(self, PseudoInstruction::PopBlock);
         self.pop_fblock(if is_async {
             FBlockType::AsyncWith
@@ -5742,15 +5797,14 @@ impl Compiler {
             }
         );
 
-        emit!(self, PseudoInstruction::PopBlock);
-        self.pop_fblock(FBlockType::ExceptionHandler);
-
         emit!(self, Instruction::Reraise { depth: 2 });
 
         // ===== Suppress block =====
         // Stack: [..., exit_func, self_exit, lasti, prev_exc, exc, True]
         self.switch_to_block(suppress_block);
         emit!(self, Instruction::PopTop); // pop True
+        emit!(self, PseudoInstruction::PopBlock);
+        self.pop_fblock(FBlockType::ExceptionHandler);
         emit!(self, Instruction::PopExcept); // pop exc, restore prev_exc
         emit!(self, Instruction::PopTop); // pop lasti
         emit!(self, Instruction::PopTop); // pop self_exit
@@ -8455,30 +8509,42 @@ impl Compiler {
         // Regular call: func → PUSH_NULL → args → CALL
         if let ast::Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = &func {
             // Check for super() method call optimization
-            if !uses_ex_call
-                && let Some(super_type) = self.can_optimize_super_call(value, attr.as_str())
-            {
+            if let Some(super_type) = self.can_optimize_super_call(value, attr.as_str()) {
                 // super().method() or super(cls, self).method() optimization
-                // Stack: [global_super, class, self] → LOAD_SUPER_METHOD → [method, self]
+                // CALL path: [global_super, class, self] → LOAD_SUPER_METHOD → [method, self]
+                // CALL_FUNCTION_EX path: [global_super, class, self] → LOAD_SUPER_ATTR → [attr]
                 // Set source range to the super() call for LOAD_GLOBAL/LOAD_DEREF/etc.
                 let super_range = value.range();
                 self.set_source_range(super_range);
                 self.load_args_for_super(&super_type)?;
                 self.set_source_range(super_range);
                 let idx = self.name(attr.as_str());
-                match super_type {
-                    SuperCallType::TwoArg { .. } => {
-                        self.emit_load_super_method(idx);
+                if uses_ex_call {
+                    match super_type {
+                        SuperCallType::TwoArg { .. } => {
+                            self.emit_load_super_attr(idx);
+                        }
+                        SuperCallType::ZeroArg => {
+                            self.emit_load_zero_super_attr(idx);
+                        }
                     }
-                    SuperCallType::ZeroArg => {
-                        self.emit_load_zero_super_method(idx);
+                    emit!(self, Instruction::PushNull);
+                    self.codegen_call_helper(0, args, call_range)?;
+                } else {
+                    match super_type {
+                        SuperCallType::TwoArg { .. } => {
+                            self.emit_load_super_method(idx);
+                        }
+                        SuperCallType::ZeroArg => {
+                            self.emit_load_zero_super_method(idx);
+                        }
                     }
+                    // NOP for line tracking at .method( line
+                    self.set_source_range(attr.range());
+                    emit!(self, Instruction::Nop);
+                    // CALL at .method( line (not the full expression line)
+                    self.codegen_call_helper(0, args, attr.range())?;
                 }
-                // NOP for line tracking at .method( line
-                self.set_source_range(attr.range());
-                emit!(self, Instruction::Nop);
-                // CALL at .method( line (not the full expression line)
-                self.codegen_call_helper(0, args, attr.range())?;
             } else {
                 self.compile_expression(value)?;
                 let idx = self.name(attr.as_str());
@@ -11083,6 +11149,99 @@ def f(base, cls, state):
             .count();
 
         assert_eq!(return_count, 2);
+    }
+
+    #[test]
+    fn test_loop_store_subscr_threads_direct_backedge() {
+        let code = compile_exec(
+            "\
+def f(kwonlyargs, kwonlydefaults, arg2value):
+    missing = 0
+    for kwarg in kwonlyargs:
+        if kwarg not in arg2value:
+            if kwonlydefaults and kwarg in kwonlydefaults:
+                arg2value[kwarg] = kwonlydefaults[kwarg]
+            else:
+                missing += 1
+    return missing
+",
+        );
+        let f = find_code(&code, "f").expect("missing function code");
+        let ops: Vec<_> = f
+            .instructions
+            .iter()
+            .map(|unit| unit.op)
+            .filter(|op| !matches!(op, Instruction::Cache))
+            .collect();
+
+        let store_subscr = ops
+            .iter()
+            .position(|op| matches!(op, Instruction::StoreSubscr))
+            .expect("missing STORE_SUBSCR");
+        let next_op = ops
+            .get(store_subscr + 1)
+            .expect("missing jump after STORE_SUBSCR");
+        let window_start = store_subscr.saturating_sub(3);
+        let window_end = (store_subscr + 5).min(ops.len());
+        let window = &ops[window_start..window_end];
+
+        assert!(
+            matches!(next_op, Instruction::JumpBackward { .. }),
+            "expected direct loop backedge after STORE_SUBSCR, got {next_op:?}; ops={window:?}"
+        );
+    }
+
+    #[test]
+    fn test_loop_return_reorders_backedge_before_exit_cleanup() {
+        let code = compile_exec(
+            "\
+def f(obj):
+    for base in obj.__mro__:
+        if base is not object:
+            doc = base.__doc__
+            if doc is not None:
+                return doc
+",
+        );
+        let f = find_code(&code, "f").expect("missing function code");
+        let ops: Vec<_> = f
+            .instructions
+            .iter()
+            .map(|unit| unit.op)
+            .filter(|op| !matches!(op, Instruction::Cache))
+            .collect();
+
+        let cond_idx = ops
+            .iter()
+            .position(|op| matches!(op, Instruction::PopJumpIfNotNone { .. }))
+            .expect("missing POP_JUMP_IF_NOT_NONE");
+        assert!(
+            matches!(ops.get(cond_idx + 1), Some(Instruction::NotTaken)),
+            "expected NOT_TAKEN after conditional jump, got {:?}; ops={ops:?}",
+            ops.get(cond_idx + 1)
+        );
+        assert!(
+            matches!(
+                ops.get(cond_idx + 2),
+                Some(Instruction::JumpBackward { .. })
+            ),
+            "expected loop backedge immediately after NOT_TAKEN, got {:?}; ops={ops:?}",
+            ops.get(cond_idx + 2)
+        );
+
+        let end_for_idx = ops
+            .iter()
+            .position(|op| matches!(op, Instruction::EndFor))
+            .expect("missing END_FOR");
+        let return_before_end = ops[..end_for_idx]
+            .iter()
+            .rposition(|op| matches!(op, Instruction::ReturnValue))
+            .expect("missing loop-body RETURN_VALUE");
+        assert!(
+            matches!(ops.get(return_before_end - 1), Some(Instruction::PopTop)),
+            "expected POP_TOP before loop-body RETURN_VALUE, got {:?}; ops={ops:?}",
+            ops.get(return_before_end.saturating_sub(1))
+        );
     }
 
     #[test]
