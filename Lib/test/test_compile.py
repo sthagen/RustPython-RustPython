@@ -1084,7 +1084,6 @@ class TestSpecifics(unittest.TestCase):
             self.assertEqual('RETURN_VALUE', opcodes[-1].opname)
             self.assertEqual(None, opcodes[-1].argval)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AssertionError: 3 != 8
     def test_false_while_loop(self):
         def break_in_while():
             while False:
@@ -1103,7 +1102,6 @@ class TestSpecifics(unittest.TestCase):
             self.assertEqual('RETURN_VALUE', opcodes[-1].opname)
             self.assertEqual(None, opcodes[1].argval)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_consts_in_conditionals(self):
         def and_true(x):
             return True and x
@@ -2578,7 +2576,6 @@ class TestExpressionStackSize(unittest.TestCase):
     def test_binop(self):
         self.check_stack_size("x + " * self.N + "x")
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AssertionError: 101 not less than or equal to 6
     def test_list(self):
         self.check_stack_size("[" + "x, " * self.N + "x]")
 
@@ -2586,7 +2583,6 @@ class TestExpressionStackSize(unittest.TestCase):
     def test_tuple(self):
         self.check_stack_size("(" + "x, " * self.N + "x)")
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AssertionError: 101 not less than or equal to 6
     def test_set(self):
         self.check_stack_size("{" + "x, " * self.N + "x}")
 

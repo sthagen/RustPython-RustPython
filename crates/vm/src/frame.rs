@@ -2725,16 +2725,7 @@ impl ExecutingFrame<'_> {
                 let class_dict = self.pop_value();
                 let idx = i.get(arg).as_usize();
                 let name = self.localsplus_name(idx);
-                // Only treat KeyError as "not found", propagate other exceptions
-                let value = if let Some(dict_obj) = class_dict.downcast_ref::<PyDict>() {
-                    dict_obj.get_item_opt(name, vm)?
-                } else {
-                    match class_dict.get_item(name, vm) {
-                        Ok(v) => Some(v),
-                        Err(e) if e.fast_isinstance(vm.ctx.exceptions.key_error) => None,
-                        Err(e) => return Err(e),
-                    }
-                };
+                let value = self.mapping_get_optional(&class_dict, name, vm)?;
                 self.push_value(match value {
                     Some(v) => v,
                     None => self
@@ -2748,18 +2739,7 @@ impl ExecutingFrame<'_> {
                 // PEP 649: Pop dict from stack (classdict), check there first, then globals
                 let dict = self.pop_value();
                 let name = self.code.names[idx.get(arg) as usize];
-
-                // Only treat KeyError as "not found", propagate other exceptions
-                let value = if let Some(dict_obj) = dict.downcast_ref::<PyDict>() {
-                    dict_obj.get_item_opt(name, vm)?
-                } else {
-                    // Not an exact dict, use mapping protocol
-                    match dict.get_item(name, vm) {
-                        Ok(v) => Some(v),
-                        Err(e) if e.fast_isinstance(vm.ctx.exceptions.key_error) => None,
-                        Err(e) => return Err(e),
-                    }
-                };
+                let value = self.mapping_get_optional(&dict, name, vm)?;
 
                 self.push_value(match value {
                     Some(v) => v,
@@ -3451,15 +3431,16 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::StoreFastLoadFast { var_nums } => {
-                let value = self.pop_value();
-                let locals = self.localsplus.fastlocals_mut();
+                // pop_value_opt: allows NULL from LoadFastAndClear restore paths.
+                let value = self.pop_value_opt();
                 let oparg = var_nums.get(arg);
                 let (store_idx, load_idx) = oparg.indexes();
-                locals[store_idx] = Some(value);
-                let load_value = locals[load_idx]
-                    .clone()
-                    .expect("StoreFastLoadFast: load slot should have value after store");
-                self.push_value(load_value);
+                let load_value = {
+                    let locals = self.localsplus.fastlocals_mut();
+                    locals[store_idx] = value;
+                    locals[load_idx].clone()
+                };
+                self.push_value_opt(load_value);
                 Ok(None)
             }
             Instruction::StoreFastStoreFast { var_nums } => {
@@ -6113,6 +6094,27 @@ impl ExecutingFrame<'_> {
             }
             _ => {
                 unreachable!("{instruction:?} instruction should not be executed")
+            }
+        }
+    }
+
+    #[inline]
+    fn mapping_get_optional(
+        &self,
+        mapping: &PyObjectRef,
+        name: &Py<PyStr>,
+        vm: &VirtualMachine,
+    ) -> PyResult<Option<PyObjectRef>> {
+        if mapping.class().is(vm.ctx.types.dict_type) {
+            let dict = mapping
+                .downcast_ref::<PyDict>()
+                .expect("exact dict must have a PyDict payload");
+            dict.get_item_opt(name, vm)
+        } else {
+            match mapping.get_item(name, vm) {
+                Ok(value) => Ok(Some(value)),
+                Err(err) if err.fast_isinstance(vm.ctx.exceptions.key_error) => Ok(None),
+                Err(err) => Err(err),
             }
         }
     }
