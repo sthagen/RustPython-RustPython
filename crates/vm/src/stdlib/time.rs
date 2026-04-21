@@ -27,7 +27,7 @@ unsafe extern "C" {
 mod decl {
     use crate::{
         AsObject, Py, PyObjectRef, PyResult, VirtualMachine,
-        builtins::{PyStrRef, PyTypeRef},
+        builtins::{PyBaseExceptionRef, PyStrRef, PyTypeRef},
         function::{Either, FuncArgs, OptionalArg},
         types::{PyStructSequence, struct_sequence_new},
     };
@@ -41,9 +41,12 @@ mod decl {
         naive::{NaiveDate, NaiveDateTime, NaiveTime},
     };
     use core::time::Duration;
+    #[cfg(any(unix, windows))]
+    use rustpython_host_env::time::asctime_from_tm;
+    use rustpython_host_env::time::{self as host_time};
     #[cfg(target_env = "msvc")]
     #[cfg(not(target_arch = "wasm32"))]
-    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    use windows_sys::Win32::System::Time::TIME_ZONE_INFORMATION;
 
     #[cfg(windows)]
     unsafe extern "C" {
@@ -56,27 +59,24 @@ mod decl {
     }
 
     #[allow(dead_code)]
-    pub(super) const SEC_TO_MS: i64 = 1000;
+    pub(super) const SEC_TO_MS: i64 = host_time::SEC_TO_MS;
     #[allow(dead_code)]
-    pub(super) const MS_TO_US: i64 = 1000;
+    pub(super) const MS_TO_US: i64 = host_time::MS_TO_US;
     #[allow(dead_code)]
-    pub(super) const SEC_TO_US: i64 = SEC_TO_MS * MS_TO_US;
+    pub(super) const SEC_TO_US: i64 = host_time::SEC_TO_US;
     #[allow(dead_code)]
-    pub(super) const US_TO_NS: i64 = 1000;
+    pub(super) const US_TO_NS: i64 = host_time::US_TO_NS;
     #[allow(dead_code)]
-    pub(super) const MS_TO_NS: i64 = MS_TO_US * US_TO_NS;
+    pub(super) const MS_TO_NS: i64 = host_time::MS_TO_NS;
     #[allow(dead_code)]
-    pub(super) const SEC_TO_NS: i64 = SEC_TO_MS * MS_TO_NS;
+    pub(super) const SEC_TO_NS: i64 = host_time::SEC_TO_NS;
     #[allow(dead_code)]
-    pub(super) const NS_TO_MS: i64 = 1000 * 1000;
+    pub(super) const NS_TO_MS: i64 = host_time::NS_TO_MS;
     #[allow(dead_code)]
-    pub(super) const NS_TO_US: i64 = 1000;
+    pub(super) const NS_TO_US: i64 = host_time::NS_TO_US;
 
     fn duration_since_system_now(vm: &VirtualMachine) -> PyResult<Duration> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        host_time::duration_since_system_now()
             .map_err(|e| vm.new_value_error(format!("Time error: {e:?}")))
     }
 
@@ -218,9 +218,7 @@ mod decl {
     #[cfg(target_env = "msvc")]
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn get_tz_info() -> TIME_ZONE_INFORMATION {
-        let mut info: TIME_ZONE_INFORMATION = unsafe { core::mem::zeroed() };
-        unsafe { GetTimeZoneInformation(&mut info) };
-        info
+        host_time::get_tz_info()
     }
 
     // #[pyfunction]
@@ -354,6 +352,13 @@ mod decl {
     ) -> PyResult<CheckedTm> {
         let invalid_tuple =
             || vm.new_type_error(format!("{func_name}(): illegal time tuple argument"));
+        let classify_err = |e: PyBaseExceptionRef| {
+            if e.class().is(vm.ctx.exceptions.overflow_error) {
+                vm.new_overflow_error(format!("{func_name} argument out of range"))
+            } else {
+                invalid_tuple()
+            }
+        };
 
         let year: i64 = t.tm_year.clone().try_into_value(vm).map_err(|e| {
             if e.class().is(vm.ctx.exceptions.overflow_error) {
@@ -370,46 +375,30 @@ mod decl {
             .tm_mon
             .clone()
             .try_into_value::<i32>(vm)
-            .map_err(|_| invalid_tuple())?
+            .map_err(classify_err)?
             - 1;
-        let tm_mday = t
-            .tm_mday
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
-        let tm_hour = t
-            .tm_hour
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
-        let tm_min = t
-            .tm_min
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
-        let tm_sec = t
-            .tm_sec
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
+        let tm_mday = t.tm_mday.clone().try_into_value(vm).map_err(classify_err)?;
+        let tm_hour = t.tm_hour.clone().try_into_value(vm).map_err(classify_err)?;
+        let tm_min = t.tm_min.clone().try_into_value(vm).map_err(classify_err)?;
+        let tm_sec = t.tm_sec.clone().try_into_value(vm).map_err(classify_err)?;
         let tm_wday = (t
             .tm_wday
             .clone()
             .try_into_value::<i32>(vm)
-            .map_err(|_| invalid_tuple())?
+            .map_err(classify_err)?
             + 1)
             % 7;
         let tm_yday = t
             .tm_yday
             .clone()
             .try_into_value::<i32>(vm)
-            .map_err(|_| invalid_tuple())?
+            .map_err(classify_err)?
             - 1;
         let tm_isdst = t
             .tm_isdst
             .clone()
             .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
+            .map_err(classify_err)?;
 
         let mut tm: libc::tm = unsafe { core::mem::zeroed() };
         tm.tm_year = year - 1900;
@@ -474,7 +463,7 @@ mod decl {
                     .tm_gmtoff
                     .clone()
                     .try_into_value(vm)
-                    .map_err(|_| invalid_tuple())?;
+                    .map_err(classify_err)?;
                 tm.tm_gmtoff = gmtoff as _;
             }
 
@@ -484,24 +473,6 @@ mod decl {
         {
             Ok(CheckedTm { tm })
         }
-    }
-
-    #[cfg(any(unix, windows))]
-    fn asctime_from_tm(tm: &libc::tm) -> String {
-        const WDAY_NAME: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        const MON_NAME: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        format!(
-            "{} {}{:>3} {:02}:{:02}:{:02} {}",
-            WDAY_NAME[tm.tm_wday as usize],
-            MON_NAME[tm.tm_mon as usize],
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec,
-            tm.tm_year + 1900
-        )
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -687,7 +658,7 @@ mod decl {
             loop {
                 let mut out = vec![0u16; size];
                 let written = unsafe {
-                    rustpython_common::suppress_iph!(wcsftime(
+                    rustpython_host_env::suppress_iph!(wcsftime(
                         out.as_mut_ptr(),
                         out.len(),
                         fmt_wide.as_ptr(),
@@ -963,41 +934,28 @@ mod decl {
         vm: &VirtualMachine,
     ) -> PyResult<libc::tm> {
         let invalid_tuple = || vm.new_type_error("mktime(): illegal time tuple argument");
-        let year: i32 = t
-            .tm_year
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
+        let classify_err = |e: PyBaseExceptionRef| {
+            if e.class().is(vm.ctx.exceptions.overflow_error) {
+                vm.new_overflow_error("mktime argument out of range")
+            } else {
+                invalid_tuple()
+            }
+        };
+        let year: i32 = t.tm_year.clone().try_into_value(vm).map_err(classify_err)?;
         if year < i32::MIN + 1900 {
             return Err(vm.new_overflow_error("year out of range"));
         }
 
         let mut tm: libc::tm = unsafe { core::mem::zeroed() };
-        tm.tm_sec = t
-            .tm_sec
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
-        tm.tm_min = t
-            .tm_min
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
-        tm.tm_hour = t
-            .tm_hour
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
-        tm.tm_mday = t
-            .tm_mday
-            .clone()
-            .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
+        tm.tm_sec = t.tm_sec.clone().try_into_value(vm).map_err(classify_err)?;
+        tm.tm_min = t.tm_min.clone().try_into_value(vm).map_err(classify_err)?;
+        tm.tm_hour = t.tm_hour.clone().try_into_value(vm).map_err(classify_err)?;
+        tm.tm_mday = t.tm_mday.clone().try_into_value(vm).map_err(classify_err)?;
         tm.tm_mon = t
             .tm_mon
             .clone()
             .try_into_value::<i32>(vm)
-            .map_err(|_| invalid_tuple())?
+            .map_err(classify_err)?
             - 1;
         tm.tm_year = year - 1900;
         tm.tm_wday = -1;
@@ -1005,13 +963,13 @@ mod decl {
             .tm_yday
             .clone()
             .try_into_value::<i32>(vm)
-            .map_err(|_| invalid_tuple())?
+            .map_err(classify_err)?
             - 1;
         tm.tm_isdst = t
             .tm_isdst
             .clone()
             .try_into_value(vm)
-            .map_err(|_| invalid_tuple())?;
+            .map_err(classify_err)?;
         Ok(tm)
     }
 
@@ -1450,7 +1408,7 @@ mod platform {
 
     pub(super) fn win_mktime(t: &StructTimeData, vm: &VirtualMachine) -> PyResult<f64> {
         let mut tm = super::decl::tm_from_struct_time(t, vm)?;
-        let timestamp = unsafe { rustpython_common::suppress_iph!(c_mktime(&mut tm)) };
+        let timestamp = unsafe { rustpython_host_env::suppress_iph!(c_mktime(&mut tm)) };
         if timestamp == -1 && tm.tm_wday == -1 {
             return Err(vm.new_overflow_error("mktime argument out of range"));
         }
