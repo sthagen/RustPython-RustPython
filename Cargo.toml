@@ -184,7 +184,7 @@ flame = "0.2.2"
 getrandom = { version = "0.3", features = ["std"] }
 glob = "0.3"
 hex = "0.4.3"
-indexmap = { version = "2.13.0", features = ["std"] }
+indexmap = { version = "2.14.0", features = ["std"] }
 insta = "1.46"
 itertools = "0.14.0"
 is-macro = "0.3.7"
@@ -211,7 +211,7 @@ radium = "1.1.1"
 rand = "0.9"
 rand_core = { version = "0.9", features = ["os_rng"] }
 rustix = { version = "1.1", features = ["event"] }
-rustyline = "17.0.1"
+rustyline = "17"
 serde = { package = "serde_core", version = "1.0.225", default-features = false, features = ["alloc"] }
 schannel = "0.1.29"
 scoped-tls = "1"
