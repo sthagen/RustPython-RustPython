@@ -121,8 +121,8 @@ mod _io {
         convert::ToPyObject,
         exceptions::cstring_error,
         function::{
-            ArgBytesLike, ArgIterable, ArgMemoryBuffer, ArgSize, Either, FuncArgs, IntoFuncArgs,
-            OptionalArg, OptionalOption, PySetterValue,
+            ArgBytesLike, ArgIterable, ArgMemoryBuffer, ArgSize, Either, FsPath, FuncArgs,
+            IntoFuncArgs, OptionalArg, OptionalOption, PySetterValue,
         },
         protocol::{
             BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn, VecBuffer,
@@ -1348,7 +1348,7 @@ mod _io {
                 return Ok(None);
             }
             // Try to convert to int; if it fails, treat as -1 and chain the TypeError
-            let (n, type_error) = match isize::try_from_object(vm, res.clone()) {
+            let (n, type_error) = match isize::try_from_object(vm, res) {
                 Ok(n) => (n, None),
                 Err(e) => (-1, Some(e)),
             };
@@ -1587,7 +1587,10 @@ mod _io {
                     let str_repr = e
                         .__str__(vm)
                         .as_ref()
-                        .map_or("<error getting exception str>".as_ref(), |s| s.as_wtf8())
+                        .map_or_else(
+                            |_| "<error getting exception str>".as_ref(),
+                            |s| s.as_wtf8(),
+                        )
                         .to_owned();
                     let msg = format!("{}() {}", Self::CLASS_NAME, str_repr);
                     vm.new_exception_msg(e.class().to_owned(), msg.into())
@@ -5068,6 +5071,15 @@ mod _io {
                 return Err(vm.new_value_error(msg));
             }
         }
+
+        // Match CPython's _pyio.open (Lib/_pyio.py): resolve PathLike here so
+        // _io.FileIO still receives (and preserves on .name) the raw argument
+        // when called directly.
+        let file = if file.fast_isinstance(vm.ctx.types.int_type) {
+            file
+        } else {
+            FsPath::try_from_path_like(file, true, vm)?.to_pyobject(vm)
+        };
 
         // check file descriptor validity
         #[cfg(all(unix, feature = "host_env"))]

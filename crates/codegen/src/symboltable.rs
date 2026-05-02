@@ -1410,10 +1410,12 @@ impl SymbolTableBuilder {
                 let parent_scope_typ = self.tables.last().map(|t| t.typ);
                 let should_save_annotation_block = matches!(
                     parent_scope_typ,
-                    Some(CompilerScope::Class)
-                        | Some(CompilerScope::Module)
-                        | Some(CompilerScope::Function)
-                        | Some(CompilerScope::AsyncFunction)
+                    Some(
+                        CompilerScope::Class
+                            | CompilerScope::Module
+                            | CompilerScope::Function
+                            | CompilerScope::AsyncFunction
+                    )
                 );
                 let saved_annotation_block = if should_save_annotation_block {
                     self.tables.last_mut().unwrap().annotation_block.take()
@@ -1768,7 +1770,7 @@ impl SymbolTableBuilder {
             }) => {
                 let Some(name_expr) = name.as_name_expr() else {
                     return Err(SymbolTableError {
-                        error: "type alias expect name".to_owned(),
+                        error: "type alias expects name".to_owned(),
                         location: Some(
                             self.source_file
                                 .to_source_code()
