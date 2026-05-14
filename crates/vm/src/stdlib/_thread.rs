@@ -1,7 +1,10 @@
 //! Implementation of the _thread module
+
 #[cfg(all(unix, feature = "threading", feature = "host_env"))]
 pub(crate) use _thread::after_fork_child;
+
 pub use _thread::get_ident;
+
 #[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 pub(crate) use _thread::{
     CurrentFrameSlot, HandleEntry, RawRMutex, ShutdownEntry, get_all_current_frames,
@@ -137,11 +140,10 @@ pub(crate) mod _thread {
 
         #[cfg(unix)]
         #[pymethod]
-        fn _at_fork_reinit(&self, _vm: &VirtualMachine) -> PyResult<()> {
+        fn _at_fork_reinit(&self, _vm: &VirtualMachine) {
             // Overwrite lock state to unlocked. Do NOT call unlock() here —
             // after fork(), unlock_slow() would try to unpark stale waiters.
             unsafe { rustpython_common::lock::zero_reinit_after_fork(&self.mu) };
-            Ok(())
         }
 
         #[pymethod]
@@ -232,12 +234,11 @@ pub(crate) mod _thread {
 
         #[cfg(unix)]
         #[pymethod]
-        fn _at_fork_reinit(&self, _vm: &VirtualMachine) -> PyResult<()> {
+        fn _at_fork_reinit(&self, _vm: &VirtualMachine) {
             // Overwrite lock state to unlocked. Do NOT call unlock() here —
             // after fork(), unlock_slow() would try to unpark stale waiters.
             self.count.store(0, core::sync::atomic::Ordering::Relaxed);
             unsafe { rustpython_common::lock::zero_reinit_after_fork(&self.mu) };
-            Ok(())
         }
 
         #[pymethod]
@@ -463,6 +464,7 @@ pub(crate) mod _thread {
             use std::os::unix::thread::JoinHandleExt;
             handle.as_pthread_t() as _
         }
+
         #[cfg(not(unix))]
         {
             thread_to_rust_id(handle.thread())

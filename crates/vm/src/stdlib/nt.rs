@@ -127,13 +127,13 @@ pub(crate) mod module {
     }
 
     #[pyfunction]
-    pub(super) fn _supports_virtual_terminal() -> PyResult<bool> {
+    pub(super) fn _supports_virtual_terminal() -> bool {
         let mut mode = 0;
         let handle = unsafe { Console::GetStdHandle(Console::STD_ERROR_HANDLE) };
         if unsafe { Console::GetConsoleMode(handle, &mut mode) } == 0 {
-            return Ok(false);
+            return false;
         }
-        Ok(mode & Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0)
+        mode & Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0
     }
 
     #[derive(FromArgs)]
@@ -1074,7 +1074,7 @@ pub(crate) mod module {
 
         // Build environment strings as "KEY=VALUE\0" wide strings
         let mut env_strings: Vec<widestring::WideCString> = Vec::new();
-        for (key, value) in env.into_iter() {
+        for (key, value) in env {
             let key = FsPath::try_from_path_like(key, true, vm)?;
             let value = FsPath::try_from_path_like(value, true, vm)?;
             let key_str = key.to_string_lossy();
@@ -1192,7 +1192,7 @@ pub(crate) mod module {
         let env = crate::stdlib::os::envobj_to_dict(env, vm)?;
         // Build environment strings as "KEY=VALUE\0" wide strings
         let mut env_strings: Vec<widestring::WideCString> = Vec::new();
-        for (key, value) in env.into_iter() {
+        for (key, value) in env {
             let key = PyStrRef::try_from_object(vm, key)?;
             let value = PyStrRef::try_from_object(vm, value)?;
             let key_str = key.expect_str();

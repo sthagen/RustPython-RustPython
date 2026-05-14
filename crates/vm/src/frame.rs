@@ -1,8 +1,7 @@
 // spell-checker: ignore compactlong compactlongs
 
 use crate::anystr::AnyStr;
-#[cfg(feature = "flame")]
-use crate::bytecode::InstructionMetadata;
+
 use crate::{
     AsObject, Py, PyExact, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, PyStackRef,
     TryFromObject, VirtualMachine,
@@ -978,7 +977,7 @@ impl Frame {
                 // Non-merged cell: find the name by skipping merged cellvars
                 let mut found_name = None;
                 let mut skip = nonmerged_cell_idx;
-                for cv in code.cellvars.iter() {
+                for cv in &code.cellvars {
                     let is_merged = code.varnames.contains(cv);
                     if !is_merged {
                         if skip == 0 {
@@ -1504,8 +1503,7 @@ impl ExecutingFrame<'_> {
             let exc_value: PyObjectRef = exc.clone().into();
             let exc_tb: PyObjectRef = exc
                 .__traceback__()
-                .map(|tb| -> PyObjectRef { tb.into() })
-                .unwrap_or_else(|| vm.ctx.none());
+                .map_or_else(|| vm.ctx.none(), |tb| -> PyObjectRef { tb.into() });
             let tuple = vm.ctx.new_tuple(vec![exc_type, exc_value, exc_tb]).into();
             vm.trace_event(crate::protocol::TraceEvent::Exception, Some(tuple))?;
         }
@@ -2097,8 +2095,7 @@ impl ExecutingFrame<'_> {
         vm: &VirtualMachine,
     ) -> FrameResult {
         flame_guard!(format!(
-            "Frame::execute_instruction({})",
-            instruction.display(arg, &self.code.code).to_string()
+            "Frame::execute_instruction({instruction:?} {arg:?})"
         ));
 
         #[cfg(feature = "vm-tracing-logging")]
@@ -2110,10 +2107,7 @@ impl ExecutingFrame<'_> {
             }
             */
             trace!("  {:#?}", self);
-            trace!(
-                "  Executing op code: {}",
-                instruction.display(arg, &self.code.code)
-            );
+            trace!("  Executing opcode: {instruction:?} {arg:?}",);
             trace!("=======");
         }
 
@@ -2200,7 +2194,7 @@ impl ExecutingFrame<'_> {
                 self.push_value(set.into());
                 Ok(None)
             }
-            Instruction::BuildSlice { argc } => self.execute_build_slice(vm, argc.get(arg)),
+            Instruction::BuildSlice { argc } => Ok(self.execute_build_slice(vm, argc.get(arg))),
             /*
              Instruction::ToBool => {
                  dbg!("Shouldn't be called outside of match statements for now")
@@ -3426,8 +3420,7 @@ impl ExecutingFrame<'_> {
                 let exc = self.pop_value();
                 let prev_exc = vm
                     .current_exception()
-                    .map(|e| e.into())
-                    .unwrap_or_else(|| vm.ctx.none());
+                    .map_or_else(|| vm.ctx.none(), |e| e.into());
 
                 // Set exc as the current exception
                 if let Some(exc_ref) = exc.downcast_ref::<PyBaseException>() {
@@ -6089,13 +6082,10 @@ impl ExecutingFrame<'_> {
                 // because a callback may de-instrument and clear the tables.
                 let (real_op_byte, also_instruction) = {
                     let data = self.code.monitoring_data.lock();
-                    let line_op = data.as_ref().map(|d| d.line_opcodes[idx]).unwrap_or(0);
+                    let line_op = data.as_ref().map_or(0, |d| d.line_opcodes[idx]);
                     if line_op == u8::from(Instruction::InstrumentedInstruction) {
                         // LINE wraps INSTRUCTION: resolve the INSTRUCTION side-table too
-                        let inst_op = data
-                            .as_ref()
-                            .map(|d| d.per_instruction_opcodes[idx])
-                            .unwrap_or(0);
+                        let inst_op = data.as_ref().map_or(0, |d| d.per_instruction_opcodes[idx]);
                         (inst_op, true)
                     } else {
                         (line_op, false)
@@ -6143,9 +6133,7 @@ impl ExecutingFrame<'_> {
                 // Get original opcode from side-table
                 let original_op_byte = {
                     let data = self.code.monitoring_data.lock();
-                    data.as_ref()
-                        .map(|d| d.per_instruction_opcodes[idx])
-                        .unwrap_or(0)
+                    data.as_ref().map_or(0, |d| d.per_instruction_opcodes[idx])
                 };
                 debug_assert!(
                     original_op_byte != 0,
@@ -6282,8 +6270,7 @@ impl ExecutingFrame<'_> {
 
         let is_possibly_shadowing = origin
             .as_ref()
-            .map(|o| is_possibly_shadowing_path(o, vm))
-            .unwrap_or(false);
+            .is_some_and(|o| is_possibly_shadowing_path(o, vm));
         let is_possibly_shadowing_stdlib = if is_possibly_shadowing {
             if let Some(ref mod_name) = mod_name_obj {
                 is_stdlib_module_name(mod_name, vm)?
@@ -6484,7 +6471,7 @@ impl ExecutingFrame<'_> {
         &mut self,
         vm: &VirtualMachine,
         argc: bytecode::BuildSliceArgCount,
-    ) -> FrameResult {
+    ) -> Option<ExecutionResult> {
         let step = match argc {
             bytecode::BuildSliceArgCount::Two => None,
             bytecode::BuildSliceArgCount::Three => Some(self.pop_value()),
@@ -6499,7 +6486,7 @@ impl ExecutingFrame<'_> {
         }
         .into_ref(&vm.ctx);
         self.push_value(obj.into());
-        Ok(None)
+        None
     }
 
     fn collect_positional_args(&mut self, nargs: u32) -> FuncArgs {
@@ -9618,9 +9605,7 @@ impl ExecutingFrame<'_> {
         let stack_len = self.localsplus.stack_len();
         if count > stack_len {
             let instr = self.code.instructions.get(self.lasti() as usize);
-            let op_name = instr
-                .map(|i| format!("{:?}", i.op))
-                .unwrap_or_else(|| "None".to_string());
+            let op_name = instr.map_or_else(|| "None".to_string(), |i| format!("{:?}", i.op));
             panic!(
                 "Stack underflow in pop_multiple: trying to pop {} elements from stack with {} elements. lasti={}, code={}, op={}, source_path={}",
                 count,

@@ -846,7 +846,7 @@ impl VirtualMachine {
         let codec_info = getregentry.call((), self)?;
         self.state
             .codec_registry
-            .register_manual("ascii", codec_info.try_into_value(self)?)?;
+            .register_manual("ascii", codec_info.try_into_value(self)?);
 
         // Register utf-8 encoding (also as "utf8" alias since normalize_encoding_name
         // maps "utf-8" → "utf_8" but leaves "utf8" as-is)
@@ -857,10 +857,10 @@ impl VirtualMachine {
         let utf8_codec: crate::codecs::PyCodec = codec_info.try_into_value(self)?;
         self.state
             .codec_registry
-            .register_manual("utf-8", utf8_codec.clone())?;
+            .register_manual("utf-8", utf8_codec.clone());
         self.state
             .codec_registry
-            .register_manual("utf8", utf8_codec)?;
+            .register_manual("utf8", utf8_codec);
 
         // Register latin-1 / iso8859-1 aliases needed very early for stdio
         // bootstrap (e.g. PYTHONIOENCODING=latin-1).
@@ -873,7 +873,7 @@ impl VirtualMachine {
             for name in ["latin-1", "latin_1", "latin1", "iso8859-1", "iso8859_1"] {
                 self.state
                     .codec_registry
-                    .register_manual(name, latin1_codec.clone())?;
+                    .register_manual(name, latin1_codec.clone());
             }
         }
         Ok(())
@@ -2060,12 +2060,12 @@ impl VirtualMachine {
         exc
     }
 
-    pub(crate) fn current_exception(&self) -> Option<PyBaseExceptionRef> {
+    pub fn current_exception(&self) -> Option<PyBaseExceptionRef> {
         self.exceptions.borrow().stack.last().cloned().flatten()
     }
 
     /// Set the current exc_info slot value (PUSH_EXC_INFO / POP_EXCEPT).
-    pub(crate) fn set_exception(&self, exc: Option<PyBaseExceptionRef>) {
+    pub fn set_exception(&self, exc: Option<PyBaseExceptionRef>) {
         // don't be holding the RefCell guard while __del__ is called
         let mut excs = self.exceptions.borrow_mut();
         debug_assert!(
@@ -2082,6 +2082,19 @@ impl VirtualMachine {
         }
         #[cfg(feature = "threading")]
         thread::update_thread_exception(self.topmost_exception());
+    }
+
+    pub fn take_raised_exception(&self) -> Option<PyBaseExceptionRef> {
+        let mut excs = self.exceptions.borrow_mut();
+        if let Some(top) = excs.stack.last_mut() {
+            let exc = top.take();
+            drop(excs);
+            #[cfg(feature = "threading")]
+            thread::update_thread_exception(self.topmost_exception());
+            exc
+        } else {
+            None
+        }
     }
 
     pub(crate) fn contextualize_exception(&self, exception: &Py<PyBaseException>) {

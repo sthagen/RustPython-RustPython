@@ -26,8 +26,7 @@ fn get_size_from_format(fmt: &str) -> usize {
         .chars()
         .next()
         .map(|c| c.to_string());
-    code.map(|c| type_info(&c).map(|t| t.size).unwrap_or(1))
-        .unwrap_or(1)
+    code.map_or(1, |c| type_info(&c).map_or(1, |t| t.size))
 }
 
 /// Creates array type for (element_type, length)
@@ -614,13 +613,13 @@ impl PyCArray {
         };
 
         let buffer = buffer_lock.read();
-        Self::read_element_from_buffer(
+        Ok(Self::read_element_from_buffer(
             &buffer,
             final_offset,
             element_size,
             type_code.as_deref(),
             vm,
-        )
+        ))
     }
 
     /// Helper to read an element value from a buffer at given offset
@@ -630,14 +629,14 @@ impl PyCArray {
         element_size: usize,
         type_code: Option<&str>,
         vm: &VirtualMachine,
-    ) -> PyResult {
+    ) -> PyObjectRef {
         match type_code {
             Some("c") => {
                 // Return single byte as bytes
                 if offset < buffer.len() {
-                    Ok(vm.ctx.new_bytes(vec![buffer[offset]]).into())
+                    vm.ctx.new_bytes(vec![buffer[offset]]).into()
                 } else {
-                    Ok(vm.ctx.new_bytes(vec![0]).into())
+                    vm.ctx.new_bytes(vec![0]).into()
                 }
             }
             Some("u") => {
@@ -646,25 +645,28 @@ impl PyCArray {
                     let s = char::from_u32(code)
                         .map(|c| c.to_string())
                         .unwrap_or_default();
-                    Ok(vm.ctx.new_str(s).into())
+                    vm.ctx.new_str(s).into()
                 } else {
-                    Ok(vm.ctx.new_str("").into())
+                    vm.ctx.new_str("").into()
                 }
             }
             Some("z") => {
                 // c_char_p: pointer to bytes - dereference to get string
                 if offset + element_size > buffer.len() {
-                    return Ok(vm.ctx.none());
+                    return vm.ctx.none();
                 }
+
                 let ptr_bytes = &buffer[offset..offset + element_size];
                 let ptr_val = usize::from_ne_bytes(
                     ptr_bytes
                         .try_into()
                         .unwrap_or([0; core::mem::size_of::<usize>()]),
                 );
+
                 if ptr_val == 0 {
-                    return Ok(vm.ctx.none());
+                    return vm.ctx.none();
                 }
+
                 // Read null-terminated string from pointer address
                 unsafe {
                     let ptr = ptr_val as *const u8;
@@ -673,23 +675,26 @@ impl PyCArray {
                         len += 1;
                     }
                     let bytes = core::slice::from_raw_parts(ptr, len);
-                    Ok(vm.ctx.new_bytes(bytes.to_vec()).into())
+                    vm.ctx.new_bytes(bytes.to_vec()).into()
                 }
             }
             Some("Z") => {
                 // c_wchar_p: pointer to wchar_t - dereference to get string
                 if offset + element_size > buffer.len() {
-                    return Ok(vm.ctx.none());
+                    return vm.ctx.none();
                 }
+
                 let ptr_bytes = &buffer[offset..offset + element_size];
                 let ptr_val = usize::from_ne_bytes(
                     ptr_bytes
                         .try_into()
                         .unwrap_or([0; core::mem::size_of::<usize>()]),
                 );
+
                 if ptr_val == 0 {
-                    return Ok(vm.ctx.none());
+                    return vm.ctx.none();
                 }
+
                 // Read null-terminated wide string using WCHAR_SIZE
                 unsafe {
                     let ptr = ptr_val as *const u8;
@@ -711,8 +716,9 @@ impl PyCArray {
                         }
                         pos += WCHAR_SIZE;
                     }
+
                     let s: String = chars.into_iter().collect();
-                    Ok(vm.ctx.new_str(s).into())
+                    vm.ctx.new_str(s).into()
                 }
             }
             Some("f") => {
@@ -721,7 +727,7 @@ impl PyCArray {
                     .first_chunk::<4>()
                     .copied()
                     .map_or(0.0, f32::from_ne_bytes);
-                Ok(vm.ctx.new_float(val as f64).into())
+                vm.ctx.new_float(val as f64).into()
             }
             Some("d" | "g") => {
                 // c_double / c_longdouble - read f64 from first 8 bytes
@@ -729,13 +735,13 @@ impl PyCArray {
                     .first_chunk::<8>()
                     .copied()
                     .map_or(0.0, f64::from_ne_bytes);
-                Ok(vm.ctx.new_float(val).into())
+                vm.ctx.new_float(val).into()
             }
             _ => {
                 if let Some(bytes) = buffer[offset..].get(..element_size) {
-                    Ok(Self::bytes_to_int(bytes, element_size, type_code, vm))
+                    Self::bytes_to_int(bytes, element_size, type_code, vm)
                 } else {
-                    Ok(vm.ctx.new_int(0).into())
+                    vm.ctx.new_int(0).into()
                 }
             }
         }
@@ -770,12 +776,7 @@ impl PyCArray {
             }
             Some("u") => {
                 if let Some(s) = value.downcast_ref::<PyStr>() {
-                    let code = s
-                        .as_wtf8()
-                        .code_points()
-                        .next()
-                        .map(|c| c.to_u32())
-                        .unwrap_or(0);
+                    let code = s.as_wtf8().code_points().next().map_or(0, |c| c.to_u32());
                     if offset + WCHAR_SIZE <= buffer.len() {
                         wchar_to_bytes(code, &mut buffer[offset..]);
                     }
@@ -1175,11 +1176,11 @@ impl AsBuffer for PyCArray {
 // CharArray and WCharArray getsets - added dynamically via add_getset
 
 // CharArray_get_value
-fn char_array_get_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+fn char_array_get_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
     let zelf = obj.downcast_ref::<PyCArray>().unwrap();
     let buffer = zelf.0.buffer.read();
     let len = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
-    Ok(vm.ctx.new_bytes(buffer[..len].to_vec()).into())
+    vm.ctx.new_bytes(buffer[..len].to_vec()).into()
 }
 
 // CharArray_set_value
@@ -1203,10 +1204,10 @@ fn char_array_set_value(obj: PyObjectRef, value: PyObjectRef, vm: &VirtualMachin
 }
 
 // CharArray_get_raw
-fn char_array_get_raw(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+fn char_array_get_raw(obj: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
     let zelf = obj.downcast_ref::<PyCArray>().unwrap();
     let buffer = zelf.0.buffer.read();
-    Ok(vm.ctx.new_bytes(buffer.to_vec()).into())
+    vm.ctx.new_bytes(buffer.to_vec()).into()
 }
 
 // CharArray_set_raw
@@ -1228,10 +1229,10 @@ fn char_array_set_raw(
 }
 
 // WCharArray_get_value
-fn wchar_array_get_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+fn wchar_array_get_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
     let zelf = obj.downcast_ref::<PyCArray>().unwrap();
     let buffer = zelf.0.buffer.read();
-    Ok(vm.ctx.new_str(wstring_from_bytes(&buffer)).into())
+    vm.ctx.new_str(wstring_from_bytes(&buffer)).into()
 }
 
 // WCharArray_set_value

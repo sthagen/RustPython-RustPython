@@ -8,6 +8,10 @@
 
 // SSL error code data tables (shared with OpenSSL backend for compatibility)
 // These map OpenSSL error codes to human-readable strings
+#[allow(
+    clippy::duplicate_mod,
+    reason = "This is duplicated only when running clippy. The two features are mutually exclusive"
+)]
 #[path = "../openssl/ssl_data_31.rs"]
 mod ssl_data;
 
@@ -1754,8 +1758,7 @@ pub(super) fn ssl_read(
                 let bytes_read = data
                     .clone()
                     .try_into_value::<rustpython_vm::builtins::PyBytes>(vm)
-                    .map(|b| b.as_bytes().len())
-                    .unwrap_or(0);
+                    .map_or(0, |b| b.as_bytes().len());
 
                 if bytes_read == 0 {
                     // No more data available - check if this is clean shutdown or unexpected EOF
@@ -2177,8 +2180,7 @@ fn ssl_ensure_data_available(
         let bytes_read = data
             .clone()
             .try_into_value::<rustpython_vm::builtins::PyBytes>(vm)
-            .map(|b| b.as_bytes().len())
-            .unwrap_or(0);
+            .map_or(0, |b| b.as_bytes().len());
 
         // Check if BIO has EOF set (incoming BIO closed)
         let is_eof = if is_bio {

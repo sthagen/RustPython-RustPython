@@ -824,7 +824,7 @@ impl PyType {
     pub(crate) fn init_slots(&self, ctx: &Context) {
         // Inherit slots from MRO (mro[0] is self, so skip it)
         let mro: Vec<_> = self.mro.read()[1..].to_vec();
-        for base in mro.iter() {
+        for base in &mro {
             self.inherit_slots(base);
         }
 
@@ -833,7 +833,7 @@ impl PyType {
         let mut slot_name_set = std::collections::HashSet::new();
 
         // mro[0] is self, so skip it; self.attributes is checked separately below
-        for cls in self.mro.read()[1..].iter() {
+        for cls in &self.mro.read()[1..] {
             for &name in cls.attributes.read().keys() {
                 if name.as_bytes().starts_with(b"__") && name.as_bytes().ends_with(b"__") {
                     slot_name_set.insert(name);
@@ -860,21 +860,17 @@ impl PyType {
         if slots.flags.contains(PyTypeFlags::DISALLOW_INSTANTIATION) {
             slots.new.store(None)
         } else if slots.new.load().is_none() {
-            slots.new.store(
-                base.as_ref()
-                    .map(|base| base.slots.new.load())
-                    .unwrap_or(None),
-            )
+            slots
+                .new
+                .store(base.as_ref().and_then(|base| base.slots.new.load()))
         }
     }
 
     fn set_alloc(slots: &PyTypeSlots, base: &Option<PyTypeRef>) {
         if slots.alloc.load().is_none() {
-            slots.alloc.store(
-                base.as_ref()
-                    .map(|base| base.slots.alloc.load())
-                    .unwrap_or(None),
-            );
+            slots
+                .alloc
+                .store(base.as_ref().and_then(|base| base.slots.alloc.load()));
         }
     }
 
@@ -1263,7 +1259,7 @@ impl PyType {
 }
 
 impl Py<PyType> {
-    pub(crate) fn is_subtype(&self, other: &Self) -> bool {
+    pub fn is_subtype(&self, other: &Self) -> bool {
         is_subtype_with_mro(&self.mro.read(), self, other)
     }
 
@@ -2072,7 +2068,7 @@ impl Constructor for PyType {
             .map(|base| base.slots.member_count)
             .max()
             .unwrap();
-        let heaptype_member_count = heaptype_slots.as_ref().map(|x| x.len()).unwrap_or(0);
+        let heaptype_member_count = heaptype_slots.as_ref().map_or(0, |x| x.len());
         let member_count: usize = base_member_count + heaptype_member_count;
 
         let mut flags = PyTypeFlags::heap_type_flags();
@@ -2671,10 +2667,10 @@ fn subtype_set_dict(obj: PyObjectRef, value: PySetterValue, vm: &VirtualMachine)
 }
 
 // subtype_get_weakref
-fn subtype_get_weakref(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+fn subtype_get_weakref(obj: PyObjectRef, vm: &VirtualMachine) -> PyObjectRef {
     // Return the first weakref in the weakref list, or None
     let weakref = obj.get_weakrefs();
-    Ok(weakref.unwrap_or_else(|| vm.ctx.none()))
+    weakref.unwrap_or_else(|| vm.ctx.none())
 }
 
 // subtype_set_weakref: __weakref__ is read-only

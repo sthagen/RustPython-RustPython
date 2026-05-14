@@ -2,6 +2,7 @@
  * I/O core tools.
  */
 pub(crate) use _io::module_def;
+
 #[cfg(all(unix, feature = "threading", feature = "host_env"))]
 pub(crate) use _io::reinit_std_streams_after_fork;
 
@@ -1590,14 +1591,7 @@ mod _io {
             let zelf: PyRef<Self> = zelf.try_into_value(vm)?;
             let (raw, BufferSize { buffer_size }): (PyObjectRef, _) =
                 args.bind(vm).map_err(|e| {
-                    let str_repr = e
-                        .__str__(vm)
-                        .as_ref()
-                        .map_or_else(
-                            |_| "<error getting exception str>".as_ref(),
-                            |s| s.as_wtf8(),
-                        )
-                        .to_owned();
+                    let str_repr = e.__str__(vm).as_wtf8().to_owned();
                     let msg = format!("{}() {}", Self::CLASS_NAME, str_repr);
                     vm.new_exception_msg(e.class().to_owned(), msg.into())
                 })?;
@@ -1856,7 +1850,7 @@ mod _io {
         fn read(&self, size: OptionalSize, vm: &VirtualMachine) -> PyResult<Option<PyBytesRef>> {
             let mut data = self.reader().lock(vm)?;
             let raw = data.check_init(vm)?;
-            let n = size.size.map(|s| *s).unwrap_or(-1);
+            let n = size.size.map_or(-1, |s| *s);
             if n < -1 {
                 return Err(vm.new_value_error("read length must be non-negative or -1"));
             }
@@ -4532,7 +4526,7 @@ mod _io {
                 let dict_ref: PyRef<PyDict> = dict.clone().try_into_value(vm)?;
                 if let Some(obj_dict) = zelf.as_object().dict() {
                     obj_dict.clear();
-                    for (key, value) in dict_ref.into_iter() {
+                    for (key, value) in dict_ref {
                         obj_dict.set_item(&*key, value, vm)?;
                     }
                 }
@@ -4774,7 +4768,7 @@ mod _io {
                 let dict_ref: PyRef<PyDict> = dict.clone().try_into_value(vm)?;
                 if let Some(obj_dict) = zelf.as_object().dict() {
                     obj_dict.clear();
-                    for (key, value) in dict_ref.into_iter() {
+                    for (key, value) in dict_ref {
                         obj_dict.set_item(&*key, value, vm)?;
                     }
                 }
@@ -5309,6 +5303,10 @@ mod _io {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "host_env"),
+        expect(clippy::unnecessary_wraps, reason = "Needs to comply with a signature")
+    )]
     pub(crate) fn module_exec(vm: &VirtualMachine, module: &Py<PyModule>) -> PyResult<()> {
         // Call auto-generated initialization first
         __module_exec(vm, module);
@@ -5952,13 +5950,8 @@ mod fileio {
 
         /// fileio_dealloc_warn in Modules/_io/fileio.c
         #[pymethod(name = "_dealloc_warn")]
-        fn _dealloc_warn_method(
-            zelf: &Py<Self>,
-            source: PyObjectRef,
-            vm: &VirtualMachine,
-        ) -> PyResult<()> {
+        fn _dealloc_warn_method(zelf: &Py<Self>, source: PyObjectRef, vm: &VirtualMachine) {
             Self::dealloc_warn(zelf, source, vm);
-            Ok(())
         }
     }
 
@@ -5968,8 +5961,7 @@ mod fileio {
             if zelf.fd.load() >= 0 && zelf.closefd.load() {
                 let repr = source
                     .repr(vm)
-                    .map(|s| s.as_wtf8().to_owned())
-                    .unwrap_or_else(|_| Wtf8Buf::from("<file>"));
+                    .map_or_else(|_| Wtf8Buf::from("<file>"), |s| s.as_wtf8().to_owned());
                 if let Err(e) = crate::stdlib::_warnings::warn(
                     vm.ctx.exceptions.resource_warning,
                     format!("unclosed file {repr}"),
@@ -6230,8 +6222,7 @@ mod winconsoleio {
             let mode_str: &str = args
                 .mode
                 .as_ref()
-                .map(|s: &PyUtf8StrRef| s.as_str())
-                .unwrap_or("r");
+                .map_or("r", |s: &PyUtf8StrRef| s.as_str());
 
             let mut rwa = false;
             let mut readable = false;
@@ -6521,8 +6512,8 @@ mod winconsoleio {
             if zelf.fd.load() >= 0 && zelf.closefd.load() {
                 let repr = source
                     .repr(vm)
-                    .map(|s| s.as_wtf8().to_owned())
-                    .unwrap_or_else(|_| Wtf8Buf::from("<file>"));
+                    .map_or_else(|_| Wtf8Buf::from("<file>"), |s| s.as_wtf8().to_owned());
+
                 if let Err(e) = crate::stdlib::_warnings::warn(
                     vm.ctx.exceptions.resource_warning,
                     format!("unclosed file {repr}"),

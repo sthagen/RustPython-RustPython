@@ -499,8 +499,7 @@ fn hash_wrapper(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyHash> {
     let big_int = py_int.as_bigint();
     let hash = big_int
         .to_i64()
-        .map(fix_sentinel)
-        .unwrap_or_else(|| hash_bigint(big_int));
+        .map_or_else(|| hash_bigint(big_int), fix_sentinel);
     Ok(hash)
 }
 
@@ -580,7 +579,8 @@ fn bool_wrapper(num: PyNumber<'_>, vm: &VirtualMachine) -> PyResult<bool> {
     Ok(crate::builtins::bool_::get_value(&result))
 }
 
-// PyObject_SelfIter in CPython
+/// PyObject_SelfIter in CPython
+#[expect(clippy::unnecessary_wraps, reason = "Needs to comply with a signature")]
 const fn self_iter(zelf: PyObjectRef, _vm: &VirtualMachine) -> PyResult {
     Ok(zelf)
 }

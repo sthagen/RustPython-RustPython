@@ -55,7 +55,7 @@ impl Constructor for PyTemplate {
         let mut interpolations: Vec<PyObjectRef> = Vec::new();
         let mut last_was_str = false;
 
-        for item in args.args.iter() {
+        for item in &args.args {
             if let Ok(s) = item.clone().downcast::<PyStr>() {
                 if last_was_str {
                     // Concatenate adjacent strings
@@ -116,8 +116,7 @@ impl PyTemplate {
             .map(|interp| {
                 interp
                     .downcast_ref::<PyInterpolation>()
-                    .map(|i| i.value.clone())
-                    .unwrap_or_else(|| interp.clone())
+                    .map_or_else(|| interp.clone(), |i| i.value.clone())
             })
             .collect();
         vm.ctx.new_tuple(values)
