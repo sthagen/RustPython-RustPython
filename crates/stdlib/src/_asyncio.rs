@@ -103,9 +103,9 @@ pub(crate) mod _asyncio {
     impl FutureState {
         fn as_str(&self) -> &'static str {
             match self {
-                FutureState::Pending => "PENDING",
-                FutureState::Cancelled => "CANCELLED",
-                FutureState::Finished => "FINISHED",
+                Self::Pending => "PENDING",
+                Self::Cancelled => "CANCELLED",
+                Self::Finished => "FINISHED",
             }
         }
     }
@@ -140,7 +140,7 @@ pub(crate) mod _asyncio {
         type Args = FuncArgs;
 
         fn py_new(_cls: &Py<PyType>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
-            Ok(PyFuture::new_empty())
+            Ok(Self::new_empty())
         }
     }
 
@@ -154,7 +154,7 @@ pub(crate) mod _asyncio {
             }
             // Extract only 'loop' keyword argument
             let loop_ = args.kwargs.get("loop").cloned();
-            PyFuture::py_init(&zelf, loop_, vm)
+            Self::py_init(&zelf, loop_, vm)
         }
     }
 
@@ -807,7 +807,7 @@ pub(crate) mod _asyncio {
             // Create context dict for call_exception_handler
             let context = PyDict::default().into_ref(&vm.ctx);
             let class_name = zelf.class().name().to_string();
-            let message = format!("{} exception was never retrieved", class_name);
+            let message = format!("{class_name} exception was never retrieved");
             context.set_item(
                 vm.ctx.intern_str("message"),
                 vm.ctx.new_str(message).into(),
@@ -831,9 +831,9 @@ pub(crate) mod _asyncio {
             let class_name = zelf.class().name().to_string();
             if let Some(_guard) = ReprGuard::enter(vm, zelf.as_object()) {
                 let info = get_future_repr_info(zelf.as_object(), vm)?;
-                Ok(format!("<{} {}>", class_name, info))
+                Ok(format!("<{class_name} {info}>"))
             } else {
-                Ok(format!("<{} ...>", class_name))
+                Ok(format!("<{class_name} ...>"))
             }
         }
     }
@@ -1148,7 +1148,7 @@ pub(crate) mod _asyncio {
         type Args = TaskInitArgs;
 
         fn init(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
-            PyTask::py_init(&zelf, args, vm)
+            Self::py_init(&zelf, args, vm)
         }
     }
 
@@ -1851,7 +1851,7 @@ pub(crate) mod _asyncio {
                         .repr(vm)
                         .unwrap_or_else(|_| vm.ctx.new_str("<Task>"));
                     let message =
-                        format!("Task was destroyed but it is pending!\ntask: {}", task_repr);
+                        format!("Task was destroyed but it is pending!\ntask: {task_repr}");
                     context.set_item(
                         vm.ctx.intern_str("message"),
                         vm.ctx.new_str(message).into(),
@@ -1887,7 +1887,7 @@ pub(crate) mod _asyncio {
             // Create context dict for call_exception_handler
             let context = PyDict::default().into_ref(&vm.ctx);
             let class_name = zelf.class().name().to_string();
-            let message = format!("{} exception was never retrieved", class_name);
+            let message = format!("{class_name} exception was never retrieved");
             context.set_item(
                 vm.ctx.intern_str("message"),
                 vm.ctx.new_str(message).into(),
@@ -2177,8 +2177,7 @@ pub(crate) mod _asyncio {
                     .repr(vm)
                     .unwrap_or_else(|_| vm.ctx.new_str("<Future>"));
                 let msg = format!(
-                    "Task {} got Future {} attached to a different loop",
-                    task_repr, result_repr
+                    "Task {task_repr} got Future {result_repr} attached to a different loop"
                 );
                 task.base.fut_state.store(FutureState::Finished);
                 *task.base.fut_exception.write() = Some(vm.new_runtime_error(msg).into());

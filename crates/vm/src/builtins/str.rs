@@ -45,10 +45,10 @@ use rustpython_common::{
     hash,
     lock::PyMutex,
     str::DeduceStrKind,
-    wtf8::{CodePoint, Wtf8, Wtf8Buf, Wtf8Chunk, Wtf8Concat},
+    wtf8::{CodePoint, Wtf8, Wtf8Buf, Wtf8Concat},
 };
 
-use icu_casemap::TitlecaseMapper;
+use icu_casemap::{CaseMapper, TitlecaseMapper};
 use icu_locale::LanguageIdentifier;
 use icu_properties::props::{
     BidiClass, BinaryProperty, CaseIgnorable, Cased, EnumeratedProperty, GeneralCategory,
@@ -743,20 +743,31 @@ impl PyStr {
         }
     }
 
-    // casefold is much more aggressive than lower
+    // Case folding is a Unicode standard operation to erase case differences.
+    //
+    // Lower, upper, and title case are special properties. Case folding erases those
+    // differences. For ASCII, case folding is the same as lower case but other scripts have
+    // their own, well-defined mappings.
     #[pymethod]
     fn casefold(&self) -> Self {
         match self.as_str_kind() {
-            PyKindStr::Ascii(s) => caseless::default_case_fold_str(s.as_str()).into(),
-            PyKindStr::Utf8(s) => caseless::default_case_fold_str(s).into(),
-            PyKindStr::Wtf8(w) => w
-                .chunks()
-                .map(|c| match c {
-                    Wtf8Chunk::Utf8(s) => Wtf8Buf::from_string(caseless::default_case_fold_str(s)),
-                    Wtf8Chunk::Surrogate(c) => Wtf8Buf::from(c),
-                })
-                .collect::<Wtf8Buf>()
-                .into(),
+            PyKindStr::Ascii(s) => s.to_ascii_lowercase().into(),
+            PyKindStr::Utf8(s) => CaseMapper::new().fold_string(s).to_string().into(),
+            PyKindStr::Wtf8(w) => {
+                let mut out = VecFmtWriter(Vec::with_capacity(w.len()));
+                let mapper = CaseMapper::new();
+                for chunk in w.as_bytes().utf8_chunks() {
+                    mapper
+                        .fold(chunk.valid())
+                        .write_to(&mut out)
+                        .expect("Writing to an in-memory buffer cannot fail.");
+                    out.0.extend(chunk.invalid());
+                }
+                // SAFETY:
+                // * CaseMapper only produces valid UTF-8
+                // * Surrogates are appended as-is
+                unsafe { Wtf8Buf::from_bytes_unchecked(out.0) }.into()
+            }
         }
     }
 
@@ -1057,10 +1068,10 @@ impl PyStr {
 
     #[pymethod]
     fn __format__(
-        zelf: PyRef<PyStr>,
+        zelf: PyRef<Self>,
         spec: PyUtf8StrRef,
         vm: &VirtualMachine,
-    ) -> PyResult<PyRef<PyStr>> {
+    ) -> PyResult<PyRef<Self>> {
         if spec.is_empty() {
             return if zelf.class().is(vm.ctx.types.str_type) {
                 Ok(zelf)
@@ -1247,9 +1258,8 @@ impl PyStr {
                 let first = first?;
                 if first.as_object().class().is(vm.ctx.types.str_type) {
                     return Ok(first);
-                } else {
-                    first.as_wtf8().to_owned()
                 }
+                first.as_wtf8().to_owned()
             }
             Err(iter) => zelf.as_wtf8().py_join(iter)?,
         };
@@ -1578,7 +1588,7 @@ impl PyStr {
             zelf.to_owned()
         } else {
             // Subclass, create a new exact str
-            PyStr::from(zelf.data.clone()).into_ref(&vm.ctx)
+            Self::from(zelf.data.clone()).into_ref(&vm.ctx)
         }
     }
 }

@@ -88,12 +88,12 @@ mod _functools {
                 return Ok(instance);
             }
             // Fallback: create a new instance (shouldn't happen for base type after module init)
-            Ok(PyPlaceholderType.into_pyobject(vm))
+            Ok(Self.into_pyobject(vm))
         }
 
         fn py_new(_cls: &Py<PyType>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
             // This is never called because we override slot_new
-            Ok(PyPlaceholderType)
+            Ok(Self)
         }
     }
 
@@ -333,8 +333,7 @@ mod _functools {
                 if is_placeholder(value) {
                     return Err(vm.new_type_error(format!(
                         "Placeholder cannot be passed as a keyword argument to partial(). \
-                         Did you mean partial(..., {}=Placeholder, ...)(value)?",
-                        key
+                         Did you mean partial(..., {key}=Placeholder, ...)(value)?"
                     )));
                 }
             }

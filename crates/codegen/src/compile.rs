@@ -51,18 +51,18 @@ impl ExprExt for ast::Expr {
     fn is_constant(&self) -> bool {
         matches!(
             self,
-            ast::Expr::NumberLiteral(_)
-                | ast::Expr::StringLiteral(_)
-                | ast::Expr::BytesLiteral(_)
-                | ast::Expr::NoneLiteral(_)
-                | ast::Expr::BooleanLiteral(_)
-                | ast::Expr::EllipsisLiteral(_)
+            Self::NumberLiteral(_)
+                | Self::StringLiteral(_)
+                | Self::BytesLiteral(_)
+                | Self::NoneLiteral(_)
+                | Self::BooleanLiteral(_)
+                | Self::EllipsisLiteral(_)
         )
     }
 
     fn is_constant_slice(&self) -> bool {
         match self {
-            ast::Expr::Slice(s) => {
+            Self::Slice(s) => {
                 let lower_const =
                     s.lower.is_none() || s.lower.as_deref().is_some_and(|e| e.is_constant());
                 let upper_const =
@@ -76,7 +76,7 @@ impl ExprExt for ast::Expr {
     }
 
     fn should_use_slice_optimization(&self) -> bool {
-        !self.is_constant_slice() && matches!(self, ast::Expr::Slice(s) if s.step.is_none())
+        !self.is_constant_slice() && matches!(self, Self::Slice(s) if s.step.is_none())
     }
 }
 
@@ -289,7 +289,7 @@ pub fn compile_program(
 ) -> CompileResult<CodeObject> {
     let symbol_table = SymbolTable::scan_program(ast, source_file.clone())
         .map_err(|e| e.into_codegen_error(source_file.name().to_owned()))?;
-    let mut compiler = Compiler::new(opts, source_file, "<module>".to_owned());
+    let mut compiler = Compiler::new(opts, source_file, "<module>");
     compiler.compile_program(ast, symbol_table)?;
     let code = compiler.exit_scope();
     trace!("Compilation completed: {code:?}");
@@ -304,7 +304,7 @@ pub fn compile_program_single(
 ) -> CompileResult<CodeObject> {
     let symbol_table = SymbolTable::scan_program(ast, source_file.clone())
         .map_err(|e| e.into_codegen_error(source_file.name().to_owned()))?;
-    let mut compiler = Compiler::new(opts, source_file, "<module>".to_owned());
+    let mut compiler = Compiler::new(opts, source_file, "<module>");
     compiler.compile_program_single(&ast.body, symbol_table)?;
     let code = compiler.exit_scope();
     trace!("Compilation completed: {code:?}");
@@ -318,7 +318,7 @@ pub fn compile_block_expression(
 ) -> CompileResult<CodeObject> {
     let symbol_table = SymbolTable::scan_program(ast, source_file.clone())
         .map_err(|e| e.into_codegen_error(source_file.name().to_owned()))?;
-    let mut compiler = Compiler::new(opts, source_file, "<module>".to_owned());
+    let mut compiler = Compiler::new(opts, source_file, "<module>");
     compiler.compile_block_expr(&ast.body, symbol_table)?;
     let code = compiler.exit_scope();
     trace!("Compilation completed: {code:?}");
@@ -332,7 +332,7 @@ pub fn compile_expression(
 ) -> CompileResult<CodeObject> {
     let symbol_table = SymbolTable::scan_expr(ast, source_file.clone())
         .map_err(|e| e.into_codegen_error(source_file.name().to_owned()))?;
-    let mut compiler = Compiler::new(opts, source_file, "<module>".to_owned());
+    let mut compiler = Compiler::new(opts, source_file, "<module>");
     compiler.compile_eval(ast, symbol_table)?;
     let code = compiler.exit_scope();
     Ok(code)
@@ -447,13 +447,14 @@ impl PatternContext {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum JumpOp {
     Jump,
     PopJumpIfFalse,
 }
 
 /// Type of collection to build in starunpack_helper
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CollectionType {
     Tuple,
     List,
@@ -541,7 +542,7 @@ impl Compiler {
         }
     }
 
-    fn new(opts: CompileOpts, source_file: SourceFile, code_name: String) -> Self {
+    fn new(opts: CompileOpts, source_file: SourceFile, code_name: &str) -> Self {
         let module_code = ir::CodeInfo {
             // CPython convention: top-level module / interactive /
             // expression code does not carry CO_NEWLOCALS or CO_OPTIMIZED.
@@ -558,8 +559,8 @@ impl Compiler {
             current_block: BlockIdx::new(0),
             annotations_blocks: None,
             metadata: ir::CodeUnitMetadata {
-                name: code_name.clone(),
-                qualname: Some(code_name),
+                name: code_name.to_string(),
+                qualname: Some(code_name.to_string()),
                 consts: IndexSet::default(),
                 names: IndexSet::default(),
                 varnames: IndexSet::default(),
@@ -1287,8 +1288,7 @@ impl Compiler {
             let name = current_table.name.clone();
             let typ = current_table.typ;
             return Err(self.error(CodegenErrorType::SyntaxError(format!(
-                "no symbol table available in {} (type: {:?})",
-                name, typ
+                "no symbol table available in {name} (type: {typ:?})"
             ))));
         }
 
@@ -1829,7 +1829,7 @@ impl Compiler {
         posonlyarg_count: u32,
         arg_count: u32,
         kwonlyarg_count: u32,
-        obj_name: String,
+        obj_name: &str,
     ) -> CompileResult<()> {
         // First push the symbol table
         let table = self.push_symbol_table()?;
@@ -1842,7 +1842,7 @@ impl Compiler {
         let lineno = self.get_source_line_number().get();
 
         // Call enter_scope which does most of the work
-        self.enter_scope(&obj_name, scope_type, key, lineno.to_u32())?;
+        self.enter_scope(obj_name, scope_type, key, lineno.to_u32())?;
 
         // Override the values that push_output sets explicitly
         // enter_scope sets default values based on scope_type, but push_output
@@ -3400,7 +3400,7 @@ impl Compiler {
             parameters.posonlyargs.len().to_u32(),
             (parameters.posonlyargs.len() + parameters.args.len()).to_u32(),
             parameters.kwonlyargs.len().to_u32(),
-            name.to_owned(),
+            name,
         )?;
 
         let args_iter = core::iter::empty()
@@ -5258,7 +5258,7 @@ impl Compiler {
                 0,
                 num_typeparam_args as u32,
                 0,
-                type_params_name,
+                &type_params_name,
             )?;
 
             // TypeParams scope is function-like
@@ -5820,7 +5820,7 @@ impl Compiler {
                 0,
                 0,
                 0,
-                type_params_name,
+                &type_params_name,
             )?;
 
             // Set private name for name mangling
@@ -6084,15 +6084,13 @@ impl Compiler {
     ) -> CompileResult<()> {
         self.enter_conditional_block();
 
-        let while_block = self.new_block();
+        let while_block = self.switch_to_new_or_reuse_empty();
         let after_block = self.new_block();
         let else_block = if orelse.is_empty() {
             after_block
         } else {
             self.new_block()
         };
-
-        self.switch_to_block(while_block);
         self.push_fblock(FBlockType::WhileLoop, while_block, after_block)?;
         if matches!(self.constant_expr_truthiness(test)?, Some(false)) {
             self.disable_load_fast_borrow_for_block(else_block);
@@ -7956,21 +7954,20 @@ impl Compiler {
                         if let ast::Expr::Starred(_) = &element {
                             if seen_star {
                                 return Err(self.error(CodegenErrorType::MultipleStarArgs));
-                            } else {
-                                seen_star = true;
-                                let before = i;
-                                let after = elts.len() - i - 1;
-                                let (before, after) = (|| Some((before.to_u8()?, after.to_u8()?)))(
-                                )
+                            }
+
+                            seen_star = true;
+                            let before = i;
+                            let after = elts.len() - i - 1;
+                            let (before, after) = (|| Some((before.to_u8()?, after.to_u8()?)))()
                                 .ok_or_else(|| {
                                     self.error_ranged(
                                         CodegenErrorType::TooManyStarUnpack,
                                         target.range(),
                                     )
                                 })?;
-                                let counts = bytecode::UnpackExArgs { before, after };
-                                emit!(self, Instruction::UnpackEx { counts });
-                            }
+                            let counts = bytecode::UnpackExArgs { before, after };
+                            emit!(self, Instruction::UnpackEx { counts });
                         }
                     }
 
@@ -9696,8 +9693,7 @@ impl Compiler {
                 let name = current_table.name.clone();
                 let typ = current_table.typ;
                 Err(self.error(CodegenErrorType::SyntaxError(format!(
-                    "no symbol table available in {} (type: {:?})",
-                    name, typ
+                    "no symbol table available in {name} (type: {typ:?})"
                 ))))
             }
         })();
@@ -9715,14 +9711,14 @@ impl Compiler {
         posonlyarg_count: u32,
         arg_count: u32,
         kwonlyarg_count: u32,
-        obj_name: String,
+        obj_name: &str,
     ) -> CompileResult<()> {
         let scope_type = table.typ;
         self.symbol_table_stack.push(table);
 
         let key = self.symbol_table_stack.len() - 1;
         let lineno = self.get_source_line_number().get();
-        self.enter_scope(&obj_name, scope_type, key, lineno.to_u32())?;
+        self.enter_scope(obj_name, scope_type, key, lineno.to_u32())?;
 
         if let Some(info) = self.code_stack.last_mut() {
             info.flags = flags | (info.flags & bytecode::CodeFlags::NESTED);
@@ -9786,7 +9782,7 @@ impl Compiler {
             // and relies on the inlined path itself to handle GET_AITER /
             // async-comprehension cleanup.
             return self.compile_inlined_comprehension(
-                comp_table,
+                &comp_table,
                 init_collection,
                 generators,
                 compile_element,
@@ -9821,7 +9817,7 @@ impl Compiler {
         // scope itself. Peek past those nested scopes so we can enter the
         // correct comprehension table here, then let the real outermost
         // iterator compile consume its nested scopes later in parent scope.
-        self.push_output_with_symbol_table(comp_table, flags, 1, 1, 0, name.to_owned())?;
+        self.push_output_with_symbol_table(comp_table, flags, 1, 1, 0, name)?;
 
         // Set qualname for comprehension
         self.set_qualname();
@@ -10028,7 +10024,7 @@ impl Compiler {
     /// This generates bytecode inline without creating a new code object
     fn compile_inlined_comprehension(
         &mut self,
-        comp_table: SymbolTable,
+        comp_table: &SymbolTable,
         init_collection: Option<AnyInstruction>,
         generators: &[ast::Comprehension],
         compile_element: &dyn Fn(&mut Self, usize) -> CompileResult<()>,
@@ -11347,6 +11343,30 @@ impl Compiler {
         &mut info.blocks[info.current_block]
     }
 
+    /// Switch to a fresh block, but reuse the current block when it is empty
+    /// and unlinked, mirroring CPython's USE_LABEL behavior in
+    /// `cfg_builder_maybe_start_new_block` (Python/flowgraph.c): when the
+    /// current block has no instructions and no existing label/next pointer,
+    /// CPython attaches the new label to the current block instead of creating
+    /// a new one. RustPython's plain `switch_to_block(new_block())` always
+    /// creates a fresh block, which leaves a stray empty block in the b_next
+    /// chain (e.g. after compile_try_except's switch_to_block(end_block)).
+    /// That stray empty block then causes optimize_load_fast_borrow to stop
+    /// fall-through propagation at the wrong place. Use this helper for
+    /// "entry to construct" labels (while loop header, for loop header, etc.)
+    /// where reusing the empty current block is semantically safe.
+    fn switch_to_new_or_reuse_empty(&mut self) -> BlockIdx {
+        let cur = self.current_code_info().current_block;
+        let block = &self.current_code_info().blocks[cur.idx()];
+        if block.instructions.is_empty() && block.next == BlockIdx::NULL {
+            cur
+        } else {
+            let b = self.new_block();
+            self.switch_to_block(b);
+            b
+        }
+    }
+
     fn new_block(&mut self) -> BlockIdx {
         let code = self.current_code_info();
         let idx = BlockIdx::new(code.blocks.len().to_u32());
@@ -12380,7 +12400,7 @@ mod tests {
         let symbol_table = SymbolTable::scan_program(&ast, source_file.clone())
             .map_err(|e| e.into_codegen_error(source_file.name().to_owned()))
             .unwrap();
-        let mut compiler = Compiler::new(opts, source_file, "<module>".to_owned());
+        let mut compiler = Compiler::new(opts, source_file, "<module>");
         compiler.compile_program(&ast, symbol_table).unwrap();
         compiler.exit_scope()
     }
@@ -12418,7 +12438,7 @@ mod tests {
         let symbol_table = SymbolTable::scan_program(&ast, source_file.clone())
             .map_err(|e| e.into_codegen_error(source_file.name().to_owned()))
             .unwrap();
-        let mut compiler = Compiler::new(opts, source_file, "<module>".to_owned());
+        let mut compiler = Compiler::new(opts, source_file, "<module>");
         compiler.compile_program(&ast, symbol_table).unwrap();
         let _table = compiler.pop_symbol_table();
         let stack_top = compiler.code_stack.pop().unwrap();
@@ -12459,7 +12479,7 @@ mod tests {
         let is_async = function.is_async;
         let range = function.range();
 
-        let mut compiler = Compiler::new(opts, source_file, "<module>".to_owned());
+        let mut compiler = Compiler::new(opts, source_file, "<module>");
         compiler.future_annotations = symbol_table.future_annotations;
         compiler.symbol_table_stack.push(symbol_table);
         compiler.set_source_range(range);
@@ -17509,6 +17529,108 @@ def f():
         assert!(
             !normal_tail.iter().any(|unit| load_out_is(unit, false)),
             "handler assignment resume tail should not force strong out loads, got tail={normal_tail:?}"
+        );
+    }
+
+    #[test]
+    fn test_empty_fallthrough_handler_assignment_tail_keeps_borrows() {
+        let code = compile_exec(
+            "\
+def f(value):
+    obs_local_part = ObsLocalPart()
+    try:
+        token, value = get_word(value)
+    except HeaderParseError:
+        if value[0] not in CFWS_LEADER:
+            raise
+        token, value = get_cfws(value)
+    obs_local_part.append(token)
+    return obs_local_part, value
+",
+        );
+        let f = find_code(&code, "f").expect("missing f code");
+        let ops: Vec<_> = f
+            .instructions
+            .iter()
+            .filter(|unit| !matches!(unit.op, Instruction::Cache))
+            .collect();
+        let handler_start = ops
+            .iter()
+            .position(|unit| matches!(unit.op, Instruction::PushExcInfo))
+            .expect("missing handler entry");
+        let normal_path = &ops[..handler_start];
+        let load_name = |unit: &&CodeUnit, name: &str, borrowed: bool| {
+            let arg = OpArg::new(u32::from(u8::from(unit.arg)));
+            match (unit.op, borrowed) {
+                (Instruction::LoadFastBorrow { var_num }, true)
+                | (Instruction::LoadFast { var_num }, false) => {
+                    f.varnames[usize::from(var_num.get(arg))].as_str() == name
+                }
+                _ => false,
+            }
+        };
+
+        for name in ["obs_local_part", "token"] {
+            assert!(
+                normal_path.iter().any(|unit| load_name(unit, name, true)),
+                "handler assignment tail should keep CPython-style borrowed {name} loads, got path={normal_path:?}"
+            );
+            assert!(
+                !normal_path.iter().any(|unit| load_name(unit, name, false)),
+                "handler assignment tail should not force strong {name}, got path={normal_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_protected_store_of_preinitialized_local_keeps_return_borrow() {
+        let code = compile_exec(
+            "\
+def f(obj):
+    maybe_routine = obj
+    try:
+        maybe_routine = inspect.unwrap(maybe_routine)
+    except ValueError:
+        pass
+    return inspect.isroutine(maybe_routine)
+",
+        );
+        let f = find_code(&code, "f").expect("missing f code");
+        let ops: Vec<_> = f
+            .instructions
+            .iter()
+            .filter(|unit| !matches!(unit.op, Instruction::Cache))
+            .collect();
+        let handler_start = ops
+            .iter()
+            .position(|unit| matches!(unit.op, Instruction::PushExcInfo))
+            .expect("missing handler entry");
+        let normal_path = &ops[..handler_start];
+        let maybe_routine_idx = f
+            .varnames
+            .iter()
+            .position(|name| name == "maybe_routine")
+            .expect("missing maybe_routine local");
+        let loads_maybe_routine = |unit: &&CodeUnit, borrowed: bool| match (unit.op, borrowed) {
+            (Instruction::LoadFastBorrow { var_num }, true)
+            | (Instruction::LoadFast { var_num }, false) => {
+                let arg = OpArg::new(u32::from(u8::from(unit.arg)));
+                usize::from(var_num.get(arg)) == maybe_routine_idx
+            }
+            _ => false,
+        };
+
+        assert!(
+            normal_path
+                .iter()
+                .any(|unit| loads_maybe_routine(unit, true)),
+            "preinitialized protected-store tail should keep CPython-style borrowed local, got path={normal_path:?}"
+        );
+        assert!(
+            !normal_path
+                .iter()
+                .any(|unit| loads_maybe_routine(unit, false)),
+            "preinitialized protected-store tail should not force strong local, got path={normal_path:?}"
         );
     }
 

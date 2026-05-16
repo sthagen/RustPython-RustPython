@@ -1331,7 +1331,7 @@ impl OSErrorBuilder {
     pub(crate) fn build(self, vm: &VirtualMachine) -> PyRef<types::PyOSError> {
         use types::PyOSError;
 
-        let OSErrorBuilder {
+        let Self {
             exc_type,
             errno,
             strerror,
@@ -1430,13 +1430,6 @@ impl ToPyException for std::io::Error {
 impl IntoPyException for std::io::Error {
     fn into_pyexception(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
         self.to_pyexception(vm)
-    }
-}
-
-#[cfg(unix)]
-impl IntoPyException for nix::Error {
-    fn into_pyexception(self, vm: &VirtualMachine) -> PyBaseExceptionRef {
-        std::io::Error::from(self).into_pyexception(vm)
     }
 }
 
@@ -1889,7 +1882,7 @@ pub(super) mod types {
             // SAFETY: All OSError subclasses (FileNotFoundError, etc.) are
             // #[repr(transparent)] wrappers around PyOSError with identical memory layout
             #[allow(deprecated)]
-            let exc: &Py<PyOSError> = zelf.downcast_ref::<PyOSError>().unwrap();
+            let exc: &Py<Self> = zelf.downcast_ref::<Self>().unwrap();
 
             // Check if this is BlockingIOError - need to handle characters_written
             let is_blocking_io_error =
@@ -2404,8 +2397,7 @@ pub(super) mod types {
                     }
                     _ => {
                         return Err(vm.new_type_error(format!(
-                            "function takes exactly 4 or 6 arguments ({} given)",
-                            location_tup_len
+                            "function takes exactly 4 or 6 arguments ({location_tup_len} given)"
                         )));
                     }
                 }
