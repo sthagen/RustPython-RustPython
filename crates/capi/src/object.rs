@@ -33,6 +33,7 @@ macro_rules! define_py_check {
     };
 }
 
+pub(crate) use define_py_check;
 define_py_check!(fn PyType_Check, types.type_type);
 define_py_check!(exact fn PyType_CheckExact, types.type_type);
 
@@ -62,6 +63,33 @@ pub unsafe extern "C" fn PyType_IsSubtype(a: *const PyTypeObject, b: *const PyTy
         let a = unsafe { &*a };
         let b = unsafe { &*b };
         Ok(a.is_subtype(b))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn PyType_GetName(ptr: *const PyTypeObject) -> *mut PyObject {
+    with_vm(|vm| unsafe { &*ptr }.__name__(vm))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn PyType_GetQualName(ptr: *const PyTypeObject) -> *mut PyObject {
+    with_vm(|vm| unsafe { &*ptr }.__qualname__(vm))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn PyType_GetFullyQualifiedName(ptr: *const PyTypeObject) -> *mut PyObject {
+    with_vm(|vm| {
+        let ty = unsafe { &*ptr };
+        let qualname = ty.__qualname__(vm).try_downcast::<PyStr>(vm)?;
+        let module = ty.__module__(vm);
+
+        if let Some(module) = module.downcast_ref::<PyStr>()
+            && module.as_wtf8() != "builtins"
+        {
+            Ok(vm.ctx.new_str(format!("{module}.{qualname}")))
+        } else {
+            Ok(qualname)
+        }
     })
 }
 
