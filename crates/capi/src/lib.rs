@@ -9,11 +9,17 @@ use std::sync::MutexGuard;
 extern crate alloc;
 
 pub mod abstract_;
+pub mod boolobject;
 pub mod bytesobject;
 pub mod ceval;
+pub mod complexobject;
+pub mod dictobject;
+pub mod floatobject;
 pub mod import;
+pub mod listobject;
 pub mod longobject;
 pub mod object;
+pub mod pycapsule;
 pub mod pyerrors;
 pub mod pylifecycle;
 pub mod pystate;
