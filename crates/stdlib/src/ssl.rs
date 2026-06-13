@@ -2824,7 +2824,7 @@ mod _ssl {
         ) -> PyResult<PyBytesRef> {
             let obj_to_bytes = |bytes_obj| {
                 PyBytesRef::try_from_object(vm, bytes_obj)
-                    .map_err(|_| vm.new_os_error("Expected bytes from recv".to_string()))
+                    .map_err(|_| vm.new_os_error("Expected bytes from recv"))
             };
 
             let tls_record_header_buf = self
@@ -4657,10 +4657,7 @@ mod _ssl {
                 // It's a memoryview, check if contiguous
                 let is_contiguous: bool = mem_view.try_to_bool(vm)?;
                 if !is_contiguous {
-                    return Err(vm.new_exception_msg(
-                        vm.ctx.exceptions.buffer_error.to_owned(),
-                        "non-contiguous buffer is not supported".into(),
-                    ));
+                    return Err(vm.new_buffer_error("non-contiguous buffer is not supported"));
                 }
             }
 

@@ -103,7 +103,7 @@ pub mod sys {
         #[pymethod]
         fn write(&self, s: PyStrRef, vm: &VirtualMachine) -> PyResult<usize> {
             if self.fd == 0 {
-                return Err(vm.new_os_error("not writable".to_owned()));
+                return Err(vm.new_os_error("not writable"));
             }
             let bytes = s.as_bytes();
             if self.fd == 2 {
@@ -121,7 +121,7 @@ pub mod sys {
         #[pymethod]
         fn readline(&self, size: OptionalArg<isize>, vm: &VirtualMachine) -> PyResult<String> {
             if self.fd != 0 {
-                return Err(vm.new_os_error("not readable".to_owned()));
+                return Err(vm.new_os_error("not readable"));
             }
             let size = size.unwrap_or(-1);
             if size == 0 {
@@ -1129,7 +1129,7 @@ pub mod sys {
             let tb_module = vm.import("traceback", 0)?;
             let print_tb = tb_module.get_attr("print_tb", vm)?;
             let stderr_obj = super::get_stderr(vm)?;
-            let kwargs: KwArgs = [("file".to_string(), stderr_obj)].into_iter().collect();
+            let kwargs: KwArgs = core::iter::once(("file".to_string(), stderr_obj)).collect();
             let _ = print_tb.call(
                 FuncArgs::new(vec![unraisable.exc_traceback.clone()], kwargs),
                 vm,
