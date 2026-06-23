@@ -12,7 +12,7 @@
 use crate::{
     IndexMap, IndexSet, ToPythonName,
     error::{CodegenError, CodegenErrorType, InternalError, PatternUnreachableReason},
-    ir::{self, BlockIdx},
+    ir::{self, Block, BlockIdx, Blocks},
     preprocess,
     symboltable::{self, CompilerScope, Symbol, SymbolFlags, SymbolScope, SymbolTable},
     unparse::UnparseExpr,
@@ -24,20 +24,22 @@ use num_complex::Complex;
 use num_traits::{Num, ToPrimitive, Zero};
 use ruff_python_ast as ast;
 use ruff_text_size::{Ranged, TextRange, TextSize};
+
 use rustpython_compiler_core::{
     Mode, OneIndexed, PositionEncoding, SourceFile, SourceLocation,
     bytecode::{
         self, AnyInstruction, AnyOpcode, Arg as OpArgMarker, BinaryOperator, BuildSliceArgCount,
-        CodeObject, ComparisonOperator, ConstantData, ConvertValueOparg, Instruction,
-        IntrinsicFunction1, Invert, LoadAttr, LoadSuperAttr, OpArg, OpArgType, PseudoInstruction,
-        SpecialMethod, UnpackExArgs, oparg,
+        CodeFlags, CodeObject, ComparisonOperator, ConstantData, ConvertValueOparg, Instruction,
+        IntrinsicFunction1, Invert, LoadAttr, LoadSuperAttr, MakeFunctionFlag, MakeFunctionFlags,
+        OpArg, OpArgType, Opcode, PseudoInstruction, PseudoOpcode, SpecialMethod, UnpackExArgs,
+        oparg,
     },
 };
 use rustpython_wtf8::Wtf8Buf;
 
 /// Extension trait for `ast::Expr` to add constant checking methods
 trait ExprExt {
-    /// Check if an expression is a constant literal
+    /// Returns true if the expression is a constant literal with no side effects.
     fn is_constant(&self) -> bool;
 
     /// Check if a slice expression has all constant elements
@@ -63,12 +65,9 @@ impl ExprExt for ast::Expr {
     fn is_constant_slice(&self) -> bool {
         match self {
             Self::Slice(s) => {
-                let lower_const =
-                    s.lower.is_none() || s.lower.as_deref().is_some_and(|e| e.is_constant());
-                let upper_const =
-                    s.upper.is_none() || s.upper.as_deref().is_some_and(|e| e.is_constant());
-                let step_const =
-                    s.step.is_none() || s.step.as_deref().is_some_and(|e| e.is_constant());
+                let lower_const = s.lower.as_deref().is_none_or(|e| e.is_constant());
+                let upper_const = s.upper.as_deref().is_none_or(|e| e.is_constant());
+                let step_const = s.step.as_deref().is_none_or(|e| e.is_constant());
                 lower_const && upper_const && step_const
             }
             _ => false,
@@ -458,22 +457,6 @@ enum CollectionType {
 const STACK_USE_GUIDELINE: u32 = 30;
 
 impl Compiler {
-    fn constant_truthiness(constant: &ConstantData) -> bool {
-        match constant {
-            ConstantData::Tuple { elements } | ConstantData::Frozenset { elements } => {
-                !elements.is_empty()
-            }
-            ConstantData::Integer { value } => !value.is_zero(),
-            ConstantData::Float { value } => *value != 0.0,
-            ConstantData::Complex { value } => value.re != 0.0 || value.im != 0.0,
-            ConstantData::Boolean { value } => *value,
-            ConstantData::Str { value } => !value.is_empty(),
-            ConstantData::Bytes { value } => !value.is_empty(),
-            ConstantData::Code { .. } | ConstantData::Slice { .. } | ConstantData::Ellipsis => true,
-            ConstantData::None => false,
-        }
-    }
-
     fn new(opts: CompileOpts, source_file: SourceFile, code_name: &str) -> Self {
         let module_code = ir::CodeInfo {
             // CPython convention: top-level module / interactive /
@@ -484,10 +467,10 @@ impl Compiler {
             // empty flags.  frame.rs:725-731 then binds locals to globals
             // for module/REPL frames whose `scope.locals` is None - the
             // correct semantics for `exec(code, globals)` and module init.
-            flags: bytecode::CodeFlags::empty(),
+            flags: CodeFlags::empty(),
             source_path: source_file.name().to_owned(),
             private: None,
-            blocks: vec![ir::Block::default()],
+            blocks: Blocks::from([Block::default()]),
             current_block: BlockIdx::new(0),
             instr_sequence: ir::InstructionSequence::new(),
             instr_sequence_label_map: ir::InstructionSequenceLabelMap::new(),
@@ -564,8 +547,9 @@ impl Compiler {
             saved_annotations_instr_sequence,
         ) = {
             let code = self.current_code_info();
+
             (
-                mem::replace(&mut code.blocks, vec![ir::Block::default()]),
+                mem::replace(&mut code.blocks, Blocks::from([Block::default()])),
                 mem::replace(&mut code.current_block, BlockIdx::new(0)),
                 mem::replace(&mut code.instr_sequence, ir::InstructionSequence::new()),
                 mem::replace(
@@ -1196,13 +1180,10 @@ impl Compiler {
         let source_path = self.source_file.name().to_owned();
 
         // Lookup symbol table entry using key (_PySymtable_Lookup)
-        let ste = match self.symbol_table_stack.get(key) {
-            Some(v) => v,
-            None => {
-                return Err(self.error(CodegenErrorType::SyntaxError(
-                    "unknown symbol table entry".to_owned(),
-                )));
-            }
+        let Some(ste) = self.symbol_table_stack.get(key) else {
+            return Err(self.error(CodegenErrorType::SyntaxError(
+                "unknown symbol table entry".into(),
+            )));
         };
 
         // Use varnames from symbol table (already collected in definition order)
@@ -1273,16 +1254,21 @@ impl Compiler {
                     .collect()
             })
             .unwrap_or_default();
-        let mut free_names: Vec<_> = ste
+
+        let mut free_names = ste
             .symbols
             .iter()
             .filter(|(_, s)| {
-                s.scope == SymbolScope::Free
-                    || (scope_type != CompilerScope::Class
-                        && s.flags.contains(SymbolFlags::FREE_CLASS))
-                    || (scope_type == CompilerScope::Class
-                        && s.flags.contains(SymbolFlags::FREE_CLASS)
-                        && self.has_enclosing_non_module_code_scope())
+                if s.scope == SymbolScope::Free {
+                    return true;
+                }
+
+                let has_free_class = s.flags.contains(SymbolFlags::FREE_CLASS);
+                if scope_type == CompilerScope::Class {
+                    has_free_class && self.has_enclosing_non_module_code_scope()
+                } else {
+                    has_free_class
+                }
             })
             .filter(|(name, symbol)| {
                 if !matches!(
@@ -1294,7 +1280,8 @@ impl Compiler {
                 !(annotation_free_names.contains(*name) && symbol.flags.is_empty())
             })
             .map(|(name, _)| name.clone())
-            .collect();
+            .collect::<Vec<_>>();
+
         free_names.sort();
         for name in free_names {
             freevar_cache.insert(name);
@@ -1302,28 +1289,23 @@ impl Compiler {
 
         // Initialize u_metadata fields
         let (mut flags, posonlyarg_count, arg_count, kwonlyarg_count) = match scope_type {
-            CompilerScope::Module => (bytecode::CodeFlags::empty(), 0, 0, 0),
-            CompilerScope::Class => (bytecode::CodeFlags::empty(), 0, 0, 0),
+            CompilerScope::Module => (CodeFlags::empty(), 0, 0, 0),
+            CompilerScope::Class => (CodeFlags::empty(), 0, 0, 0),
             CompilerScope::Function | CompilerScope::AsyncFunction | CompilerScope::Lambda => (
-                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
+                CodeFlags::NEWLOCALS | CodeFlags::OPTIMIZED,
                 0, // Will be set later in enter_function
                 0, // Will be set later in enter_function
                 0, // Will be set later in enter_function
             ),
             CompilerScope::Comprehension => (
-                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
+                CodeFlags::NEWLOCALS | CodeFlags::OPTIMIZED,
                 0,
                 1, // comprehensions take one argument (.0)
                 0,
             ),
-            CompilerScope::TypeParams => (
-                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
-                0,
-                0,
-                0,
-            ),
+            CompilerScope::TypeParams => (CodeFlags::NEWLOCALS | CodeFlags::OPTIMIZED, 0, 0, 0),
             CompilerScope::Annotation => (
-                bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
+                CodeFlags::NEWLOCALS | CodeFlags::OPTIMIZED,
                 1, // format is positional-only
                 1, // annotation scope takes one argument (format)
                 0,
@@ -1331,7 +1313,7 @@ impl Compiler {
         };
 
         if ste.is_method {
-            flags |= bytecode::CodeFlags::METHOD;
+            flags |= CodeFlags::METHOD;
         }
 
         // CPython sets CO_NESTED from symtable's ste_nested, not merely
@@ -1347,12 +1329,12 @@ impl Compiler {
                     | CompilerScope::Annotation
                     | CompilerScope::TypeParams
             ) {
-            flags | bytecode::CodeFlags::NESTED
+            flags | CodeFlags::NESTED
         } else {
             flags
         };
         if self.future_annotations {
-            flags |= bytecode::CodeFlags::FUTURE_ANNOTATIONS;
+            flags |= CodeFlags::FUTURE_ANNOTATIONS;
         }
 
         // Get private name from parent scope
@@ -1367,7 +1349,7 @@ impl Compiler {
             flags,
             source_path,
             private,
-            blocks: vec![ir::Block::default()],
+            blocks: Blocks::from([Block::default()]),
             current_block: BlockIdx::new(0),
             instr_sequence: ir::InstructionSequence::new(),
             instr_sequence_label_map: ir::InstructionSequenceLabelMap::new(),
@@ -1436,10 +1418,7 @@ impl Compiler {
         let except_handler = None;
 
         self.cpython_cfg_builder_addop(ir::InstructionInfo {
-            instr: Instruction::Resume {
-                context: OpArgMarker::marker(),
-            }
-            .into(),
+            instr: Opcode::Resume.into(),
             arg: OpArg::new(oparg::ResumeLocation::AtFuncStart.into()),
             target: BlockIdx::NULL,
             location,
@@ -1477,9 +1456,7 @@ impl Compiler {
             // Preserve flags computed from the symbol-table context.
             info.flags = flags
                 | (info.flags
-                    & (bytecode::CodeFlags::NESTED
-                        | bytecode::CodeFlags::METHOD
-                        | bytecode::CodeFlags::FUTURE_ANNOTATIONS));
+                    & (CodeFlags::NESTED | CodeFlags::METHOD | CodeFlags::FUTURE_ANNOTATIONS));
             info.metadata.argcount = arg_count;
             info.metadata.posonlyargcount = posonlyarg_count;
             info.metadata.kwonlyargcount = kwonlyarg_count;
@@ -2074,7 +2051,7 @@ impl Compiler {
         if self.future_annotations {
             self.current_code_info()
                 .flags
-                .insert(bytecode::CodeFlags::FUTURE_ANNOTATIONS);
+                .insert(CodeFlags::FUTURE_ANNOTATIONS);
         }
 
         // Module-level __conditional_annotations__ cell
@@ -2091,7 +2068,7 @@ impl Compiler {
         self.emit_resume_for_scope(CompilerScope::Module, 1);
         emit!(self, PseudoInstruction::AnnotationsPlaceholder);
 
-        let (doc, statements) = split_doc_with_range(&body.body, &self.opts);
+        let (doc, statements) = split_doc_with_range(&body.body, self.opts);
         let module_start_loc = self.module_start_location(&body.body);
         // Handle annotation bookkeeping before the docstring assignment, as
         // codegen_body() does after _PyCodegen_Module() inserts the prefix set.
@@ -2145,7 +2122,7 @@ impl Compiler {
         if self.future_annotations {
             self.current_code_info()
                 .flags
-                .insert(bytecode::CodeFlags::FUTURE_ANNOTATIONS);
+                .insert(CodeFlags::FUTURE_ANNOTATIONS);
         }
         self.symbol_table_stack.push(symbol_table);
         let module_start_loc = self.module_start_location(body);
@@ -2485,11 +2462,13 @@ impl Compiler {
             let current_table = self.current_symbol_table();
             if current_table.typ == CompilerScope::Class
                 && !self.current_code_info().in_inlined_comp
-                && ((usage == NameUsage::Load
-                    && (name == "__class__"
-                        || name == "__classdict__"
-                        || name == "__conditional_annotations__"))
-                    || (name == "__conditional_annotations__" && usage == NameUsage::Store))
+                && matches!(
+                    (usage, name.as_ref()),
+                    (
+                        NameUsage::Load,
+                        "__class__" | "__classdict__" | "__conditional_annotations__"
+                    ) | (NameUsage::Store, "__conditional_annotations__")
+                )
             {
                 Some(SymbolScope::Cell)
             } else {
@@ -2804,7 +2783,7 @@ impl Compiler {
                 // In interactive mode, always compile (to print the result).
                 let dominated_by_interactive =
                     self.interactive && !self.ctx.in_func() && !self.ctx.in_class;
-                if !dominated_by_interactive && Self::is_const_expression(value) {
+                if !dominated_by_interactive && value.is_constant() {
                     emit!(self, Instruction::Nop);
                 } else {
                     self.compile_expression(value)?;
@@ -3075,7 +3054,7 @@ impl Compiler {
             }
             ast::Stmt::AugAssign(ast::StmtAugAssign {
                 target, op, value, ..
-            }) => self.compile_augassign(target, op, value)?,
+            }) => self.compile_augassign(target, *op, value)?,
             ast::Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
                 annotation,
@@ -3150,7 +3129,7 @@ impl Compiler {
 
                     let code = self.exit_scope();
                     self.ctx = prev_ctx;
-                    self.make_closure(code, bytecode::MakeFunctionFlags::new())?;
+                    self.make_closure(code, MakeFunctionFlags::new())?;
                     emit!(self, Instruction::PushNull);
                     emit!(self, Instruction::Call { argc: 0 });
                 } else {
@@ -3228,7 +3207,7 @@ impl Compiler {
         }
 
         self.push_output(
-            bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED,
+            CodeFlags::NEWLOCALS | CodeFlags::OPTIMIZED,
             parameters.posonlyargs.len().to_u32(),
             (parameters.posonlyargs.len() + parameters.args.len()).to_u32(),
             parameters.kwonlyargs.len().to_u32(),
@@ -3246,11 +3225,11 @@ impl Compiler {
         }
 
         if let Some(name) = parameters.vararg.as_deref() {
-            self.current_code_info().flags |= bytecode::CodeFlags::VARARGS;
+            self.current_code_info().flags |= CodeFlags::VARARGS;
             self.varname(name.name.as_str());
         }
         if let Some(name) = parameters.kwarg.as_deref() {
-            self.current_code_info().flags |= bytecode::CodeFlags::VARKEYWORDS;
+            self.current_code_info().flags |= CodeFlags::VARKEYWORDS;
             self.varname(name.name.as_str());
         }
 
@@ -3333,10 +3312,7 @@ impl Compiler {
         self.ctx = prev_ctx;
 
         self.set_source_range(expr_range);
-        self.make_closure(
-            code,
-            bytecode::MakeFunctionFlags::from([bytecode::MakeFunctionFlag::Defaults]),
-        )?;
+        self.make_closure(code, MakeFunctionFlags::from([MakeFunctionFlag::Defaults]))?;
 
         Ok(())
     }
@@ -3376,10 +3352,7 @@ impl Compiler {
         let code = self.exit_scope();
         self.ctx = prev_ctx;
         self.set_source_range(alias_range);
-        self.make_closure(
-            code,
-            bytecode::MakeFunctionFlags::from([bytecode::MakeFunctionFlag::Defaults]),
-        )?;
+        self.make_closure(code, MakeFunctionFlags::from([MakeFunctionFlag::Defaults]))?;
 
         Ok(())
     }
@@ -4206,7 +4179,7 @@ impl Compiler {
         parameters: &ast::Parameters,
         loc: TextRange,
     ) -> CompileResult<bytecode::MakeFunctionFlags> {
-        let mut funcflags = bytecode::MakeFunctionFlags::new();
+        let mut funcflags = MakeFunctionFlags::new();
 
         // Handle positional defaults
         let defaults: Vec<_> = core::iter::empty()
@@ -4227,7 +4200,7 @@ impl Compiler {
                     count: defaults.len().to_u32()
                 }
             );
-            funcflags.insert(bytecode::MakeFunctionFlag::Defaults);
+            funcflags.insert(MakeFunctionFlag::Defaults);
         }
 
         // Handle keyword-only defaults
@@ -4254,7 +4227,7 @@ impl Compiler {
                     count: kw_with_defaults.len().to_u32(),
                 }
             );
-            funcflags.insert(bytecode::MakeFunctionFlag::KwOnlyDefaults);
+            funcflags.insert(MakeFunctionFlag::KwOnlyDefaults);
         }
 
         Ok(funcflags)
@@ -4275,7 +4248,7 @@ impl Compiler {
         self.enter_function(name, parameters)?;
         self.current_code_info()
             .flags
-            .set(bytecode::CodeFlags::COROUTINE, is_async);
+            .set(CodeFlags::COROUTINE, is_async);
 
         // Set up context
         let prev_ctx = self.ctx;
@@ -4294,7 +4267,7 @@ impl Compiler {
         self.set_qualname();
 
         // Handle docstring - store in co_consts[0] if present
-        let (doc_info, body) = split_doc_with_range(body, &self.opts);
+        let (doc_info, body) = split_doc_with_range(body, self.opts);
         let doc_str = doc_info.as_ref().map(|(doc, _)| doc);
         if let Some(doc) = &doc_str {
             // Docstring present: store in co_consts[0] and set HAS_DOCSTRING flag
@@ -4304,7 +4277,7 @@ impl Compiler {
                 .insert_full(ConstantData::Str {
                     value: (*doc).to_string().into(),
                 });
-            self.current_code_info().flags |= bytecode::CodeFlags::HAS_DOCSTRING;
+            self.current_code_info().flags |= CodeFlags::HAS_DOCSTRING;
         }
 
         let start_label = self.use_cpython_function_start_label();
@@ -4460,7 +4433,7 @@ impl Compiler {
 
         // Make a closure from the code object
         self.set_source_range(func_range);
-        self.make_closure(annotate_code, bytecode::MakeFunctionFlags::new())?;
+        self.make_closure(annotate_code, MakeFunctionFlags::new())?;
 
         Ok(true)
     }
@@ -4470,55 +4443,28 @@ impl Compiler {
     /// order as symbol-table construction so the annotation scope's
     /// `sub_tables` cursor stays aligned.
     fn collect_annotations(body: &[ast::Stmt]) -> Vec<&ast::StmtAnnAssign> {
-        fn walk<'a>(stmts: &'a [ast::Stmt], out: &mut Vec<&'a ast::StmtAnnAssign>) {
-            for stmt in stmts {
+        use ast::visitor::Visitor;
+
+        #[derive(Default)]
+        struct AnnotationsVisitor<'a> {
+            annotations: Vec<&'a ast::StmtAnnAssign>,
+        }
+
+        impl<'a> Visitor<'a> for AnnotationsVisitor<'a> {
+            fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
                 match stmt {
-                    ast::Stmt::AnnAssign(stmt) => out.push(stmt),
-                    ast::Stmt::If(ast::StmtIf {
-                        body,
-                        elif_else_clauses,
-                        ..
-                    }) => {
-                        walk(body, out);
-                        for clause in elif_else_clauses {
-                            walk(&clause.body, out);
-                        }
-                    }
-                    ast::Stmt::For(ast::StmtFor { body, orelse, .. })
-                    | ast::Stmt::While(ast::StmtWhile { body, orelse, .. }) => {
-                        walk(body, out);
-                        walk(orelse, out);
-                    }
-                    ast::Stmt::With(ast::StmtWith { body, .. }) => walk(body, out),
-                    ast::Stmt::Try(ast::StmtTry {
-                        body,
-                        handlers,
-                        orelse,
-                        finalbody,
-                        ..
-                    }) => {
-                        walk(body, out);
-                        for handler in handlers {
-                            let ast::ExceptHandler::ExceptHandler(
-                                ast::ExceptHandlerExceptHandler { body, .. },
-                            ) = handler;
-                            walk(body, out);
-                        }
-                        walk(orelse, out);
-                        walk(finalbody, out);
-                    }
-                    ast::Stmt::Match(ast::StmtMatch { cases, .. }) => {
-                        for case in cases {
-                            walk(&case.body, out);
-                        }
-                    }
-                    _ => {}
+                    ast::Stmt::AnnAssign(ann_assign) => self.annotations.push(ann_assign),
+                    ast::Stmt::ClassDef(_) | ast::Stmt::FunctionDef(_) => {}
+                    _ => ast::visitor::walk_stmt(self, stmt),
                 }
             }
         }
-        let mut annotations = Vec::new();
-        walk(body, &mut annotations);
-        annotations
+
+        let mut visitor = AnnotationsVisitor::default();
+        for stmt in body {
+            visitor.visit_stmt(stmt);
+        }
+        visitor.annotations
     }
 
     fn compile_annotation_for_symbol_cursor_only(
@@ -4537,12 +4483,11 @@ impl Compiler {
     ) -> CompileResult<bool> {
         let loc = loc.unwrap_or(self.current_source_range);
         let annotations = Self::collect_annotations(body);
-        let simple_annotation_count = annotations
+        let has_simple_annotation = annotations
             .iter()
-            .filter(|stmt| stmt.simple && matches!(stmt.target.as_ref(), ast::Expr::Name(_)))
-            .count();
+            .any(|stmt| stmt.simple && matches!(stmt.target.as_ref(), ast::Expr::Name(_)));
 
-        if simple_annotation_count == 0 {
+        if !has_simple_annotation {
             return Ok(false);
         }
 
@@ -4684,7 +4629,7 @@ impl Compiler {
 
         // Make a closure from the code object
         self.set_source_range(loc);
-        self.make_closure(annotate_code, bytecode::MakeFunctionFlags::new())?;
+        self.make_closure(annotate_code, MakeFunctionFlags::new())?;
 
         // Store as __annotate_func__ for classes, __annotate__ for modules
         let name = if parent_scope_type == CompilerScope::Class {
@@ -4737,10 +4682,10 @@ impl Compiler {
 
         if is_generic {
             // Count args to pass to type params scope
-            if funcflags.contains(&bytecode::MakeFunctionFlag::Defaults) {
+            if funcflags.contains(&MakeFunctionFlag::Defaults) {
                 num_typeparam_args += 1;
             }
-            if funcflags.contains(&bytecode::MakeFunctionFlag::KwOnlyDefaults) {
+            if funcflags.contains(&MakeFunctionFlag::KwOnlyDefaults) {
                 num_typeparam_args += 1;
             }
             if num_typeparam_args == 2 {
@@ -4750,7 +4695,7 @@ impl Compiler {
             // Enter type params scope
             let type_params_name = format!("<generic parameters of {name}>");
             self.push_output(
-                bytecode::CodeFlags::OPTIMIZED | bytecode::CodeFlags::NEWLOCALS,
+                CodeFlags::OPTIMIZED | CodeFlags::NEWLOCALS,
                 0,
                 num_typeparam_args,
                 0,
@@ -4767,13 +4712,13 @@ impl Compiler {
             // Add parameter names to varnames for the type params scope
             // These will be passed as arguments when the closure is called
             let current_info = self.current_code_info();
-            if funcflags.contains(&bytecode::MakeFunctionFlag::Defaults) {
+            if funcflags.contains(&MakeFunctionFlag::Defaults) {
                 current_info
                     .metadata
                     .varnames
                     .insert(".defaults".to_owned());
             }
-            if funcflags.contains(&bytecode::MakeFunctionFlag::KwOnlyDefaults) {
+            if funcflags.contains(&MakeFunctionFlag::KwOnlyDefaults) {
                 current_info
                     .metadata
                     .varnames
@@ -4791,9 +4736,9 @@ impl Compiler {
         }
 
         // Compile annotations as closure (PEP 649)
-        let mut annotations_flag = bytecode::MakeFunctionFlags::new();
+        let mut annotations_flag = MakeFunctionFlags::new();
         if self.compile_annotations_closure(name, parameters, returns, def_source_range)? {
-            annotations_flag.insert(bytecode::MakeFunctionFlag::Annotate);
+            annotations_flag.insert(MakeFunctionFlag::Annotate);
         }
 
         // Compile function body
@@ -4834,7 +4779,7 @@ impl Compiler {
             self.ctx = saved_ctx;
 
             // Make closure for type params code
-            self.make_closure(type_params_code, bytecode::MakeFunctionFlags::new())?;
+            self.make_closure(type_params_code, MakeFunctionFlags::new())?;
 
             if num_typeparam_args > 0 {
                 emit!(
@@ -4873,31 +4818,36 @@ impl Compiler {
     /// Determines if a variable should be CELL or FREE type
     // = get_ref_type
     fn get_ref_type(&self, name: &str) -> Result<SymbolScope, CodegenErrorType> {
-        let table = self.symbol_table_stack.last().unwrap();
+        let table = self.current_symbol_table();
 
         // Special handling for __class__, __classdict__, and __conditional_annotations__ in class scope
         // This should only apply when we're actually IN a class body,
         // not when we're in a method nested inside a class.
         if table.typ == CompilerScope::Class
-            && (name == "__class__"
-                || name == "__classdict__"
-                || name == "__conditional_annotations__")
+            && matches!(
+                name,
+                "__class__" | "__classdict__" | "__conditional_annotations__"
+            )
         {
             return Ok(SymbolScope::Cell);
         }
-        match table.lookup(name) {
-            Some(symbol) => match symbol.scope {
-                SymbolScope::Cell => Ok(SymbolScope::Cell),
-                SymbolScope::Free => Ok(SymbolScope::Free),
-                _ if symbol.flags.contains(SymbolFlags::FREE_CLASS) => Ok(SymbolScope::Free),
-                _ => Err(CodegenErrorType::SyntaxError(format!(
-                    "get_ref_type: invalid scope for '{name}'"
-                ))),
-            },
-            None => Err(CodegenErrorType::SyntaxError(format!(
+
+        let Some(symbol) = table.lookup(name) else {
+            return Err(CodegenErrorType::SyntaxError(format!(
                 "get_ref_type: cannot find symbol '{name}'"
-            ))),
-        }
+            )));
+        };
+
+        Ok(match symbol.scope {
+            SymbolScope::Cell => SymbolScope::Cell,
+            SymbolScope::Free => SymbolScope::Free,
+            _ if symbol.flags.contains(SymbolFlags::FREE_CLASS) => SymbolScope::Free,
+            _ => {
+                return Err(CodegenErrorType::SyntaxError(format!(
+                    "get_ref_type: invalid scope for '{name}'"
+                )));
+            }
+        })
     }
 
     /// Loads closure variables if needed and creates a function object
@@ -4990,57 +4940,57 @@ impl Compiler {
             emit!(
                 self,
                 Instruction::SetFunctionAttribute {
-                    flag: bytecode::MakeFunctionFlag::Closure
+                    flag: MakeFunctionFlag::Closure
                 }
             );
         }
 
         // Set annotations if present
-        if flags.contains(&bytecode::MakeFunctionFlag::Annotations) {
+        if flags.contains(&MakeFunctionFlag::Annotations) {
             emit!(
                 self,
                 Instruction::SetFunctionAttribute {
-                    flag: bytecode::MakeFunctionFlag::Annotations
+                    flag: MakeFunctionFlag::Annotations
                 }
             );
         }
 
         // Set __annotate__ closure if present (PEP 649)
-        if flags.contains(&bytecode::MakeFunctionFlag::Annotate) {
+        if flags.contains(&MakeFunctionFlag::Annotate) {
             emit!(
                 self,
                 Instruction::SetFunctionAttribute {
-                    flag: bytecode::MakeFunctionFlag::Annotate
+                    flag: MakeFunctionFlag::Annotate
                 }
             );
         }
 
         // Set kwdefaults if present
-        if flags.contains(&bytecode::MakeFunctionFlag::KwOnlyDefaults) {
+        if flags.contains(&MakeFunctionFlag::KwOnlyDefaults) {
             emit!(
                 self,
                 Instruction::SetFunctionAttribute {
-                    flag: bytecode::MakeFunctionFlag::KwOnlyDefaults
+                    flag: MakeFunctionFlag::KwOnlyDefaults
                 }
             );
         }
 
         // Set defaults if present
-        if flags.contains(&bytecode::MakeFunctionFlag::Defaults) {
+        if flags.contains(&MakeFunctionFlag::Defaults) {
             emit!(
                 self,
                 Instruction::SetFunctionAttribute {
-                    flag: bytecode::MakeFunctionFlag::Defaults
+                    flag: MakeFunctionFlag::Defaults
                 }
             );
         }
 
         // Set type_params if present
-        if flags.contains(&bytecode::MakeFunctionFlag::TypeParams) {
+        if flags.contains(&MakeFunctionFlag::TypeParams) {
             emit!(
                 self,
                 Instruction::SetFunctionAttribute {
-                    flag: bytecode::MakeFunctionFlag::TypeParams
+                    flag: MakeFunctionFlag::TypeParams
                 }
             );
         }
@@ -5137,7 +5087,7 @@ impl Compiler {
         self.code_stack.last_mut().unwrap().private = Some(name.to_owned());
 
         // 2. Set up class namespace
-        let (doc_str, body) = split_doc_with_range(body, &self.opts);
+        let (doc_str, body) = split_doc_with_range(body, self.opts);
         let class_body_prefix_range = self.source_line_start_range(firstlineno);
         self.set_source_range(class_body_prefix_range);
 
@@ -5302,7 +5252,7 @@ impl Compiler {
         if is_generic {
             let type_params_name = format!("<generic parameters of {name}>");
             self.push_output(
-                bytecode::CodeFlags::OPTIMIZED | bytecode::CodeFlags::NEWLOCALS,
+                CodeFlags::OPTIMIZED | CodeFlags::NEWLOCALS,
                 0,
                 0,
                 0,
@@ -5345,7 +5295,7 @@ impl Compiler {
 
             // Create the class body function with the .type_params closure
             // captured through the class code object's freevars.
-            self.make_closure(class_code, bytecode::MakeFunctionFlags::new())?;
+            self.make_closure(class_code, MakeFunctionFlags::new())?;
             self.emit_load_const(ConstantData::Str { value: name.into() });
 
             // Create .generic_base after the class function and name are on the
@@ -5496,7 +5446,7 @@ impl Compiler {
 
             // Execute the type params function
             self.set_source_range(class_source_range);
-            self.make_closure(type_params_code, bytecode::MakeFunctionFlags::new())?;
+            self.make_closure(type_params_code, MakeFunctionFlags::new())?;
             self.set_source_range(class_source_range);
             emit!(self, Instruction::PushNull);
             self.set_source_range(class_source_range);
@@ -5507,7 +5457,7 @@ impl Compiler {
             emit!(self, Instruction::PushNull);
 
             // Create class function with closure
-            self.make_closure(class_code, bytecode::MakeFunctionFlags::new())?;
+            self.make_closure(class_code, MakeFunctionFlags::new())?;
             self.emit_load_const(ConstantData::Str { value: name.into() });
 
             if let Some(arguments) = arguments {
@@ -7004,7 +6954,7 @@ impl Compiler {
     }
 
     /// [CPython `compiler_addcompare`](https://github.com/python/cpython/blob/627894459a84be3488a1789919679c997056a03c/Python/compile.c#L2880-L2924)
-    fn compile_addcompare(&mut self, op: &ast::CmpOp) {
+    fn compile_addcompare(&mut self, op: ast::CmpOp) {
         match op {
             ast::CmpOp::Eq => emit!(
                 self,
@@ -7096,7 +7046,7 @@ impl Compiler {
         if mid_comparators.is_empty() {
             self.compile_expression(last_comparator)?;
             self.set_source_range(compare_range);
-            self.compile_addcompare(last_op);
+            self.compile_addcompare(*last_op);
 
             return Ok(());
         }
@@ -7112,7 +7062,7 @@ impl Compiler {
             emit!(self, Instruction::Swap { i: 2 });
             emit!(self, Instruction::Copy { i: 2 });
 
-            self.compile_addcompare(op);
+            self.compile_addcompare(*op);
 
             // if comparison result is false, we break with this value; if true, try the next one.
             emit!(self, Instruction::Copy { i: 1 });
@@ -7123,7 +7073,7 @@ impl Compiler {
 
         self.compile_expression(last_comparator)?;
         self.set_source_range(compare_range);
-        self.compile_addcompare(last_op);
+        self.compile_addcompare(*last_op);
 
         let end = self.new_block();
         emit!(self, PseudoInstruction::JumpNoInterrupt { delta: end });
@@ -7154,7 +7104,7 @@ impl Compiler {
             self.compile_expression(left)?;
             self.compile_expression(last_comparator)?;
             self.set_source_range(compare_range);
-            self.compile_addcompare(last_op);
+            self.compile_addcompare(*last_op);
             self.emit_pop_jump_by_condition(condition, target_block);
             return Ok(());
         }
@@ -7167,14 +7117,14 @@ impl Compiler {
             self.set_source_range(compare_range);
             emit!(self, Instruction::Swap { i: 2 });
             emit!(self, Instruction::Copy { i: 2 });
-            self.compile_addcompare(op);
+            self.compile_addcompare(*op);
             emit!(self, Instruction::ToBool);
             emit!(self, Instruction::PopJumpIfFalse { delta: cleanup });
         }
 
         self.compile_expression(last_comparator)?;
         self.set_source_range(compare_range);
-        self.compile_addcompare(last_op);
+        self.compile_addcompare(*last_op);
         emit!(self, Instruction::ToBool);
         self.emit_pop_jump_by_condition(condition, target_block);
         let end = self.new_block();
@@ -7446,7 +7396,7 @@ impl Compiler {
     fn compile_augassign(
         &mut self,
         target: &ast::Expr,
-        op: &ast::Operator,
+        op: ast::Operator,
         value: &ast::Expr,
     ) -> CompileResult<()> {
         let stmt_range = self.current_source_range;
@@ -7559,7 +7509,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_op(&mut self, op: &ast::Operator, inplace: bool) {
+    fn compile_op(&mut self, op: ast::Operator, inplace: bool) {
         let bin_op = match op {
             ast::Operator::Add => BinaryOperator::Add,
             ast::Operator::Sub => BinaryOperator::Subtract,
@@ -7687,7 +7637,7 @@ impl Compiler {
 
     /// Compile a boolean operation as an expression.
     /// This means, that the last value remains on the stack.
-    fn compile_bool_op(&mut self, op: &ast::BoolOp, values: &[ast::Expr]) -> CompileResult<()> {
+    fn compile_bool_op(&mut self, op: ast::BoolOp, values: &[ast::Expr]) -> CompileResult<()> {
         let boolop_range = self.current_source_range;
         let after_block = self.new_block();
         let (last_value, prefix_values) = values.split_last().unwrap();
@@ -7707,7 +7657,7 @@ impl Compiler {
 
     /// Emit CPython-style pseudo conditional jump for short-circuit evaluation.
     /// flowgraph.c lowers it to `COPY 1; TO_BOOL; POP_JUMP_IF_*`.
-    fn emit_short_circuit_test(&mut self, op: &ast::BoolOp, target: BlockIdx) {
+    fn emit_short_circuit_test(&mut self, op: ast::BoolOp, target: BlockIdx) {
         match op {
             ast::BoolOp::And => {
                 emit!(self, PseudoInstruction::JumpIfFalse { delta: target });
@@ -7932,19 +7882,6 @@ impl Compiler {
         send_block
     }
 
-    /// Returns true if the expression is a constant with no side effects.
-    fn is_const_expression(expr: &ast::Expr) -> bool {
-        matches!(
-            expr,
-            ast::Expr::StringLiteral(_)
-                | ast::Expr::BytesLiteral(_)
-                | ast::Expr::NumberLiteral(_)
-                | ast::Expr::BooleanLiteral(_)
-                | ast::Expr::NoneLiteral(_)
-                | ast::Expr::EllipsisLiteral(_)
-        )
-    }
-
     fn compile_expression(&mut self, expression: &ast::Expr) -> CompileResult<()> {
         trace!("Compiling {expression:?}");
         let range = expression.range();
@@ -7962,7 +7899,7 @@ impl Compiler {
                 func, arguments, ..
             }) => self.compile_call(func, arguments)?,
             ast::Expr::BoolOp(ast::ExprBoolOp { op, values, .. }) => {
-                self.compile_bool_op(op, values)?
+                self.compile_bool_op(*op, values)?
             }
             ast::Expr::BinOp(ast::ExprBinOp {
                 left, op, right, ..
@@ -7972,7 +7909,7 @@ impl Compiler {
 
                 // Restore full expression range before emitting the operation
                 self.set_source_range(range);
-                self.compile_op(op, false);
+                self.compile_op(*op, false);
             }
             ast::Expr::Subscript(ast::ExprSubscript {
                 value, slice, ctx, ..
@@ -8225,12 +8162,12 @@ impl Compiler {
                 }
 
                 self.enter_function(&name, params)?;
-                let mut func_flags = bytecode::MakeFunctionFlags::new();
+                let mut func_flags = MakeFunctionFlags::new();
                 if have_defaults {
-                    func_flags.insert(bytecode::MakeFunctionFlag::Defaults);
+                    func_flags.insert(MakeFunctionFlag::Defaults);
                 }
                 if have_kwdefaults {
-                    func_flags.insert(bytecode::MakeFunctionFlag::KwOnlyDefaults);
+                    func_flags.insert(MakeFunctionFlag::KwOnlyDefaults);
                 }
 
                 // Set qualname for lambda
@@ -8270,12 +8207,7 @@ impl Compiler {
             }) => {
                 self.compile_comprehension(
                     "<listcomp>",
-                    Some(
-                        Instruction::BuildList {
-                            count: OpArgMarker::marker(),
-                        }
-                        .into(),
-                    ),
+                    Some(Opcode::BuildList.into()),
                     generators,
                     &|compiler, collection_add_i| {
                         compiler.compile_comprehension_element(elt)?;
@@ -8303,12 +8235,7 @@ impl Compiler {
             }) => {
                 self.compile_comprehension(
                     "<setcomp>",
-                    Some(
-                        Instruction::BuildSet {
-                            count: OpArgMarker::marker(),
-                        }
-                        .into(),
-                    ),
+                    Some(Opcode::BuildSet.into()),
                     generators,
                     &|compiler, collection_add_i| {
                         compiler.compile_comprehension_element(elt)?;
@@ -8337,12 +8264,7 @@ impl Compiler {
             }) => {
                 self.compile_comprehension(
                     "<dictcomp>",
-                    Some(
-                        Instruction::BuildMap {
-                            count: OpArgMarker::marker(),
-                        }
-                        .into(),
-                    ),
+                    Some(Opcode::BuildMap.into()),
                     generators,
                     &|compiler, collection_add_i| {
                         // changed evaluation order for Py38 named expression PEP 572
@@ -9309,9 +9231,7 @@ impl Compiler {
         if let Some(info) = self.code_stack.last_mut() {
             info.flags = flags
                 | (info.flags
-                    & (bytecode::CodeFlags::NESTED
-                        | bytecode::CodeFlags::METHOD
-                        | bytecode::CodeFlags::FUTURE_ANNOTATIONS));
+                    & (CodeFlags::NESTED | CodeFlags::METHOD | CodeFlags::FUTURE_ANNOTATIONS));
             info.metadata.argcount = arg_count;
             info.metadata.posonlyargcount = posonlyarg_count;
             info.metadata.kwonlyargcount = kwonlyarg_count;
@@ -9395,9 +9315,9 @@ impl Compiler {
             in_async_scope: prev_ctx.in_async_scope || is_async,
         };
 
-        let flags = bytecode::CodeFlags::NEWLOCALS | bytecode::CodeFlags::OPTIMIZED;
+        let flags = CodeFlags::NEWLOCALS | CodeFlags::OPTIMIZED;
         let flags = if is_async {
-            flags | bytecode::CodeFlags::COROUTINE
+            flags | CodeFlags::COROUTINE
         } else {
             flags
         };
@@ -9593,7 +9513,7 @@ impl Compiler {
 
         // Create comprehension function with closure
         self.set_source_range(comprehension_range);
-        self.make_closure(code, bytecode::MakeFunctionFlags::new())?;
+        self.make_closure(code, MakeFunctionFlags::new())?;
 
         // Evaluate iterated item and get its iterator.
         self.compile_comprehension_iter(outermost)?;
@@ -10092,18 +10012,22 @@ impl Compiler {
         }
         let instr = instr.into();
         let opcode = AnyOpcode::from(instr);
+
         debug_assert!(
             !instr.is_assembler(),
             "CPython codegen_addop_* must not emit assembler-only opcodes"
         );
+
         debug_assert!(
             opcode.has_arg() || instr.has_target() || u32::from(arg) == 0,
             "CPython _PyInstructionSequence_Addop requires either OPCODE_HAS_ARG, HAS_TARGET, or oparg == 0"
         );
+
         debug_assert!(
             target == BlockIdx::NULL || instr.has_target(),
             "CPython codegen_addop_j only accepts HAS_TARGET opcodes"
         );
+
         let range = self.current_source_range;
         let source = self.source_file.to_source_code();
         let location = source.source_location(range.start(), PositionEncoding::Utf8);
@@ -10187,6 +10111,7 @@ impl Compiler {
             .blocks
             .first_mut()
             .expect("code unit must have an entry block");
+
         debug_assert!(
             entry
                 .used_instructions()
@@ -10200,14 +10125,11 @@ impl Compiler {
                 }),
             "scope entry must start with a function-start RESUME"
         );
+
         debug_assert!(
             !entry.used_instructions().iter().any(|info| matches!(
-                info.instr.real(),
-                Some(
-                    Instruction::ReturnGenerator
-                        | Instruction::MakeCell { .. }
-                        | Instruction::CopyFreeVars { .. }
-                )
+                info.instr.real_opcode(),
+                Some(Opcode::ReturnGenerator | Opcode::MakeCell | Opcode::CopyFreeVars)
             )),
             "CPython inserts StopIteration cleanup before CFG prefix instructions"
         );
@@ -10555,7 +10477,7 @@ impl Compiler {
                     }
                     (ast::UnaryOp::Not, ConstantData::Tuple { .. }) => return Ok(None),
                     (ast::UnaryOp::Not, value) => ConstantData::Boolean {
-                        value: !Self::constant_truthiness(&value),
+                        value: !value.truthiness(),
                     },
                     _ => return Ok(None),
                 }
@@ -10575,9 +10497,9 @@ impl Compiler {
                 let mut selected = first;
                 match op {
                     ast::BoolOp::Or => {
-                        if !Self::constant_truthiness(&selected) {
+                        if !selected.truthiness() {
                             for constant in iter {
-                                let is_truthy = Self::constant_truthiness(&constant);
+                                let is_truthy = constant.truthiness();
                                 selected = constant;
                                 if is_truthy {
                                     break;
@@ -10586,9 +10508,9 @@ impl Compiler {
                         }
                     }
                     ast::BoolOp::And => {
-                        if Self::constant_truthiness(&selected) {
+                        if selected.truthiness() {
                             for constant in iter {
-                                let is_truthy = Self::constant_truthiness(&constant);
+                                let is_truthy = constant.truthiness();
                                 selected = constant;
                                 if !is_truthy {
                                     break;
@@ -10914,12 +10836,17 @@ impl Compiler {
                     _ => {}
                 }
             }
+
             if !found_loop {
-                if is_break {
-                    return Err(self.error_ranged(CodegenErrorType::InvalidBreak, range));
-                }
-                return Err(self.error_ranged(CodegenErrorType::InvalidContinue, range));
+                let err_type = if is_break {
+                    CodegenErrorType::InvalidBreak
+                } else {
+                    CodegenErrorType::InvalidContinue
+                };
+
+                return Err(self.error_ranged(err_type, range));
             }
+
             return Ok(());
         }
 
@@ -10956,12 +10883,7 @@ impl Compiler {
         } else {
             self.set_source_range(range);
         };
-        self.emit_jump_label(
-            PseudoInstruction::Jump {
-                delta: OpArgMarker::marker(),
-            },
-            target_label,
-        );
+        self.emit_jump_label(PseudoOpcode::Jump, target_label);
         if unwind_loc.is_none() {
             self.set_no_location();
         }
@@ -11062,7 +10984,7 @@ impl Compiler {
         unwrap_internal(self, result);
         let code = self.current_code_info();
         let idx = BlockIdx::new(code.blocks.len().to_u32());
-        code.blocks.push(ir::Block::default());
+        code.blocks.push(Block::default());
         let result = code.push_unmapped_instr_sequence_label();
         unwrap_internal(self, result);
         idx
@@ -11077,7 +10999,7 @@ impl Compiler {
         unwrap_internal(self, result);
         let code = self.current_code_info();
         let idx = BlockIdx::new(code.blocks.len().to_u32());
-        code.blocks.push(ir::Block::default());
+        code.blocks.push(Block::default());
         let result = code.push_unlabeled_instr_sequence_block();
         unwrap_internal(self, result);
         idx
@@ -11191,10 +11113,10 @@ impl Compiler {
         let is_async = self.ctx.func == FunctionContext::AsyncFunction;
         let flags = &mut self.current_code_info().flags;
         if is_async {
-            flags.remove(bytecode::CodeFlags::COROUTINE);
-            flags.insert(bytecode::CodeFlags::ASYNC_GENERATOR);
+            flags.remove(CodeFlags::COROUTINE);
+            flags.insert(CodeFlags::ASYNC_GENERATOR);
         } else {
-            flags.insert(bytecode::CodeFlags::GENERATOR);
+            flags.insert(CodeFlags::GENERATOR);
         }
     }
 
@@ -12000,10 +11922,10 @@ fn expandtabs(input: &str, tab_size: usize) -> String {
     expanded_str
 }
 
-fn split_doc_with_range<'a>(
-    body: &'a [ast::Stmt],
-    opts: &CompileOpts,
-) -> (Option<(String, TextRange)>, &'a [ast::Stmt]) {
+fn split_doc_with_range(
+    body: &[ast::Stmt],
+    opts: CompileOpts,
+) -> (Option<(String, TextRange)>, &[ast::Stmt]) {
     if let Some((ast::Stmt::Expr(expr), body_rest)) = body.split_first() {
         let doc_comment = match &*expr.value {
             ast::Expr::StringLiteral(value) => Some((&value.value, expr.value.range())),
@@ -12023,7 +11945,7 @@ fn split_doc_with_range<'a>(
 }
 
 #[cfg(test)]
-fn split_doc<'a>(body: &'a [ast::Stmt], opts: &CompileOpts) -> (Option<String>, &'a [ast::Stmt]) {
+fn split_doc(body: &[ast::Stmt], opts: CompileOpts) -> (Option<String>, &[ast::Stmt]) {
     let (doc, body) = split_doc_with_range(body, opts);
     (doc.map(|(doc, _)| doc), body)
 }
@@ -12238,10 +12160,8 @@ mod tests {
     fn assert_scope_exit_locations(code: &CodeObject) {
         for (instr, (location, _)) in code.instructions.iter().zip(code.locations.iter()) {
             if matches!(
-                instr.op,
-                Instruction::ReturnValue
-                    | Instruction::RaiseVarargs { .. }
-                    | Instruction::Reraise { .. }
+                instr.op.into(),
+                Opcode::ReturnValue | Opcode::RaiseVarargs | Opcode::Reraise
             ) {
                 assert!(
                     location.line.get() > 0,
@@ -12439,7 +12359,7 @@ def f(x, y, z):
         compiler
             .current_code_info()
             .flags
-            .set(bytecode::CodeFlags::COROUTINE, is_async);
+            .set(CodeFlags::COROUTINE, is_async);
 
         let prev_ctx = compiler.ctx;
         compiler.ctx = CompileContext {
@@ -12452,7 +12372,7 @@ def f(x, y, z):
             in_async_scope: is_async,
         };
         compiler.set_qualname();
-        let (_doc_str, body) = split_doc(body, &compiler.opts);
+        let (_doc_str, body) = split_doc(body, compiler.opts);
         let start_label = compiler.use_cpython_function_start_label();
         let is_gen = is_async || compiler.current_symbol_table().is_generator;
         let stop_iteration_block = if is_gen {
@@ -14757,13 +14677,13 @@ def f():
 
         for code in [method, async_method, lambda, genexpr] {
             assert!(
-                code.flags.contains(bytecode::CodeFlags::METHOD),
+                code.flags.contains(CodeFlags::METHOD),
                 "class-scope function-like code should carry CO_METHOD like CPython 3.14, got {:?}",
                 code.flags
             );
         }
         assert!(
-            !module_function.flags.contains(bytecode::CodeFlags::METHOD),
+            !module_function.flags.contains(CodeFlags::METHOD),
             "module-scope function must not carry CO_METHOD"
         );
     }
@@ -14782,11 +14702,11 @@ class C:
         let class_code = find_code(&code, "C").expect("missing class code");
         let lambda = find_code(class_code, "<lambda>").expect("missing lambda code");
         assert!(
-            lambda.flags.contains(bytecode::CodeFlags::NESTED),
+            lambda.flags.contains(CodeFlags::NESTED),
             "lambda under inlined class comprehension should stay nested"
         );
         assert!(
-            !lambda.flags.contains(bytecode::CodeFlags::METHOD),
+            !lambda.flags.contains(CodeFlags::METHOD),
             "CPython creates this lambda while the current symtable block is the comprehension, not the class"
         );
     }
@@ -14822,37 +14742,17 @@ async def ag():
         let coroutine = find_code(&code, "c").expect("missing coroutine code");
         let async_generator = find_code(&code, "ag").expect("missing async generator code");
 
-        assert!(generator.flags.contains(bytecode::CodeFlags::GENERATOR));
-        assert!(!generator.flags.contains(bytecode::CodeFlags::COROUTINE));
-        assert!(
-            !generator
-                .flags
-                .contains(bytecode::CodeFlags::ASYNC_GENERATOR)
-        );
+        assert!(generator.flags.contains(CodeFlags::GENERATOR));
+        assert!(!generator.flags.contains(CodeFlags::COROUTINE));
+        assert!(!generator.flags.contains(CodeFlags::ASYNC_GENERATOR));
 
-        assert!(coroutine.flags.contains(bytecode::CodeFlags::COROUTINE));
-        assert!(!coroutine.flags.contains(bytecode::CodeFlags::GENERATOR));
-        assert!(
-            !coroutine
-                .flags
-                .contains(bytecode::CodeFlags::ASYNC_GENERATOR)
-        );
+        assert!(coroutine.flags.contains(CodeFlags::COROUTINE));
+        assert!(!coroutine.flags.contains(CodeFlags::GENERATOR));
+        assert!(!coroutine.flags.contains(CodeFlags::ASYNC_GENERATOR));
 
-        assert!(
-            async_generator
-                .flags
-                .contains(bytecode::CodeFlags::ASYNC_GENERATOR)
-        );
-        assert!(
-            !async_generator
-                .flags
-                .contains(bytecode::CodeFlags::GENERATOR)
-        );
-        assert!(
-            !async_generator
-                .flags
-                .contains(bytecode::CodeFlags::COROUTINE)
-        );
+        assert!(async_generator.flags.contains(CodeFlags::ASYNC_GENERATOR));
+        assert!(!async_generator.flags.contains(CodeFlags::GENERATOR));
+        assert!(!async_generator.flags.contains(CodeFlags::COROUTINE));
     }
 
     #[test]
@@ -24093,15 +23993,11 @@ def f():
     return C
 ",
         );
-        assert!(code.flags.contains(bytecode::CodeFlags::FUTURE_ANNOTATIONS));
+        assert!(code.flags.contains(CodeFlags::FUTURE_ANNOTATIONS));
         let f = find_code(&code, "f").expect("missing f code");
-        assert!(f.flags.contains(bytecode::CodeFlags::FUTURE_ANNOTATIONS));
+        assert!(f.flags.contains(CodeFlags::FUTURE_ANNOTATIONS));
         let class_code = find_code(f, "C").expect("missing C code");
-        assert!(
-            class_code
-                .flags
-                .contains(bytecode::CodeFlags::FUTURE_ANNOTATIONS)
-        );
+        assert!(class_code.flags.contains(CodeFlags::FUTURE_ANNOTATIONS));
     }
 
     #[test]
@@ -24120,7 +24016,7 @@ def outer():
         let class_annotate =
             find_code(class_code, "__annotate__").expect("missing class annotation code");
         assert!(
-            !class_annotate.flags.contains(bytecode::CodeFlags::NESTED),
+            !class_annotate.flags.contains(CodeFlags::NESTED),
             "module-level class annotation scope should not be nested"
         );
 
@@ -24129,7 +24025,7 @@ def outer():
         let nested_annotate =
             find_code(nested_class, "__annotate__").expect("missing nested annotation code");
         assert!(
-            nested_annotate.flags.contains(bytecode::CodeFlags::NESTED),
+            nested_annotate.flags.contains(CodeFlags::NESTED),
             "annotation scope under a nested class should be nested"
         );
     }
@@ -24144,25 +24040,25 @@ type A[T] = T
         );
         let outer_lambda = find_code(&code, "<lambda>").expect("missing outer lambda code");
         assert!(
-            !outer_lambda.flags.contains(bytecode::CodeFlags::NESTED),
+            !outer_lambda.flags.contains(CodeFlags::NESTED),
             "module-level lambda should not be nested"
         );
         let inner_lambda =
             find_direct_child_code(outer_lambda, "<lambda>").expect("missing inner lambda code");
         assert!(
-            inner_lambda.flags.contains(bytecode::CodeFlags::NESTED),
+            inner_lambda.flags.contains(CodeFlags::NESTED),
             "lambda inside lambda should be nested"
         );
 
         let type_params =
             find_code(&code, "<generic parameters of A>").expect("missing type params code");
         assert!(
-            !type_params.flags.contains(bytecode::CodeFlags::NESTED),
+            !type_params.flags.contains(CodeFlags::NESTED),
             "module-level type-parameter scope should not be nested"
         );
         let type_alias = find_direct_child_code(type_params, "A").expect("missing type alias code");
         assert!(
-            type_alias.flags.contains(bytecode::CodeFlags::NESTED),
+            type_alias.flags.contains(CodeFlags::NESTED),
             "type alias body inside type-parameter scope should be nested"
         );
     }
