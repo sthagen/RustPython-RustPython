@@ -10,7 +10,7 @@ use rustpython_compiler_core::SourceLocation;
 use rustpython_compiler::{CompileError, ParseError};
 
 use crate::{
-    AsObject, Py, PyObject, PyObjectRef, PyRef, PyResult,
+    AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
     builtins::{
         PyBaseException, PyBaseExceptionRef, PyBytesRef, PyDictRef, PyModule, PyOSError, PyStrRef,
         PyType, PyTypeRef,
@@ -348,11 +348,9 @@ impl VirtualMachine {
             exc_type.name()
         );
 
-        PyRef::new_ref(
-            PyBaseException::new(args, self),
-            exc_type,
-            Some(self.ctx.new_dict()),
-        )
+        PyBaseException::new(args, self)
+            .into_ref_with_type_lazy_dict(self, exc_type)
+            .expect("vm.new_exception() called with an invalid exception type")
     }
 
     pub fn new_os_error(&self, msg: impl ToPyObject) -> PyRef<PyBaseException> {
@@ -794,10 +792,10 @@ impl VirtualMachine {
         };
 
         if syntax_error_type.is(self.ctx.exceptions.tab_error) {
-            syntax_error_info.msg = "inconsistent use of tabs and spaces in indentation".to_owned();
-        }
-        if syntax_error_type.is(self.ctx.exceptions.incomplete_input_error) {
-            syntax_error_info.msg = "incomplete input".to_owned();
+            syntax_error_info.msg =
+                String::from("inconsistent use of tabs and spaces in indentation");
+        } else if syntax_error_type.is(self.ctx.exceptions.incomplete_input_error) {
+            syntax_error_info.msg = String::from("incomplete input");
         }
 
         let SyntaxErrorInfo { msg, narrow_caret } = syntax_error_info;

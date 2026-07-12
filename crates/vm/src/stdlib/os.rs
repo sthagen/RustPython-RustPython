@@ -6,8 +6,9 @@ use crate::{
     builtins::{PyModule, PySet},
     convert::{IntoPyException, ToPyException, ToPyObject},
     function::{ArgumentError, FromArgs, FuncArgs},
-    host_env::crt_fd,
+    host_env::{crt_fd, posix::RawMode},
 };
+use core::marker::PhantomData;
 use std::{io, path::Path};
 
 pub(crate) fn fs_metadata<P: AsRef<Path>>(
@@ -29,7 +30,7 @@ pub struct TargetIsDirectory {
 }
 
 cfg_select! {
-    all(any(unix, target_os = "wasi"), not(target_os = "redox")) => {
+    any(unix, target_os = "wasi") => {
         use libc::AT_FDCWD;
     }
     _ => {
@@ -39,19 +40,44 @@ cfg_select! {
 
 const DEFAULT_DIR_FD: crt_fd::Borrowed<'static> = unsafe { crt_fd::Borrowed::borrow_raw(AT_FDCWD) };
 
-// XXX: AVAILABLE should be a bool, but we can't yet have it as a bool and just cast it to usize
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub struct DirFd<'fd, const AVAILABLE: usize>(pub(crate) [crt_fd::Borrowed<'fd>; AVAILABLE]);
+pub trait DirFdKeyword: Clone + Copy + Eq + PartialEq {
+    const NAME: &'static str;
+}
 
-impl<const AVAILABLE: usize> Default for DirFd<'_, AVAILABLE> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct DefaultDirFd;
+impl DirFdKeyword for DefaultDirFd {
+    const NAME: &'static str = "dir_fd";
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct SrcDirFd;
+impl DirFdKeyword for SrcDirFd {
+    const NAME: &'static str = "src_dir_fd";
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct DstDirFd;
+impl DirFdKeyword for DstDirFd {
+    const NAME: &'static str = "dst_dir_fd";
+}
+
+// XXX: AVAILABLE should be a bool, but we can't yet have it as a bool and just cast it to usize
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct DirFd<'fd, const AVAILABLE: usize, KW: DirFdKeyword = DefaultDirFd>(
+    pub(crate) [crt_fd::Borrowed<'fd>; AVAILABLE],
+    PhantomData<KW>,
+);
+
+impl<const AVAILABLE: usize, KW: DirFdKeyword> Default for DirFd<'_, AVAILABLE, KW> {
     fn default() -> Self {
-        Self([DEFAULT_DIR_FD; AVAILABLE])
+        Self([DEFAULT_DIR_FD; AVAILABLE], PhantomData)
     }
 }
 
 // not used on all platforms
 #[allow(unused)]
-impl<'fd> DirFd<'fd, 1> {
+impl<'fd, KW: DirFdKeyword> DirFd<'fd, 1, KW> {
     #[inline(always)]
     pub(crate) fn get_opt(self) -> Option<crt_fd::Borrowed<'fd>> {
         let [fd] = self.0;
@@ -70,9 +96,9 @@ impl<'fd> DirFd<'fd, 1> {
     }
 }
 
-impl<const AVAILABLE: usize> FromArgs for DirFd<'_, AVAILABLE> {
+impl<const AVAILABLE: usize, KW: DirFdKeyword> FromArgs for DirFd<'_, AVAILABLE, KW> {
     fn from_args(vm: &VirtualMachine, args: &mut FuncArgs) -> Result<Self, ArgumentError> {
-        let fd = match args.take_keyword("dir_fd") {
+        let fd = match args.take_keyword(KW::NAME) {
             Some(o) if vm.is_none(&o) => Ok(DEFAULT_DIR_FD),
             None => Ok(DEFAULT_DIR_FD),
             Some(o) => {
@@ -93,7 +119,7 @@ impl<const AVAILABLE: usize> FromArgs for DirFd<'_, AVAILABLE> {
                 .into());
         }
         let fd = fd.map_err(|e| e.to_pyexception(vm))?;
-        Ok(Self([fd; AVAILABLE]))
+        Ok(Self([fd; AVAILABLE], PhantomData))
     }
 }
 
@@ -154,7 +180,7 @@ impl ToPyObject for crt_fd::Borrowed<'_> {
 
 #[pymodule(sub)]
 pub(super) mod _os {
-    use super::{DirFd, FollowSymlinks, SupportFunc};
+    use super::{DirFd, DstDirFd, FollowSymlinks, RawMode, SrcDirFd, SupportFunc};
     use crate::host_env::fileutils::StatStruct;
     #[cfg(any(unix, windows))]
     use crate::utils::ToCString;
@@ -174,6 +200,8 @@ pub(super) mod _os {
         types::{Destructor, IterNext, Iterable, PyStructSequence, Representable, SelfIter},
         vm::VirtualMachine,
     };
+    #[cfg(not(windows))]
+    use core::marker::PhantomData;
     use core::time::Duration;
     use crossbeam_utils::atomic::AtomicCell;
     use rustpython_common::wtf8::Wtf8Buf;
@@ -184,12 +212,12 @@ pub(super) mod _os {
     use std::{fs, io, path::PathBuf, time::SystemTime};
 
     const OPEN_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
-    pub(crate) const MKDIR_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
+    pub(crate) const MKDIR_DIR_FD: bool = cfg!(any(unix, target_os = "wasi"));
     const STAT_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
     const UTIME_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
     pub(crate) const SYMLINK_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
     pub(crate) const UNLINK_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
-    const RENAME_DIR_FD: bool = cfg!(unix);
+    const RENAME_DIR_FD: bool = cfg!(any(unix, target_os = "wasi"));
     const RMDIR_DIR_FD: bool = cfg!(not(any(windows, target_os = "redox")));
     const SCANDIR_FD: bool = cfg!(all(unix, not(target_os = "redox")));
 
@@ -338,32 +366,24 @@ pub(super) mod _os {
         }
     }
 
-    #[cfg(not(windows))]
     #[pyfunction]
     fn mkdir(
         path: OsPath,
-        mode: OptionalArg<i32>,
-        dir_fd: DirFd<'_, { MKDIR_DIR_FD as usize }>,
+        mode: OptionalArg<RawMode>,
+        #[cfg_attr(not(any(unix, target_os = "wasi")), expect(unused_variables))] dir_fd: DirFd<
+            '_,
+            { MKDIR_DIR_FD as usize },
+        >,
         vm: &VirtualMachine,
     ) -> PyResult<()> {
         let mode = mode.unwrap_or(0o777);
-        let c_path = path.clone().into_cstring(vm)?;
-        #[cfg(not(target_os = "redox"))]
-        if let Some(fd) = dir_fd.raw_opt() {
-            return if let Err(err) =
-                crate::host_env::posix::make_dir_at(fd, c_path.as_c_str(), mode as u32)
-            {
-                Err(OSErrorBuilder::with_filename(&err, path, vm))
-            } else {
-                Ok(())
-            };
-        }
-        #[cfg(target_os = "redox")]
-        let [] = dir_fd.0;
-        if let Err(err) = crate::host_env::posix::make_dir(c_path.as_c_str(), mode as u32) {
-            return Err(OSErrorBuilder::with_filename(&err, path, vm));
-        }
-        Ok(())
+        #[cfg(any(unix, target_os = "wasi"))]
+        let dir_fd = dir_fd.get_opt();
+        #[cfg(not(any(unix, target_os = "wasi")))]
+        let dir_fd = None;
+
+        crate::host_env::posix::make_dir(dir_fd, &path.path, mode)
+            .map_err(|err| OSErrorBuilder::with_filename(&err, path, vm))
     }
 
     #[pyfunction]
@@ -627,7 +647,7 @@ pub(super) mod _os {
                 // Safety: the fd came from os.open() and is borrowed for
                 // the lifetime of this DirEntry reference.
                 let borrowed = unsafe { crt_fd::Borrowed::borrow_raw(raw_fd) };
-                return DirFd([borrowed; STAT_DIR_FD as usize]);
+                return DirFd([borrowed; STAT_DIR_FD as usize], PhantomData);
             }
             DirFd::default()
         }
@@ -1384,14 +1404,15 @@ pub(super) mod _os {
         src: PyObjectRef,
         #[pyarg(positional)]
         dst: PyObjectRef,
-        #[pyarg(any, default)]
-        src_dir_fd: OptionalArg<crt_fd::Borrowed<'fd>>,
-        #[pyarg(any, default)]
-        dst_dir_fd: OptionalArg<crt_fd::Borrowed<'fd>>,
+        #[pyarg(flatten)]
+        #[cfg_attr(not(any(unix, target_os = "wasi")), expect(dead_code))]
+        src_dir_fd: DirFd<'fd, { RENAME_DIR_FD as usize }, SrcDirFd>,
+        #[pyarg(flatten)]
+        #[cfg_attr(not(any(unix, target_os = "wasi")), expect(dead_code))]
+        dst_dir_fd: DirFd<'fd, { RENAME_DIR_FD as usize }, DstDirFd>,
     }
 
     #[pyfunction]
-    #[pyfunction(name = "replace")]
     fn rename(args: RenameArgs<'_>, vm: &VirtualMachine) -> PyResult<()> {
         let src = PathConverter::new()
             .function("rename")
@@ -1402,13 +1423,46 @@ pub(super) mod _os {
             .argument("dst")
             .try_path(args.dst, vm)?;
 
-        crate::host_env::os::rename(
-            &src,
-            args.src_dir_fd.into_option(),
-            &dst,
-            args.dst_dir_fd.into_option(),
-        )
-        .map_err(|err| {
+        #[cfg(any(unix, target_os = "wasi"))]
+        let src_dir_fd = args.src_dir_fd.get_opt();
+        #[cfg(not(any(unix, target_os = "wasi")))]
+        let src_dir_fd = None;
+
+        #[cfg(any(unix, target_os = "wasi"))]
+        let dst_dir_fd = args.dst_dir_fd.get_opt();
+        #[cfg(not(any(unix, target_os = "wasi")))]
+        let dst_dir_fd = None;
+
+        crate::host_env::posix::rename(&src, src_dir_fd, &dst, dst_dir_fd).map_err(|err| {
+            let builder = err.to_os_error_builder(vm);
+            let builder = builder.filename(src.filename(vm));
+            let builder = builder.filename2(dst.filename(vm));
+            builder.build(vm).upcast()
+        })
+    }
+
+    #[pyfunction]
+    fn replace(args: RenameArgs<'_>, vm: &VirtualMachine) -> PyResult<()> {
+        let src = PathConverter::new()
+            .function("replace")
+            .argument("src")
+            .try_path(args.src, vm)?;
+        let dst = PathConverter::new()
+            .function("replace")
+            .argument("dst")
+            .try_path(args.dst, vm)?;
+
+        #[cfg(any(unix, target_os = "wasi"))]
+        let src_dir_fd = args.src_dir_fd.get_opt();
+        #[cfg(not(any(unix, target_os = "wasi")))]
+        let src_dir_fd = None;
+
+        #[cfg(any(unix, target_os = "wasi"))]
+        let dst_dir_fd = args.dst_dir_fd.get_opt();
+        #[cfg(not(any(unix, target_os = "wasi")))]
+        let dst_dir_fd = None;
+
+        crate::host_env::posix::replace(&src, src_dir_fd, &dst, dst_dir_fd).map_err(|err| {
             let builder = err.to_os_error_builder(vm);
             let builder = builder.filename(src.filename(vm));
             let builder = builder.filename2(dst.filename(vm));
@@ -1795,9 +1849,9 @@ pub(super) mod _os {
     #[cfg(all(unix, not(any(target_os = "redox", target_os = "android"))))]
     #[pyfunction]
     fn getloadavg(vm: &VirtualMachine) -> PyResult<(f64, f64, f64)> {
-        let loadavg = crate::host_env::time::getloadavg()
-            .map_err(|_| vm.new_os_error("Load averages are unobtainable"))?;
-        Ok((loadavg[0], loadavg[1], loadavg[2]))
+        crate::host_env::time::getloadavg()
+            .map(Into::into)
+            .map_err(|_| vm.new_os_error("Load averages are unobtainable"))
     }
 
     #[cfg(unix)]
@@ -1918,7 +1972,6 @@ pub(super) mod _os {
         }
     }
 
-    /// Perform a statvfs system call on the given path.
     #[cfg(all(unix, not(target_os = "redox")))]
     #[pyfunction]
     #[pyfunction(name = "fstatvfs")]

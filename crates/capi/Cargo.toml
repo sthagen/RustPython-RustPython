@@ -15,13 +15,14 @@ crate-type = ["cdylib", "rlib"]
 bitflags = { workspace = true }
 itertools = { workspace = true }
 libc = { workspace = true }
+malachite-bigint = { workspace = true }
 num-complex = { workspace = true }
 rustpython-vm = { workspace = true, features = ["threading", "compiler", "importlib", "host_env"] }
 rustpython-stdlib = {workspace = true, features = ["threading"] }
 rustpython-pylib = { workspace = true }
 
 [dev-dependencies]
-pyo3 = { workspace = true, features = ["auto-initialize", "abi3"] }
+pyo3 = { workspace = true, features = ["auto-initialize", "abi3t"] }
 
 [lints]
 workspace = true

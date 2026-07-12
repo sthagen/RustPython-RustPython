@@ -10,6 +10,10 @@ use std::os::fd::FromRawFd;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 
+pub use super::posix_unix_like::*;
+
+pub use libc::{c_char, pid_t};
+
 pub struct UnameInfo {
     pub sysname: String,
     pub nodename: String,
@@ -167,26 +171,6 @@ pub fn fcopyfile(in_fd: i32, out_fd: i32, flags: u32) -> std::io::Result<()> {
         ) -> libc::c_int;
     }
     let ret = unsafe { fcopyfile(in_fd, out_fd, core::ptr::null_mut(), flags) };
-    if ret < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-pub fn make_dir(path: &CStr, mode: u32) -> std::io::Result<()> {
-    let ret = unsafe { libc::mkdir(path.as_ptr(), mode as _) };
-    if ret < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(all(not(windows), not(target_os = "redox")))]
-pub fn make_dir_at(dir_fd: i32, path: &CStr, mode: u32) -> std::io::Result<()> {
-    let ret = unsafe { libc::mkdirat(dir_fd, path.as_ptr(), mode as _) };
     if ret < 0 {
         Err(std::io::Error::last_os_error())
     } else {

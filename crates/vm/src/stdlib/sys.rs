@@ -4,6 +4,7 @@ use crate::{Py, PyPayload, PyResult, VirtualMachine, builtins::PyModule, convert
 
 #[cfg(all(not(feature = "host_env"), feature = "stdio"))]
 pub(crate) use sys::SandboxStdio;
+pub use sys::{COPYRIGHT, PLATFORM};
 pub(crate) use sys::{DOC, MAXSIZE, RUST_MULTIARCH, UnraisableHookArgsData, module_def, multiarch};
 
 #[pymodule(name = "_jit")]
@@ -43,13 +44,14 @@ pub mod sys {
             hash::{PyHash, PyUHash},
         },
         convert::ToPyObject,
-        frame::{Frame, FrameRef},
+        frame::FrameRef,
         function::{FuncArgs, KwArgs, OptionalArg, PosArgs},
         stdlib::{_warnings::warn, builtins},
         types::PyStructSequence,
         version,
         vm::{Settings, VirtualMachine},
     };
+    use core::ffi::CStr;
     use core::sync::atomic::Ordering;
     use num_traits::ToPrimitive;
     use std::{
@@ -222,7 +224,7 @@ pub mod sys {
     #[pyattr(name = "api_version")]
     const API_VERSION: u32 = 0x0; // what C api?
     #[pyattr(name = "copyright")]
-    const COPYRIGHT: &str = "Copyright (c) 2019 RustPython Team";
+    pub const COPYRIGHT: &CStr = c"Copyright (c) 2019 RustPython Team";
     #[pyattr(name = "float_repr_style")]
     const FLOAT_REPR_STYLE: &str = "short";
     #[pyattr(name = "_framework")]
@@ -235,14 +237,14 @@ pub mod sys {
     const MAXUNICODE: u32 = core::char::MAX as u32;
 
     #[pyattr(name = "platform")]
-    pub const PLATFORM: &str = cfg_select! {
-        target_os = "linux" => "linux",
-        target_os = "android" => "android",
-        target_os = "macos" => "darwin",
-        target_os = "ios" => "ios",
-        windows => "win32",
-        target_os = "wasi" => "wasi",
-        _ => "unknown"
+    pub const PLATFORM: &CStr = cfg_select! {
+        target_os = "linux" => c"linux",
+        target_os = "android" => c"android",
+        target_os = "macos" => c"darwin",
+        target_os = "ios" => c"ios",
+        windows => c"win32",
+        target_os = "wasi" => c"wasi",
+        _ => c"unknown"
     };
 
     #[pyattr(name = "ps1")]
@@ -968,17 +970,9 @@ pub mod sys {
     #[pyfunction]
     fn _getframe(offset: OptionalArg<usize>, vm: &VirtualMachine) -> PyResult<FrameRef> {
         let offset = offset.into_option().unwrap_or(0);
-        let frame_ref = {
-            let frames = vm.frames.borrow();
-            if offset >= frames.len() {
-                return Err(vm.new_value_error("call stack is not deep enough"));
-            }
-
-            let idx = frames.len() - offset - 1;
-            // SAFETY: the FrameRef is alive on the call stack while it's in the Vec
-            let py: &crate::Py<Frame> = unsafe { frames[idx].as_ref() };
-            py.to_owned()
-        };
+        let frame_ref = crate::frame::frame_at_offset(offset)
+            .ok_or_else(|| vm.new_value_error("call stack is not deep enough"))?;
+        frame_ref.mark_escaped();
 
         if let Ok(audit) = vm.sys_module.get_attr("audit", vm) {
             audit.call((vm.ctx.new_str("sys._getframe"), frame_ref.to_owned()), vm)?;
@@ -998,15 +992,9 @@ pub mod sys {
         }
 
         // Get the frame at the specified depth
-        let func_obj = {
-            let frames = vm.frames.borrow();
-            if depth >= frames.len() {
-                return Ok(vm.ctx.none());
-            }
-            let idx = frames.len() - depth - 1;
-            // SAFETY: the FrameRef is alive on the call stack while it's in the Vec
-            let frame: &crate::Py<Frame> = unsafe { frames[idx].as_ref() };
-            frame.func_obj.clone()
+        let func_obj = match crate::frame::frame_at_offset(depth) {
+            Some(frame) => frame.func_obj.clone(),
+            None => return Ok(vm.ctx.none()),
         };
 
         // If the frame has a function object, return its __module__ attribute
@@ -1911,7 +1899,7 @@ pub(crate) fn sysconfigdata_name() -> String {
     format!(
         "_sysconfigdata_{}_{}_{}",
         sys::ABIFLAGS,
-        sys::PLATFORM,
+        sys::PLATFORM.to_string_lossy(),
         sys::multiarch()
     )
 }

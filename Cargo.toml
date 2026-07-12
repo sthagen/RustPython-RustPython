@@ -49,7 +49,6 @@ env_logger = "0.11"
 flamescope = { version = "0.1.2", optional = true }
 
 rustls = { workspace = true, optional = true }
-rustls-graviola = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 libc = { workspace = true }
@@ -60,6 +59,7 @@ rustyline = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 pyo3 = { workspace = true, features = ["auto-initialize"] }
+rustls-graviola = { workspace = true }
 rustpython-stdlib = { workspace = true }
 ruff_python_parser = { workspace = true }
 
@@ -79,7 +79,6 @@ path = "src/main.rs"
 name = "custom_tls_providers"
 path = "examples/custom_tls_providers.rs"
 required-features = [
-    "rustls-graviola",
     "rustls/ring",
     "rustpython-pylib/freeze-stdlib",
     "rustpython-stdlib/ssl-rustls",
@@ -180,6 +179,7 @@ rustpython-vm = { path = "crates/vm", default-features = false, version = "0.5.0
 rustpython-pylib = { path = "crates/pylib", version = "0.5.0" }
 rustpython-stdlib = { path = "crates/stdlib", default-features = false, version = "0.5.0" }
 rustpython-sre_engine = { path = "crates/sre_engine", version = "0.5.0" }
+rustpython-unicode = { path = "crates/unicode", version = "0.5.0" }
 rustpython-wtf8 = { path = "crates/wtf8", version = "0.5.0" }
 rustpython-doc = { path = "crates/doc", version = "0.5.0" }
 
@@ -190,15 +190,15 @@ ruff_text_size = { package = "rustpython-ruff_text_size", git = "https://github.
 ruff_source_file = { package = "rustpython-ruff_source_file", git = "https://github.com/RustPython/ruff.git", tag = "0.15.19-rustpython" }
 
 der = { version = "0.8", features = ["alloc", "oid", "pem", "zeroize"] }
-phf = { version = "0.13.1", default-features = false, features = ["macros"]}
+phf = { version = "0.14.0", default-features = false, features = ["macros"]}
 adler32 = "1.2.0"
 approx = "0.5.1"
-ascii = "1.1"
+ascii = { version = "1.1", default-features = false }
 base64 = "0.22"
 blake2 = "0.11.0-rc.6"
 bitflags = "2.11.0"
 bitflagset = "0.0.3"
-bstr = "1"
+bstr = { version = "1", default-features = false, features = ["unicode"] }
 bzip2 = "0.6"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 console_error_panic_hook = "0.1"
@@ -228,7 +228,8 @@ hexf-parse = "0.2.1"
 hmac = "0.13"
 indexmap = { version = "2.14.0", features = ["std"] }
 insta = "1.47"
-itertools = "0.14.0"
+itertools = { version = "0.15.0", default-features = false, features = ["use_alloc"] }
+itoa = "1"
 is-macro = "0.3.7"
 js-sys = "0.3"
 junction = "2.0.0"
@@ -249,7 +250,7 @@ malachite-bigint = "0.9.1"
 malachite-q = "0.9.1"
 malachite-base = "0.9.1"
 md-5 = "0.11"
-memchr = "2.8.1"
+memchr = { version = "2.8.1", default-features = false, features = ["alloc"] }
 memmap2 = "0.9.10"
 mt19937 = "3.3"
 num-complex = "0.4.6"
@@ -278,7 +279,7 @@ rapidhash = "4.4.1"
 result-like = "0.5.0"
 rustix = { version = "1.1", features = ["event", "fs", "param", "system"] }
 rustls = { version = "0.23.39", default-features = false }
-rustls-graviola = "0.3"
+rustls-graviola = "0.4"
 rustls-native-certs = "0.8"
 rustls-pemfile = "2.2"
 rustls-platform-verifier = "0.7"
@@ -311,7 +312,7 @@ icu_locale = "2"
 icu_properties = "2"
 icu_normalizer = "2"
 uuid = "1.23.2"
-unicode_names2 = "2.0.0"
+unicode_names2 = { version = "3", default-features = false, features = ["no_std"] }
 widestring = "1.2.0"
 windows-sys = "0.61.2"
 wasm-bindgen = "0.2.106"
@@ -350,6 +351,7 @@ similar_names = "allow"
 # restriction lints
 alloc_instead_of_core = "warn"
 cfg_not_test = "warn"
+iter_over_hash_type = "warn"
 redundant_test_prefix = "warn"
 std_instead_of_alloc = "warn"
 std_instead_of_core = "warn"
@@ -370,14 +372,17 @@ search_is_some = "warn"
 significant_drop_in_scrutinee = "warn"
 single_option_map = "warn"
 trait_duplication_in_bounds = "warn"
+tuple_array_conversions = "warn"
 type_repetition_in_bounds = "warn"
 unnecessary_struct_initialization = "warn"
 unused_peekable = "warn"
 unused_rounding = "warn"
 use_self = "warn"
 useless_let_if_seq = "warn"
+while_float = "warn"
 
 # pedantic lints to enforce gradually
+assigning_clones = "warn"
 bool_to_int_with_if = "warn"
 checked_conversions = "warn"
 cloned_instead_of_copied = "warn"
@@ -403,6 +408,7 @@ iter_filter_is_ok = "warn"
 iter_filter_is_some = "warn"
 large_futures = "warn"
 large_types_passed_by_value = "warn"
+manual_assert = "warn"
 manual_instant_elapsed = "warn"
 manual_is_variant_and = "warn"
 map_unwrap_or = "warn"

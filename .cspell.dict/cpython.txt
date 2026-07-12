@@ -4,6 +4,7 @@ argdefs
 argtypes
 asdl
 asname
+ASNATIVEBYTES
 atopen
 atext
 attro
@@ -169,6 +170,7 @@ nvars
 opname
 opnames
 orelse
+osmodule
 outparam
 outparm
 paramfunc
@@ -189,6 +191,7 @@ pycore
 pyinner
 pydecimal
 pyerrors
+pyframe
 Pyfunc
 pylifecycle
 pymain
