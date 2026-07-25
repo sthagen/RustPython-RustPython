@@ -3,6 +3,7 @@ use crate::{
     builtins::{PyBaseExceptionRef, PyBytesRef, PyTuple, PyTupleRef, PyTypeRef},
     common::{static_cell, str::wchar_t},
     convert::ToPyObject,
+    exceptions,
     function::{ArgBytesLike, ArgIntoBool, ArgIntoFloat},
 };
 
@@ -85,6 +86,7 @@ pub(crate) enum FormatType {
     UByte = b'B',
     Char = b'c',
     WideChar = b'u',
+    Ucs4Char = b'w',
     Str = b's',
     Pascal = b'p',
     Short = b'h',
@@ -189,6 +191,7 @@ impl FormatType {
                     unpack: Some(unpack_char),
                 },
                 Self::WideChar => native_info!(wchar_t),
+                Self::Ucs4Char => native_info!(u32),
                 Self::Short => native_info!(raw::c_short),
                 Self::UShort => native_info!(raw::c_ushort),
                 Self::Int => native_info!(raw::c_int),
@@ -280,7 +283,7 @@ impl FormatCode {
 
             // Check for embedded null character
             if c == 0 {
-                return Err("embedded null character".to_owned());
+                return Err(exceptions::NulError.to_string());
             }
 
             // PEP3118: Handle extended format specifiers
@@ -344,9 +347,10 @@ impl FormatCode {
             let code = FormatType::try_from(c)
                 .ok()
                 .filter(|c| match c {
-                    FormatType::SSizeT | FormatType::SizeT | FormatType::VoidP => {
-                        endianness == Endianness::Native
-                    }
+                    FormatType::SSizeT
+                    | FormatType::SizeT
+                    | FormatType::VoidP
+                    | FormatType::Ucs4Char => endianness == Endianness::Native,
                     _ => true,
                 })
                 .ok_or_else(|| "bad char in struct format".to_owned())?;
@@ -612,14 +616,22 @@ make_pack_prim_int!(usize);
 make_pack_prim_int!(isize);
 
 macro_rules! make_pack_float {
-    ($T:ty) => {
+    ($T:ty, $fmt:literal) => {
         impl Packable for $T {
             fn pack<E: ByteOrder>(
                 vm: &VirtualMachine,
                 arg: PyObjectRef,
                 data: &mut [u8],
             ) -> PyResult<()> {
-                let f = ArgIntoFloat::try_from_object(vm, arg)?.into_float() as $T;
+                let f_64 = ArgIntoFloat::try_from_object(vm, arg)?.into_float();
+                let f = f_64 as $T;
+                if f.is_infinite() != f_64.is_infinite() {
+                    return Err(vm.new_overflow_error(concat!(
+                        "float too large to pack with ",
+                        $fmt,
+                        " format"
+                    )));
+                }
                 f.to_bits().pack_int::<E>(data);
                 Ok(())
             }
@@ -632,8 +644,8 @@ macro_rules! make_pack_float {
     };
 }
 
-make_pack_float!(f32);
-make_pack_float!(f64);
+make_pack_float!(f32, "f");
+make_pack_float!(f64, "d");
 
 impl Packable for f16 {
     fn pack<E: ByteOrder>(vm: &VirtualMachine, arg: PyObjectRef, data: &mut [u8]) -> PyResult<()> {

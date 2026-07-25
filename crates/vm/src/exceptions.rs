@@ -15,6 +15,7 @@ use crate::{
     suggestion::offer_suggestions,
     types::{Callable, Constructor, Initializer, Representable},
 };
+use core::fmt::{self, Display, Formatter};
 use crossbeam_utils::atomic::AtomicCell;
 use itertools::Itertools;
 #[cfg(feature = "host_env")]
@@ -353,11 +354,11 @@ impl VirtualMachine {
 
     pub fn invoke_exception(
         &self,
-        cls: PyTypeRef,
+        cls: &Py<PyType>,
         args: Vec<PyObjectRef>,
     ) -> PyResult<PyBaseExceptionRef> {
         // TODO: fast-path built-in exceptions by directly instantiating them? Is that really worth it?
-        let res = PyType::call(&cls, args.into_args(self), self)?;
+        let res = PyType::call(cls, args.into_args(self), self)?;
         res.downcast::<PyBaseException>().map_err(|obj| {
             self.new_type_error(format!(
                 "calling {} should have returned an instance of BaseException, not {}",
@@ -444,7 +445,7 @@ impl TryFromObject for ExceptionCtor {
 impl ExceptionCtor {
     pub fn instantiate(self, vm: &VirtualMachine) -> PyResult<PyBaseExceptionRef> {
         match self {
-            Self::Class(cls) => vm.invoke_exception(cls, vec![]),
+            Self::Class(cls) => vm.invoke_exception(&cls, vec![]),
             Self::Instance(exc) => Ok(exc),
         }
     }
@@ -472,7 +473,7 @@ impl ExceptionCtor {
                     exc @ PyBaseException => exc.args().to_vec(),
                     obj => vec![obj],
                 });
-                vm.invoke_exception(cls, args)
+                vm.invoke_exception(&cls, args)
             }
         }
     }
@@ -959,17 +960,13 @@ impl ExceptionZoo {
             "exceptions" => ctx.new_readonly_getset("exceptions", excs.base_exception_group, make_arg_getter(1)),
         });
 
-        extend_exception!(PySystemExit, ctx, excs.system_exit, {
-            "code" => ctx.new_readonly_getset("code", excs.system_exit, system_exit_code),
-        });
+        extend_exception!(PySystemExit, ctx, excs.system_exit);
         extend_exception!(PyKeyboardInterrupt, ctx, excs.keyboard_interrupt);
         extend_exception!(PyGeneratorExit, ctx, excs.generator_exit);
 
         extend_exception!(PyException, ctx, excs.exception_type);
 
-        extend_exception!(PyStopIteration, ctx, excs.stop_iteration, {
-            "value" => ctx.none(),
-        });
+        extend_exception!(PyStopIteration, ctx, excs.stop_iteration);
         extend_exception!(PyStopAsyncIteration, ctx, excs.stop_async_iteration);
 
         extend_exception!(PyArithmeticError, ctx, excs.arithmetic_error);
@@ -1100,19 +1097,6 @@ fn syntax_error_set_msg(exc: PyBaseExceptionRef, value: PySetterValue, vm: &Virt
     *args = PyTuple::new_ref(new_args, &vm.ctx);
 }
 
-fn system_exit_code(exc: PyBaseExceptionRef) -> Option<PyObjectRef> {
-    // SystemExit.code based on args length:
-    // - size == 0: code is None
-    // - size == 1: code is args[0]
-    // - size > 1: code is args (the whole tuple)
-    let args = exc.args.read();
-    Some(match args.len() {
-        0 => return None,
-        1 => args.first().unwrap().clone(),
-        _ => args.as_object().to_owned(),
-    })
-}
-
 #[cfg(feature = "serde")]
 pub struct SerializeException<'vm, 's> {
     vm: &'vm VirtualMachine,
@@ -1205,20 +1189,62 @@ impl serde::Serialize for SerializeException<'_, '_> {
     }
 }
 
-pub fn cstring_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
+#[derive(Debug)]
+pub struct NulError;
+
+impl Display for NulError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "embedded null character")
+    }
+}
+
+pub fn nul_char_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
     vm.new_value_error("embedded null character")
+}
+
+pub fn nul_char_type_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
+    vm.new_type_error("embedded null character")
+}
+
+pub fn nul_byte_error(vm: &VirtualMachine) -> PyBaseExceptionRef {
+    vm.new_value_error("embedded null byte")
 }
 
 impl ToPyException for alloc::ffi::NulError {
     fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
-        cstring_error(vm)
+        nul_char_error(vm)
+    }
+}
+
+impl ToPyException for alloc::ffi::FromVecWithNulError {
+    fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+        nul_char_error(vm)
+    }
+}
+
+impl ToPyException for core::ffi::FromBytesWithNulError {
+    fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+        nul_char_error(vm)
+    }
+}
+
+impl ToPyException for NulError {
+    fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+        nul_char_error(vm)
     }
 }
 
 #[cfg(windows)]
 impl<C> ToPyException for widestring::error::ContainsNul<C> {
     fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
-        cstring_error(vm)
+        nul_char_error(vm)
+    }
+}
+
+#[cfg(windows)]
+impl ToPyException for widestring::error::MissingNulTerminator {
+    fn to_pyexception(&self, vm: &VirtualMachine) -> PyBaseExceptionRef {
+        vm.new_value_error(self.to_string())
     }
 }
 
@@ -1593,7 +1619,7 @@ pub(super) mod types {
             tuple::IntoPyTuple,
         },
         convert::ToPyResult,
-        function::{ArgBytesLike, FuncArgs, KwArgs},
+        function::{ArgBytesLike, FuncArgs, KwArgs, PySetterValue},
         set_attrs,
         types::{Constructor, Initializer},
     };
@@ -1624,26 +1650,81 @@ pub(super) mod types {
         pub(super) args: PyRwLock<PyTupleRef>,
     }
 
-    #[pyexception(name, base = PyBaseException, ctx = "system_exit")]
-    #[derive(Debug)]
-    #[repr(transparent)]
-    pub struct PySystemExit(PyBaseException);
+    #[pyexception(name, base = PyBaseException, ctx = "system_exit", traverse = "manual")]
+    #[repr(C)]
+    pub struct PySystemExit {
+        base: PyBaseException,
+        code: PyAtomicRef<Option<PyObject>>,
+    }
 
-    // SystemExit_init: has its own __init__ that sets the code attribute
-    #[pyexception(with(Initializer))]
-    impl PySystemExit {}
+    impl crate::class::PySubclass for PySystemExit {
+        type Base = PyBaseException;
+        fn as_base(&self) -> &Self::Base {
+            &self.base
+        }
+    }
+
+    unsafe impl Traverse for PySystemExit {
+        fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
+            self.base.traverse(tracer_fn);
+            if let Some(obj) = self.code.deref() {
+                tracer_fn(obj);
+            }
+        }
+    }
+
+    impl core::fmt::Debug for PySystemExit {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("PySystemExit").finish_non_exhaustive()
+        }
+    }
+
+    #[pyexception(with(Constructor, Initializer))]
+    impl PySystemExit {
+        #[pygetset]
+        fn code(&self) -> Option<PyObjectRef> {
+            self.code.to_owned()
+        }
+
+        #[pygetset(setter)]
+        fn set_code(&self, value: PySetterValue, vm: &VirtualMachine) {
+            let code = match value {
+                PySetterValue::Assign(v) => Some(v),
+                PySetterValue::Delete => None,
+            };
+            self.code.swap_to_temporary_refs(code, vm);
+        }
+    }
 
     impl Initializer for PySystemExit {
         type Args = FuncArgs;
         fn slot_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
             // Call BaseException_init first (handles args)
-            PyBaseException::slot_init(zelf, args, vm)
-            // Note: code is computed dynamically via system_exit_code getter
-            // so we don't need to set it here explicitly
+            let code = match args.args.len() {
+                0 => vm.ctx.none(),
+                1 => args.args[0].clone(),
+                _ => vm.ctx.new_tuple(args.args.clone()).into(),
+            };
+            PyBaseException::slot_init(zelf.clone(), args, vm)?;
+            let exc: &Py<Self> = zelf.downcast_ref::<Self>().unwrap();
+            exc.code.swap_to_temporary_refs(Some(code), vm);
+            Ok(())
         }
 
         fn init(_zelf: PyRef<Self>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<()> {
             unreachable!("slot_init is defined")
+        }
+    }
+
+    impl Constructor for PySystemExit {
+        type Args = FuncArgs;
+
+        fn py_new(_cls: &Py<PyType>, args: FuncArgs, vm: &VirtualMachine) -> PyResult<Self> {
+            let base_exception = PyBaseException::new(args.args, vm);
+            Ok(Self {
+                base: base_exception,
+                code: None.into(),
+            })
         }
     }
 
@@ -1662,23 +1743,79 @@ pub(super) mod types {
     #[repr(transparent)]
     pub struct PyException(PyBaseException);
 
-    #[pyexception(name, base = PyException, ctx = "stop_iteration")]
-    #[derive(Debug)]
-    #[repr(transparent)]
-    pub struct PyStopIteration(PyException);
+    #[pyexception(name, base = PyException, ctx = "stop_iteration", traverse = "manual")]
+    #[repr(C)]
+    pub struct PyStopIteration {
+        base: PyException,
+        value: PyAtomicRef<Option<PyObject>>,
+    }
 
-    #[pyexception(with(Initializer))]
-    impl PyStopIteration {}
+    impl crate::class::PySubclass for PyStopIteration {
+        type Base = PyException;
+        fn as_base(&self) -> &Self::Base {
+            &self.base
+        }
+    }
+
+    impl core::fmt::Debug for PyStopIteration {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("PyStopIteration").finish_non_exhaustive()
+        }
+    }
+
+    unsafe impl Traverse for PyStopIteration {
+        fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
+            self.base.0.traverse(tracer_fn);
+            if let Some(obj) = self.value.deref() {
+                tracer_fn(obj);
+            }
+        }
+    }
+
+    impl Constructor for PyStopIteration {
+        type Args = FuncArgs;
+
+        fn py_new(_cls: &Py<PyType>, args: FuncArgs, vm: &VirtualMachine) -> PyResult<Self> {
+            let base_exception = PyBaseException::new(args.args, vm);
+            Ok(Self {
+                base: PyException(base_exception),
+                value: None.into(),
+            })
+        }
+    }
 
     impl Initializer for PyStopIteration {
         type Args = FuncArgs;
         fn slot_init(zelf: PyObjectRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
-            zelf.set_attr("value", vm.unwrap_or_none(args.args.first().cloned()), vm)?;
+            let value = match args.args.len() {
+                0 => vm.ctx.none(),
+                _ => args.args[0].clone(),
+            };
+            PyBaseException::slot_init(zelf.clone(), args, vm)?;
+            let exc: &Py<Self> = zelf.downcast_ref::<Self>().unwrap();
+            exc.value.swap_to_temporary_refs(Some(value), vm);
             Ok(())
         }
 
         fn init(_zelf: PyRef<Self>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<()> {
             unreachable!("slot_init is defined")
+        }
+    }
+
+    #[pyexception(with(Constructor, Initializer))]
+    impl PyStopIteration {
+        #[pygetset]
+        fn value(&self) -> Option<PyObjectRef> {
+            self.value.to_owned()
+        }
+
+        #[pygetset(setter)]
+        fn set_value(&self, setter_value: PySetterValue, vm: &VirtualMachine) {
+            let value = match setter_value {
+                PySetterValue::Assign(v) => Some(v),
+                PySetterValue::Delete => None,
+            };
+            self.value.swap_to_temporary_refs(value, vm);
         }
     }
 
@@ -2007,7 +2144,7 @@ pub(super) mod types {
                         .downcast_ref::<PyInt>()
                         .and_then(|errno| errno.try_to_primitive::<i32>(vm).ok())
                         .and_then(|errno| super::errno_to_exc_type(errno, vm))
-                        .and_then(|typ| vm.invoke_exception(typ.to_owned(), args_vec).ok())
+                        .and_then(|typ| vm.invoke_exception(typ, args_vec).ok())
                     {
                         return error.to_pyresult(vm);
                     }

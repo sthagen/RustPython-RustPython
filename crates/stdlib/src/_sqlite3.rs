@@ -54,7 +54,7 @@ mod _sqlite3 {
     use rustpython_vm::{
         __exports::paste,
         AsObject, Py, PyAtomicRef, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
-        TryFromBorrowedObject, VirtualMachine, atomic_func,
+        TryFromBorrowedObject, TryFromObject, VirtualMachine, atomic_func,
         builtins::{
             PyBaseException, PyBaseExceptionRef, PyByteArray, PyBytes, PyDict, PyDictRef, PyFloat,
             PyInt, PyIntRef, PyModule, PySlice, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType,
@@ -330,6 +330,19 @@ mod _sqlite3 {
         }
     }
 
+    struct IsolationLevelArg(Option<PyStrRef>);
+
+    impl TryFromObject for IsolationLevelArg {
+        fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
+            if vm.is_none(&obj) {
+                return Ok(Self(None));
+            }
+            obj.downcast::<PyStr>()
+                .map(|s| Self(Some(s)))
+                .map_err(|_| vm.new_type_error("isolation_level must be str or None".to_owned()))
+        }
+    }
+
     #[derive(FromArgs)]
     struct ConnectArgs {
         #[pyarg(any)]
@@ -338,8 +351,8 @@ mod _sqlite3 {
         timeout: TimeoutSeconds,
         #[pyarg(any, default = 0)]
         detect_types: c_int,
-        #[pyarg(any, default = Some(vm.ctx.empty_str.to_owned()))]
-        isolation_level: Option<PyStrRef>,
+        #[pyarg(any, default = IsolationLevelArg(Some(vm.ctx.empty_str.to_owned())))]
+        isolation_level: IsolationLevelArg,
         #[pyarg(any, default = true)]
         check_same_thread: bool,
         #[pyarg(any, default = Connection::class(&vm.ctx).to_owned())]
@@ -356,7 +369,7 @@ mod _sqlite3 {
 
     unsafe impl Traverse for ConnectArgs {
         fn traverse(&self, tracer_fn: &mut TraverseFn<'_>) {
-            self.isolation_level.traverse(tracer_fn);
+            self.isolation_level.0.traverse(tracer_fn);
             self.factory.traverse(tracer_fn);
         }
     }
@@ -914,7 +927,7 @@ mod _sqlite3 {
                 db: PyMutex::new(db),
                 initialized: Radium::new(initialized),
                 detect_types: Radium::new(args.detect_types),
-                isolation_level: PyAtomicRef::from(args.isolation_level),
+                isolation_level: PyAtomicRef::from(args.isolation_level.0),
                 check_same_thread: Radium::new(args.check_same_thread),
                 thread_ident: PyMutex::new(std::thread::current().id()),
                 row_factory: PyAtomicRef::from(None),
@@ -970,7 +983,7 @@ mod _sqlite3 {
                 .store(check_same_thread, Ordering::Relaxed);
             *zelf.autocommit.lock() = autocommit;
             *zelf.thread_ident.lock() = std::thread::current().id();
-            let _ = unsafe { zelf.isolation_level.swap(isolation_level) };
+            let _ = unsafe { zelf.isolation_level.swap(isolation_level.0) };
 
             let mut guard = zelf.db.lock();
             *guard = Some(db);
@@ -996,7 +1009,7 @@ mod _sqlite3 {
             let db = Sqlite::from(SqliteRaw::open(path.as_ptr(), args.uri, vm)?);
             let timeout = (args.timeout.to_secs_f64() * 1000.0) as c_int;
             db.busy_timeout(timeout);
-            if let Some(isolation_level) = &args.isolation_level {
+            if let Some(isolation_level) = &args.isolation_level.0 {
                 begin_statement_ptr_from_isolation_level(isolation_level, vm)?;
             }
             Ok(db)
@@ -1013,6 +1026,11 @@ mod _sqlite3 {
                 Ok(PyMutexGuard::map(guard, |x| unsafe {
                     x.as_mut().unwrap_unchecked()
                 }))
+            } else if self.initialized.load(Ordering::Acquire) {
+                Err(new_programming_error(
+                    vm,
+                    "Cannot operate on a closed database.".to_owned(),
+                ))
             } else {
                 Err(new_programming_error(
                     vm,
@@ -1492,11 +1510,11 @@ mod _sqlite3 {
         #[pygetset(setter)]
         fn set_isolation_level(
             &self,
-            value: PySetterValue<Option<PyStrRef>>,
+            value: PySetterValue<IsolationLevelArg>,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
             match value {
-                PySetterValue::Assign(value) => {
+                PySetterValue::Assign(IsolationLevelArg(value)) => {
                     if let Some(val_str) = &value {
                         begin_statement_ptr_from_isolation_level(val_str, vm)?;
                     }
@@ -2237,7 +2255,7 @@ mod _sqlite3 {
                         return self.data.getitem_by_index(vm, i);
                     }
                 }
-                Err(vm.new_index_error("No item with that key"))
+                Err(vm.new_index_error(format!("No item with key '{}'", name.to_string_lossy())))
             } else if let Some(slice) = needle.downcast_ref::<PySlice>() {
                 let list = self.data.getitem_by_slice(vm, slice.to_saturated(vm)?)?;
                 Ok(vm.ctx.new_tuple(list).into())
@@ -2259,7 +2277,7 @@ mod _sqlite3 {
                 .inner(vm)?
                 .description
                 .clone()
-                .ok_or_else(|| vm.new_value_error("no description in Cursor"))?;
+                .unwrap_or_else(|| vm.ctx.empty_tuple.clone());
 
             Ok(Self { data, description })
         }
