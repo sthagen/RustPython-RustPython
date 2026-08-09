@@ -11,8 +11,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::collections::HashSet;
 
 fn elapsed_secs(
-    #[cfg(target_arch = "wasm32")] _start: &(),
-    #[cfg(not(target_arch = "wasm32"))] start: &std::time::Instant,
+    #[cfg(target_arch = "wasm32")] _start: (),
+    #[cfg(not(target_arch = "wasm32"))] start: std::time::Instant,
 ) -> f64 {
     cfg_select! {
         target_arch = "wasm32" => 0.0,
@@ -528,7 +528,7 @@ impl GcState {
                 self.generations[i].count.store(0, Ordering::SeqCst);
             }
 
-            let duration = elapsed_secs(&start_time);
+            let duration = elapsed_secs(start_time);
 
             self.generations[generation].update_stats(0, 0, 0, duration);
             return CollectResult {
@@ -633,33 +633,26 @@ impl GcState {
         // classified reachable. A running frame appearing in `unreachable`
         // would mean the reachability analysis observed its interpreter state
         // as garbage — the exact hazard the barrier exists to prevent.
+        // Verify no running frame is classified unreachable.
+        // Walk the TLS frame chain (CURRENT_FRAME) instead of top_frame,
+        // because stack-allocated frames update only CURRENT_FRAME (via
+        // set_current_frame_nosave), not top_frame.
         #[cfg(all(unix, feature = "threading", debug_assertions))]
         if stw.stopped {
             let unreachable_set: HashSet<GcPtr> = unreachable.iter().copied().collect();
-            crate::vm::thread::try_with_current_vm(|vm| {
-                let registry = vm.state.thread_frames.lock();
-                #[expect(
-                    clippy::iter_over_hash_type,
-                    reason = "assertion over every registered thread slot"
-                )]
-                for slot in registry.values() {
-                    let mut cur = slot.top_frame.load(core::sync::atomic::Ordering::Relaxed)
-                        as *const crate::frame::Frame;
-                    while !cur.is_null() {
-                        // SAFETY: frames on a thread's active call stack are
-                        // alive, and the world is stopped so none can be popped.
-                        let obj =
-                            unsafe { &*crate::Py::<crate::frame::Frame>::from_payload_ptr(cur) }
-                                .as_object();
-                        let ptr = GcPtr(NonNull::from(obj));
-                        debug_assert!(
-                            !unreachable_set.contains(&ptr),
-                            "running frame {obj:p} classified unreachable during GC"
-                        );
-                        cur = unsafe { (*cur).previous_frame() };
-                    }
+            let mut cur = crate::vm::thread::get_current_frame();
+            while !cur.is_null() {
+                let iframe = unsafe { &*cur };
+                if let Some(fo) = iframe.frame_obj() {
+                    let obj = fo.as_object();
+                    let ptr = GcPtr(NonNull::from(obj));
+                    debug_assert!(
+                        !unreachable_set.contains(&ptr),
+                        "running frame {obj:p} classified unreachable during GC"
+                    );
                 }
-            });
+                cur = iframe.previous();
+            }
         }
 
         if debug.contains(GcDebugFlags::STATS) {
@@ -711,7 +704,7 @@ impl GcState {
                 self.generations[i].count.store(0, Ordering::SeqCst);
             }
 
-            let duration = elapsed_secs(&start_time);
+            let duration = elapsed_secs(start_time);
 
             self.generations[generation].update_stats(0, 0, candidates, duration);
             return CollectResult {
@@ -734,7 +727,7 @@ impl GcState {
                 self.generations[i].count.store(0, Ordering::SeqCst);
             }
 
-            let duration = elapsed_secs(&start_time);
+            let duration = elapsed_secs(start_time);
 
             self.generations[generation].update_stats(0, 0, candidates, duration);
             return CollectResult {
@@ -960,7 +953,7 @@ impl GcState {
             self.generations[i].count.store(0, Ordering::SeqCst);
         }
 
-        let duration = elapsed_secs(&start_time);
+        let duration = elapsed_secs(start_time);
 
         self.generations[generation].update_stats(collected, 0, candidates, duration);
 
