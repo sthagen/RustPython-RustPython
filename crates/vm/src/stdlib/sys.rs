@@ -776,8 +776,7 @@ pub mod sys {
         } else {
             vec![status]
         };
-        let exc = vm.invoke_exception(vm.ctx.exceptions.system_exit, args)?;
-        Err(exc)
+        Err(vm.new_system_exit(args.into()))
     }
 
     #[pyfunction]
@@ -889,8 +888,7 @@ pub mod sys {
                 format!("Ignoring unimportable $PYTHONBREAKPOINT: \"{env_var}\"",),
                 0,
                 vm,
-            )
-            .unwrap();
+            )?;
             Ok(vm.ctx.none())
         };
 

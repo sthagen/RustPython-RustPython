@@ -341,6 +341,7 @@ mod builtins {
                 };
                 match &source {
                     ArgStrOrBytesLike::Str(source) => {
+                        let source = source.try_as_utf8(vm)?.as_str();
                         if source.as_bytes().contains(&0) {
                             return Err(vm.new_exception_msg(
                                 vm.ctx.exceptions.syntax_error.to_owned(),
@@ -548,13 +549,14 @@ mod builtins {
             Either::A(either) => {
                 let source = match &either {
                     ArgStrOrBytesLike::Str(source) => {
+                        let source = source.try_as_utf8(vm)?.as_str();
                         if source.as_bytes().contains(&0) {
                             return Err(vm.new_exception_msg(
                                 vm.ctx.exceptions.syntax_error.to_owned(),
                                 "source code string cannot contain null bytes".into(),
                             ));
                         }
-                        let source = source.expect_str().trim_start_matches([' ', '\t']);
+                        let source = source.trim_start_matches([' ', '\t']);
                         audit_compile_source(vm, source.as_bytes(), "<string>")?;
                         source.to_owned()
                     }
@@ -597,6 +599,7 @@ mod builtins {
                 }
                 let source = match &either {
                     ArgStrOrBytesLike::Str(source) => {
+                        let source = source.try_as_utf8(vm)?.as_str();
                         if source.as_bytes().contains(&0) {
                             return Err(vm.new_exception_msg(
                                 vm.ctx.exceptions.syntax_error.to_owned(),
@@ -604,7 +607,7 @@ mod builtins {
                             ));
                         }
                         audit_compile_source(vm, source.as_bytes(), "<string>")?;
-                        source.expect_str().to_owned()
+                        source.to_owned()
                     }
                     ArgStrOrBytesLike::Buf(source) => {
                         let source: &[u8] = &source.borrow_buf();
@@ -1041,7 +1044,7 @@ mod builtins {
     #[pyfunction]
     pub(super) fn exit(exit_code_arg: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult {
         let code = exit_code_arg.unwrap_or_else(|| vm.ctx.new_int(0).into());
-        Err(vm.invoke_exception(vm.ctx.exceptions.system_exit, vec![code])?)
+        Err(vm.new_system_exit(vec![code].into()))
     }
 
     #[derive(Debug, Default, FromArgs)]
