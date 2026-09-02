@@ -4,7 +4,7 @@ use crate::{
     class::PyClassImpl,
     common::wtf8::Wtf8,
     convert::TryFromObject,
-    function::{FuncArgs, PyComparisonValue, PyMethodDef, PyMethodFlags, PyNativeFn},
+    function::{Callee, FuncArgs, PyComparisonValue, PyMethodDef, PyMethodFlags, PyNativeFn},
     types::{Callable, Comparable, PyComparisonOp, Representable},
 };
 use alloc::fmt;
@@ -71,14 +71,16 @@ impl Callable for PyNativeFunction {
     type Args = FuncArgs;
     #[inline]
     fn call(zelf: &Py<Self>, mut args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        let mut callee = Callee::named(zelf.value.name);
         if let Some(z) = &zelf.zelf {
             // STATIC methods store the class in zelf for qualname/repr purposes,
             // but should not prepend it to args (the Rust function doesn't expect it).
             if !zelf.value.flags.contains(PyMethodFlags::STATIC) {
                 args.prepend_arg(z.clone());
+                callee = callee.with_instance_arg(true);
             }
         }
-        (zelf.value.func)(vm, args)
+        (zelf.value.func)(vm, args, callee)
     }
 }
 
@@ -164,9 +166,11 @@ impl PyNativeFunction {
         Ok(qualname)
     }
 
+    // meth_get__doc__ in CPython
     #[pygetset]
     fn __doc__(zelf: NativeFunctionOrMethod) -> Option<&'static str> {
-        zelf.0.value.doc
+        let doc = zelf.0.value.doc?;
+        type_::get_doc_from_internal_doc(zelf.0.value.name, doc)
     }
 
     // meth_get__self__ in CPython
@@ -247,12 +251,13 @@ fn vectorcall_native_function(
         let mut all_args = Vec::with_capacity(args.len() + 1);
         all_args.push(self_obj);
         all_args.extend(args);
-        FuncArgs::from_vectorcall(&all_args, nargs + 1, kwnames)
+        FuncArgs::from_vectorcall_owned(all_args, nargs + 1, kwnames)
     } else {
-        FuncArgs::from_vectorcall(&args, nargs, kwnames)
+        FuncArgs::from_vectorcall_owned(args, nargs, kwnames)
     };
 
-    (zelf.value.func)(vm, func_args)
+    let callee = Callee::named(zelf.value.name).with_instance_arg(needs_self);
+    (zelf.value.func)(vm, func_args, callee)
 }
 
 pub(crate) fn init(context: &'static Context) {

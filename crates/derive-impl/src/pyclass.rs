@@ -1077,16 +1077,25 @@ where
         }
 
         let raw = item_meta.raw()?;
-        let sig_doc = text_signature(func.sig(), &py_name);
         let has_receiver = func
             .sig()
             .inputs
             .iter()
             .any(|arg| matches!(arg, syn::FnArg::Receiver(_)));
-        let drop_first_typed = match self.inner.attr_name {
-            AttrName::Method | AttrName::ClassMethod if !has_receiver && !raw => 1,
-            _ => 0,
+        // Without a `&self` receiver the first argument is the one the call
+        // binds to, and CPython names it $self for a method and $type for a
+        // classmethod.
+        let implicit_self = if has_receiver || raw {
+            None
+        } else {
+            match self.inner.attr_name {
+                AttrName::Method => Some("$self"),
+                AttrName::ClassMethod => Some("$type"),
+                _ => None,
+            }
         };
+        let drop_first_typed = usize::from(implicit_self.is_some());
+        let sig_doc = text_signature(func.sig(), &py_name, implicit_self);
         let call_flags = infer_native_call_flags(func.sig(), drop_first_typed);
 
         // Add #[allow(non_snake_case)] for setter methods like set___name__
@@ -1096,7 +1105,11 @@ where
             args.attrs.push(allow_attr);
         }
 
-        let doc = args.attrs.doc().map(|doc| format_doc(&sig_doc, &doc));
+        let doc = match (sig_doc, args.attrs.doc()) {
+            (Some(sig_doc), Some(doc)) => Some(format_doc(&sig_doc, &doc)),
+            (Some(sig_doc), None) => Some(format_doc(&sig_doc, "")),
+            (None, doc) => doc,
+        };
         args.context.method_items.add_item(MethodNurseryItem {
             py_name,
             cfgs: args.cfgs.to_vec(),
@@ -1162,13 +1175,16 @@ where
         let slot_ident = Ident::new(&slot_ident.to_string().to_lowercase(), slot_ident.span());
         let slot_name = slot_ident.to_string();
         let tokens = {
-            const NON_ATOMIC_SLOTS: &[&str] = &["as_buffer"];
             const POINTER_SLOTS: &[&str] = &["as_sequence", "as_mapping"];
             const STATIC_GEN_SLOTS: &[&str] = &["as_number"];
 
-            if NON_ATOMIC_SLOTS.contains(&slot_name.as_str()) {
+            if slot_name == "as_buffer" {
+                // bf_releasebuffer is not a separate function in RustPython; the
+                // exporter's BufferMethods already release. Only its presence is
+                // observable, and AsBuffer declares that.
                 quote_spanned! { span =>
-                    slots.#slot_ident = Some(Self::#ident as _);
+                    slots.#slot_ident.store(Some(Self::#ident as _));
+                    slots.has_release_buffer.store(Self::RELEASE_BUFFER);
                 }
             } else if POINTER_SLOTS.contains(&slot_name.as_str()) {
                 quote_spanned! { span =>

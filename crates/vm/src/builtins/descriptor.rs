@@ -5,7 +5,7 @@ use crate::{
     class::PyClassImpl,
     common::hash::PyHash,
     convert::{ToPyObject, ToPyResult},
-    function::{ArgSize, FuncArgs, PyMethodDef, PyMethodFlags, PySetterValue},
+    function::{ArgSize, Callee, FuncArgs, PyMethodDef, PyMethodFlags, PySetterValue},
     protocol::{PyNumberBinaryFunc, PyNumberTernaryFunc, PyNumberUnaryFunc},
     types::{
         Callable, Comparable, DelFunc, DescrGetFunc, DescrSetFunc, GenericMethod, GetDescriptor,
@@ -108,7 +108,11 @@ impl Callable for PyMethodDescriptor {
     type Args = FuncArgs;
     #[inline]
     fn call(zelf: &Py<Self>, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        (zelf.method.func)(vm, args)
+        (zelf.method.func)(
+            vm,
+            args,
+            Callee::named(zelf.method.name).with_instance_arg(true),
+        )
     }
 }
 
@@ -134,8 +138,9 @@ impl PyMethodDescriptor {
     }
 
     #[pygetset]
-    const fn __doc__(&self) -> Option<&'static str> {
-        self.method.doc
+    fn __doc__(&self) -> Option<&'static str> {
+        let doc = self.method.doc?;
+        type_::get_doc_from_internal_doc(self.method.name, doc)
     }
 
     #[pygetset]
@@ -442,7 +447,11 @@ fn vectorcall_method_descriptor(
 ) -> PyResult {
     let zelf: &Py<PyMethodDescriptor> = zelf_obj.downcast_ref().unwrap();
     let func_args = FuncArgs::from_vectorcall_owned(args, nargs, kwnames);
-    (zelf.method.func)(vm, func_args)
+    (zelf.method.func)(
+        vm,
+        func_args,
+        Callee::named(zelf.method.name).with_instance_arg(true),
+    )
 }
 
 /// Vectorcall for wrapper_descriptor: calls wrapped slot function
@@ -542,6 +551,10 @@ pub enum SlotFunc {
     NumBinaryRight(PyNumberBinaryFunc),   // __radd__, __rsub__, etc. (swapped args)
     NumTernary(PyNumberTernaryFunc),      // __pow__
     NumTernaryRight(PyNumberTernaryFunc), // __rpow__ (swapped first two args)
+
+    // Buffer protocol
+    GetBuffer(crate::types::AsBufferFunc), // __buffer__
+    ReleaseBuffer,                         // __release_buffer__
 }
 
 impl core::fmt::Debug for SlotFunc {
@@ -582,6 +595,8 @@ impl core::fmt::Debug for SlotFunc {
             Self::NumBinaryRight(_) => write!(f, "SlotFunc::NumBinaryRight(...)"),
             Self::NumTernary(_) => write!(f, "SlotFunc::NumTernary(...)"),
             Self::NumTernaryRight(_) => write!(f, "SlotFunc::NumTernaryRight(...)"),
+            Self::GetBuffer(_) => write!(f, "SlotFunc::GetBuffer(...)"),
+            Self::ReleaseBuffer => write!(f, "SlotFunc::ReleaseBuffer"),
         }
     }
 }
@@ -758,8 +773,39 @@ impl SlotFunc {
                 let z = z.unwrap_or_else(|| vm.ctx.none());
                 func(&y, &obj, &z, vm) // Swapped: y ** obj % z
             }
+            // Buffer protocol
+            Self::GetBuffer(func) => {
+                let (flags_obj,): (PyObjectRef,) = args.bind(vm)?;
+                let buffer = func(&obj, parse_buffer_flags(flags_obj, vm)?, vm)?;
+                crate::builtins::PyMemoryView::from_buffer(buffer, vm)
+                    .map(|mv| mv.into_pyobject(vm))
+            }
+            Self::ReleaseBuffer => {
+                let (mv_obj,): (PyObjectRef,) = args.bind(vm)?;
+                let mv = mv_obj
+                    .downcast::<crate::builtins::PyMemoryView>()
+                    .map_err(|_| vm.new_type_error("expected a memoryview object"))?;
+                crate::builtins::memory::release_buffer_from_python(&obj, mv, vm)?;
+                Ok(vm.ctx.none())
+            }
         }
     }
+}
+
+/// Parse the `flags` argument of `__buffer__`. wrap_buffer
+fn parse_buffer_flags(
+    arg: PyObjectRef,
+    vm: &VirtualMachine,
+) -> PyResult<crate::protocol::BufferFlags> {
+    use num_traits::ToPrimitive;
+    let idx = arg.try_index(vm)?;
+    let flags = idx
+        .as_bigint()
+        .to_isize()
+        .ok_or_else(|| vm.new_overflow_error("cannot fit 'int' into an index-sized integer"))?;
+    let flags =
+        i32::try_from(flags).map_err(|_| vm.new_overflow_error("buffer flags out of range"))?;
+    Ok(crate::protocol::BufferFlags::from_bits_retain(flags as u32))
 }
 
 /// wrapper_descriptor: wraps a slot function as a Python method

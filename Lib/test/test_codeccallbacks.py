@@ -854,8 +854,6 @@ class CodecCallbackTest(unittest.TestCase):
                 self.assertEqual(exc.end, 2)
                 self.assertEqual(exc.object, input)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_encode_bytes_replacement(self):
         def handle(exc):
             if isinstance(exc, UnicodeEncodeError):
@@ -878,8 +876,6 @@ class CodecCallbackTest(unittest.TestCase):
                 res = input.encode(enc, "test.replacing")
                 self.assertEqual(res, "[".encode(enc) + repl + "]".encode(enc))
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_encode_odd_bytes_replacement(self):
         def handle(exc):
             if isinstance(exc, UnicodeEncodeError):
@@ -1067,8 +1063,7 @@ class CodecCallbackTest(unittest.TestCase):
                 decoded = input.decode(enc, "test.bug36819")
                 self.assertEqual(decoded, 'abcdx' * 51)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
+    @unittest.expectedFailureIf(sys.platform != "win32", "TODO: RUSTPYTHON")
     def test_encodehelper_bug36819(self):
         handler = RepeatedPosReturn()
         codecs.register_error("test.bug36819", handler.handle)

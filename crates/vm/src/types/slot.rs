@@ -7,9 +7,9 @@ use crate::{
     bytecode::ComparisonOperator,
     common::hash::{PyHash, fix_sentinel, hash_bigint},
     convert::ToPyObject,
-    function::{Either, FromArgs, FuncArgs, PyComparisonValue, PyMethodDef, PySetterValue},
+    function::{Callee, Either, FromArgs, FuncArgs, PyComparisonValue, PyMethodDef, PySetterValue},
     protocol::{
-        PyBuffer, PyIterReturn, PyMapping, PyMappingMethods, PyMappingSlots, PyNumber,
+        BufferFlags, PyBuffer, PyIterReturn, PyMapping, PyMappingMethods, PyMappingSlots, PyNumber,
         PyNumberMethods, PyNumberSlots, PySequence, PySequenceMethods, PySequenceSlots,
     },
     types::slot_defs::{SlotAccessor, find_slot_defs_by_name},
@@ -149,7 +149,12 @@ pub struct PyTypeSlots {
     pub setattro: AtomicCell<Option<SetattroFunc>>,
 
     // Functions to access object as input/output buffer
-    pub as_buffer: Option<AsBufferFunc>,
+    pub as_buffer: AtomicCell<Option<AsBufferFunc>>,
+    /// bf_releasebuffer: releasing an export of this type is observable, so the
+    /// type exposes `__release_buffer__`.
+    pub has_release_buffer: AtomicCell<bool>,
+    /// True when a Python-level `__release_buffer__` must be invoked on release.
+    pub python_release_buffer: AtomicCell<bool>,
 
     // Assigned meaning in release 2.1
     // rich comparisons
@@ -296,7 +301,8 @@ pub(crate) type StringifyFunc = fn(&PyObject, &VirtualMachine) -> PyResult<PyRef
 pub(crate) type GetattroFunc = fn(&PyObject, &Py<PyStr>, &VirtualMachine) -> PyResult;
 pub(crate) type SetattroFunc =
     fn(&PyObject, &Py<PyStr>, PySetterValue, &VirtualMachine) -> PyResult<()>;
-pub(crate) type AsBufferFunc = fn(&PyObject, &VirtualMachine) -> PyResult<PyBuffer>;
+/// bf_getbuffer
+pub(crate) type AsBufferFunc = fn(&PyObject, BufferFlags, &VirtualMachine) -> PyResult<PyBuffer>;
 pub(crate) type RichCompareFunc = fn(
     &PyObject,
     &PyObject,
@@ -328,6 +334,15 @@ pub(crate) type MapLenFunc = fn(PyMapping<'_>, &VirtualMachine) -> PyResult<usiz
 pub(crate) type MapSubscriptFunc = fn(PyMapping<'_>, &PyObject, &VirtualMachine) -> PyResult;
 pub(crate) type MapAssSubscriptFunc =
     fn(PyMapping<'_>, &PyObject, Option<PyObjectRef>, &VirtualMachine) -> PyResult<()>;
+
+// slot_bf_getbuffer
+pub(crate) fn python_as_buffer(
+    obj: &PyObject,
+    flags: BufferFlags,
+    vm: &VirtualMachine,
+) -> PyResult<PyBuffer> {
+    crate::builtins::memory::buffer_from_python_getbuffer(obj, flags, vm)
+}
 
 // slot_sq_length
 pub(crate) fn len_wrapper(obj: &PyObject, vm: &VirtualMachine) -> PyResult<usize> {
@@ -508,11 +523,15 @@ fn hash_wrapper(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyHash> {
 
 /// Marks a type as unhashable. Similar to PyObject_HashNotImplemented in CPython
 pub fn hash_not_implemented(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyHash> {
-    Err(vm.new_type_error(format!("unhashable type: '{}'", zelf.class().name())))
+    Err(vm.new_type_error(format!("unhashable type: '{}'", zelf.class().slot_name())))
 }
 
 fn call_wrapper(zelf: &PyObject, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-    vm.call_special_method(zelf, identifier!(vm, __call__), args)
+    // `__call__` can name the object being called, and dispatching it pushes no
+    // Python frame, so nothing else counts the nesting.
+    vm.with_recursion("while calling a Python object", || {
+        vm.call_special_method(zelf, identifier!(vm, __call__), args)
+    })
 }
 
 fn getattro_wrapper(zelf: &PyObject, name: &Py<PyStr>, vm: &VirtualMachine) -> PyResult {
@@ -564,7 +583,7 @@ fn iter_wrapper(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
     let iter_attr = cls.get_attr(identifier!(vm, __iter__));
     match iter_attr {
         Some(attr) if vm.is_none(&attr) => {
-            Err(vm.new_type_error(format!("'{}' object is not iterable", cls.name())))
+            Err(vm.new_type_error(format!("'{}' object is not iterable", cls.slot_name())))
         }
         _ => vm.call_special_method(&zelf, identifier!(vm, __iter__), ()),
     }
@@ -601,7 +620,11 @@ fn descr_get_wrapper(
     cls: Option<PyObjectRef>,
     vm: &VirtualMachine,
 ) -> PyResult {
-    vm.call_special_method(&zelf, identifier!(vm, __get__), (obj, cls))
+    // A descriptor whose `__get__` is the descriptor itself resolves it by
+    // fetching `__get__` again, and none of that pushes a Python frame.
+    vm.with_recursion("while calling a Python object", || {
+        vm.call_special_method(&zelf, identifier!(vm, __get__), (obj, cls))
+    })
 }
 
 fn descr_set_wrapper(
@@ -686,7 +709,7 @@ impl PyType {
             };
 
             // Skip if subclass has its own definition for this attribute
-            if subclass.attributes.read().contains_key(name) {
+            if subclass.attributes.contains(name) {
                 continue;
             }
 
@@ -757,9 +780,8 @@ impl PyType {
                     // methods (__setitem__ and __delitem__). If any of those methods
                     // is defined, we must use the wrapper to ensure Python method calls.
                     let has_own = {
-                        let guard = self.attributes.read();
                         // Check the current method name
-                        let mut result = guard.contains_key(name);
+                        let mut result = self.attributes.contains(name);
                         // For ass_item/ass_subscript slots, also check the paired method
                         // (__setitem__ and __delitem__ share the same slot)
                         if !result
@@ -768,7 +790,8 @@ impl PyType {
                         {
                             let setitem = ctx.intern_str("__setitem__");
                             let delitem = ctx.intern_str("__delitem__");
-                            result = guard.contains_key(setitem) || guard.contains_key(delitem);
+                            result = self.attributes.contains(setitem)
+                                || self.attributes.contains(delitem);
                         }
                         result
                     };
@@ -813,11 +836,11 @@ impl PyType {
             SlotAccessor::TpHash => {
                 // Special handling for __hash__ = None
                 if ADD {
-                    let method = self.attributes.read().get(name).cloned().or_else(|| {
+                    let method = self.attributes.get(name).or_else(|| {
                         self.mro
                             .read()
                             .iter()
-                            .find_map(|cls| cls.attributes.read().get(name).cloned())
+                            .find_map(|cls| cls.attributes.get(name))
                     });
 
                     if method.as_ref().is_some_and(|m| m.is(&ctx.none)) {
@@ -869,13 +892,13 @@ impl PyType {
                 // builtin __new__ entry (or no entry at all) means the slot
                 // is inherited from the solid base, matching update_one_slot's
                 // tp_new special case over the tp_base-inherited value.
-                let needs_wrapper = if ADD && self.attributes.read().contains_key(name) {
+                let needs_wrapper = if ADD && self.attributes.contains(name) {
                     true
                 } else {
                     // mro[0] is self, so skip it
                     self.mro.read()[1..]
                         .iter()
-                        .find(|cls| cls.attributes.read().contains_key(name))
+                        .find(|cls| cls.attributes.contains(name))
                         .is_some_and(|cls| {
                             cls.slots.new.load().map(|f| fn_addr(f))
                                 == Some(fn_addr(new_wrapper as NewFunc))
@@ -896,17 +919,14 @@ impl PyType {
                 // because the native slot won't call __getattr__.
                 let __getattr__ = identifier!(ctx, __getattr__);
                 let has_getattr = {
-                    let attrs = self.attributes.read();
-                    let in_self = attrs.contains_key(__getattr__);
-                    drop(attrs);
                     // mro[0] is self, so skip it
-                    in_self
+                    self.attributes.contains(__getattr__)
                         || self
                             .mro
                             .read()
                             .iter()
                             .skip(1)
-                            .any(|cls| cls.attributes.read().contains_key(__getattr__))
+                            .any(|cls| cls.attributes.contains(__getattr__))
                 };
 
                 if has_getattr {
@@ -1020,23 +1040,15 @@ impl PyType {
                     ];
 
                     let has_python_cmp = {
-                        // Check self first
-                        let attrs = self.attributes.read();
-                        let in_self = cmp_names.iter().any(|n| attrs.contains_key(*n));
-                        drop(attrs);
-
-                        // mro[0] is self, so skip it since we already checked self above
-                        in_self
+                        // Check self first, then the rest of the MRO
+                        cmp_names.iter().any(|n| self.attributes.contains(n))
                             || self.mro.read()[1..].iter().any(|cls| {
-                                let attrs = cls.attributes.read();
                                 cmp_names.iter().any(|n| {
-                                    if let Some(attr) = attrs.get(*n) {
+                                    cls.attributes.get(n).is_some_and(|attr| {
                                         // Check if it's a Python function (not a native descriptor)
                                         !attr.class().is(ctx.types.wrapper_descriptor_type)
                                             && !attr.class().is(ctx.types.method_descriptor_type)
-                                    } else {
-                                        false
-                                    }
+                                    })
                                 })
                             })
                     };
@@ -1492,10 +1504,9 @@ impl PyType {
                 // SqAssItem is shared by __setitem__ (SeqSetItem) and __delitem__ (SeqDelItem)
                 if ADD {
                     let has_own = {
-                        let guard = self.attributes.read();
                         let setitem = ctx.intern_str("__setitem__");
                         let delitem = ctx.intern_str("__delitem__");
-                        guard.contains_key(setitem) || guard.contains_key(delitem)
+                        self.attributes.contains(setitem) || self.attributes.contains(delitem)
                     };
                     if has_own {
                         self.slots
@@ -1545,10 +1556,9 @@ impl PyType {
                 // MpAssSubscript is shared by __setitem__ (MapSetSubscript) and __delitem__ (MapDelSubscript)
                 if ADD {
                     let has_own = {
-                        let guard = self.attributes.read();
                         let setitem = ctx.intern_str("__setitem__");
                         let delitem = ctx.intern_str("__delitem__");
-                        guard.contains_key(setitem) || guard.contains_key(delitem)
+                        self.attributes.contains(setitem) || self.attributes.contains(delitem)
                     };
                     if has_own {
                         self.slots
@@ -1572,6 +1582,58 @@ impl PyType {
                             SlotLookupResult::NotFound => {
                                 accessor.inherit_from_mro(self);
                             }
+                        }
+                    }
+                } else {
+                    accessor.inherit_from_mro(self);
+                }
+            }
+
+            // === Buffer protocol ===
+            SlotAccessor::BfGetBuffer => {
+                if ADD {
+                    match self.lookup_slot_in_mro(name, ctx, |sf| {
+                        if let SlotFunc::GetBuffer(f) = sf {
+                            Some(*f)
+                        } else {
+                            None
+                        }
+                    }) {
+                        SlotLookupResult::NativeSlot(func) => {
+                            self.slots.as_buffer.store(Some(func));
+                        }
+                        SlotLookupResult::PythonMethod => {
+                            self.slots.as_buffer.store(Some(python_as_buffer));
+                        }
+                        SlotLookupResult::NotFound => {
+                            accessor.inherit_from_mro(self);
+                        }
+                    }
+                } else {
+                    accessor.inherit_from_mro(self);
+                }
+            }
+            SlotAccessor::BfReleaseBuffer => {
+                // Which of the two implementations `__release_buffer__` resolves to
+                // decides whether buffer release has to call back into Python.
+                if ADD {
+                    match self.lookup_slot_in_mro(name, ctx, |sf| {
+                        if matches!(sf, SlotFunc::ReleaseBuffer) {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    }) {
+                        SlotLookupResult::NativeSlot(()) => {
+                            self.slots.python_release_buffer.store(false);
+                            self.slots.has_release_buffer.store(true);
+                        }
+                        SlotLookupResult::PythonMethod => {
+                            self.slots.python_release_buffer.store(true);
+                            self.slots.has_release_buffer.store(true);
+                        }
+                        SlotLookupResult::NotFound => {
+                            accessor.inherit_from_mro(self);
                         }
                     }
                 } else {
@@ -1619,7 +1681,7 @@ impl PyType {
         let mro = self.mro.read();
 
         // Look up in self's dict first
-        let attr_name = self.attributes.read().get(name).cloned();
+        let attr_name = self.attributes.get(name);
         if let Some(attr) = attr_name {
             if let Some(func) = try_extract(&attr, &mro) {
                 return SlotLookupResult::NativeSlot(func);
@@ -1629,7 +1691,7 @@ impl PyType {
 
         // Look up in MRO (mro[0] is self, so skip it)
         for (i, cls) in mro[1..].iter().enumerate() {
-            let attr_name = cls.attributes.read().get(name).cloned();
+            let attr_name = cls.attributes.get(name);
             if let Some(attr) = attr_name {
                 // Use the slice starting from this class in MRO
                 if let Some(func) = try_extract(&attr, &mro[i + 1..]) {
@@ -1674,7 +1736,9 @@ pub trait Constructor: PyPayload + core::fmt::Debug {
     #[inline]
     #[pyslot]
     fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        let args: Self::Args = args.bind(vm)?;
+        // The name is the type the slot was written for, not the subclass being
+        // constructed, so a subclass reports what its base declares.
+        let args: Self::Args = args.bind_for(vm, Callee::of::<Self>(vm))?;
         let payload = Self::py_new(&cls, args, vm)?;
         payload.into_ref_with_type(vm, cls).map(Into::into)
     }
@@ -1740,7 +1804,7 @@ pub trait Initializer: PyPayload {
                 return Err(err);
             }
         };
-        let args: Self::Args = args.bind(vm)?;
+        let args: Self::Args = args.bind_for(vm, Callee::of::<Self>(vm))?;
         Self::init(zelf, args, vm)
     }
 
@@ -1779,7 +1843,7 @@ pub trait Callable: PyPayload {
             msg.push_wtf8(&help);
             vm.new_type_error(msg)
         })?;
-        let args = args.bind(vm)?;
+        let args = args.bind_for(vm, Callee::of::<Self>(vm))?;
         Self::call(zelf, args, vm)
     }
 
@@ -1995,6 +2059,29 @@ impl PyComparisonOp {
         self.map_eq(|| a.borrow().is(b.borrow()))
     }
 
+    /// The answer to this comparison for two operands that `equal` reports as
+    /// equal or not, or `None` for an ordering operator, which equality alone
+    /// cannot settle -- `equal` is not called in that case.
+    ///
+    /// This is what lets a type answer `==` and `!=` with an equality test
+    /// rather than with an ordering: the two agree on the answer, but equality
+    /// can settle a length mismatch without looking at the contents at all.
+    ///
+    /// The two neighbouring helpers answer different questions: [`Self::map_eq`]
+    /// answers only where its predicate holds, so a caller still handles the
+    /// other side, and [`Self::eq_only`] declares the comparison
+    /// `NotImplemented` for an ordering operator. This one leaves the ordering
+    /// operators to the caller, which is what a type with a real ordering
+    /// needs.
+    #[inline]
+    pub fn eval_eq(self, equal: impl FnOnce() -> bool) -> Option<bool> {
+        match self {
+            Self::Eq => Some(equal()),
+            Self::Ne => Some(!equal()),
+            _ => None,
+        }
+    }
+
     /// Returns `Some(true)` when self is `Eq` and `f()` returns true. Returns `Some(false)` when self
     /// is `Ne` and `f()` returns true. Otherwise returns `None`.
     #[inline]
@@ -2047,14 +2134,29 @@ pub trait SetAttr: PyPayload {
 
 #[pyclass]
 pub trait AsBuffer: PyPayload {
-    // TODO: `flags` parameter
+    /// bf_releasebuffer: set when releasing an export of this type is observable,
+    /// i.e. the exporter counts exports. Such types expose `__release_buffer__`.
+    const RELEASE_BUFFER: bool = false;
+
     #[inline]
     #[pyslot]
-    fn slot_as_buffer(zelf: &PyObject, vm: &VirtualMachine) -> PyResult<PyBuffer> {
+    fn slot_as_buffer(
+        zelf: &PyObject,
+        flags: BufferFlags,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyBuffer> {
         let zelf = zelf
             .downcast_ref()
             .ok_or_else(|| vm.new_type_error("unexpected payload for as_buffer"))?;
-        Self::as_buffer(zelf, vm)
+        let buffer = Self::as_buffer(zelf, vm)?;
+        if let Err(exc) = flags.check_writable(buffer.desc.readonly, "Object is not writable.", vm)
+        {
+            // An acquisition that cannot be served never happened, so the
+            // exporter's release is undone without running the Python hook.
+            buffer.abort_acquisition();
+            return Err(exc);
+        }
+        Ok(buffer)
     }
 
     fn as_buffer(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyBuffer>;

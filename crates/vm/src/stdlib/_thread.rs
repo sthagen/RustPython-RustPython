@@ -484,16 +484,8 @@ pub(crate) mod _thread {
         }
 
         let given = f_args.args.len();
-        if given < 2 {
-            return Err(vm.new_type_error(format!(
-                "start_new_thread expected at least 2 arguments, got {given}"
-            )));
-        }
-
-        if given > 3 {
-            return Err(vm.new_type_error(format!(
-                "start_new_thread expected at most 3 arguments, got {given}"
-            )));
+        if !(2..=3).contains(&given) {
+            return Err(vm.new_arity_type_error("start_new_thread", 2..=3, given));
         }
 
         let func_obj = f_args.take_positional().unwrap();
@@ -531,6 +523,11 @@ pub(crate) mod _thread {
             vm,
         )?;
 
+        if !vm.state.allow_threads() {
+            return Err(vm.new_runtime_error(
+                "thread is not supported for isolated subinterpreters".to_owned(),
+            ));
+        }
         if vm
             .state
             .finalizing
@@ -547,7 +544,12 @@ pub(crate) mod _thread {
         let args = FuncArgs::new(
             args.to_vec(),
             kwargs
-                .map_or_else(Default::default, |k| k.to_attributes(vm))
+                .map_or_else(
+                    || Ok(Default::default()),
+                    |k| {
+                        k.to_attributes(vm, |vm| Err(vm.new_type_error("keywords must be strings")))
+                    },
+                )?
                 .into_iter()
                 .map(|(k, v)| (k.as_str().to_owned(), v))
                 .collect::<KwArgs>(),
@@ -616,25 +618,32 @@ pub(crate) mod _thread {
     const DEFAULT_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 
     /// Configure a `thread::Builder` with the stack size to use for a new
-    /// Python thread. Uses the value set via `threading.stack_size(N)` when
-    /// the user has provided one (non-zero). Otherwise, debug builds fall
-    /// back to [`DEFAULT_THREAD_STACK_SIZE`] and release builds leave the
-    /// builder unmodified (Rust's std default applies).
+    /// Python thread. Release builds use the value set via
+    /// `threading.stack_size(N)` when the user has provided one (non-zero) and
+    /// otherwise leave the builder unmodified (Rust's std default applies).
+    ///
+    /// Debug builds take [`DEFAULT_THREAD_STACK_SIZE`] as a floor rather than
+    /// only as a default: an unoptimized `ExecutingFrame::run` reserves around
+    /// eighty kilobytes of stack where an optimized one reserves under a
+    /// thousand, so a size that holds a Python call chain in release holds
+    /// three of its frames here — starting a thread at all needs six. The
+    /// value `threading.stack_size()` reports is untouched.
     fn apply_thread_stack_size(
         thread_builder: thread::Builder,
         vm: &VirtualMachine,
     ) -> thread::Builder {
         let configured = vm.state.stacksize.load();
-        if configured != 0 {
-            return thread_builder.stack_size(configured);
-        }
         #[cfg(debug_assertions)]
         {
-            thread_builder.stack_size(DEFAULT_THREAD_STACK_SIZE)
+            thread_builder.stack_size(configured.max(DEFAULT_THREAD_STACK_SIZE))
         }
         #[cfg(not(debug_assertions))]
         {
-            thread_builder
+            if configured == 0 {
+                thread_builder
+            } else {
+                thread_builder.stack_size(configured)
+            }
         }
     }
 
@@ -689,9 +698,8 @@ pub(crate) mod _thread {
     }
 
     #[pyfunction]
-    fn daemon_threads_allowed() -> bool {
-        // RustPython always allows daemon threads
-        true
+    fn daemon_threads_allowed(vm: &VirtualMachine) -> bool {
+        vm.state.allow_daemon_threads()
     }
 
     // Registry for non-daemon threads that need to be joined at shutdown
@@ -796,9 +804,8 @@ pub(crate) mod _thread {
     }
 
     #[pyfunction]
-    fn _is_main_interpreter() -> bool {
-        // RustPython only has one interpreter
-        true
+    fn _is_main_interpreter(vm: &VirtualMachine) -> bool {
+        vm.state.is_main_interpreter()
     }
 
     /// Initialize the main thread ident. Should be called once at interpreter startup.
@@ -1194,8 +1201,8 @@ pub(crate) mod _thread {
         {
             use core::sync::atomic::Ordering;
             let current_ident = get_ident();
-            vm.state.stop_the_world.stop_the_world(vm);
-            scopeguard::defer! { vm.state.stop_the_world.start_the_world(vm); }
+            vm.state.stop_the_world.stop_the_world(&vm.state);
+            scopeguard::defer! { vm.state.stop_the_world.start_the_world(&vm.state); }
             let registry = vm.state.thread_frames.lock();
             registry
                 .iter()
@@ -1208,9 +1215,9 @@ pub(crate) mod _thread {
                         // fall back to top_iframe (may be a stack-allocated frame).
                         let top = slot.top_frame.load(Ordering::Relaxed);
                         if let Some(p) = core::ptr::NonNull::new(top) {
-                            let py = unsafe {
-                                &*Py::<crate::frame::FrameObject>::from_payload_ptr(p.as_ptr())
-                            };
+                            // SAFETY: world stopped -> the owning thread is parked
+                            // with this frame on its chain, so it is alive.
+                            let py = unsafe { p.as_ref() };
                             Some((*id, py.to_owned()))
                         } else {
                             // Stack-allocated frame: materialize from top_iframe.
@@ -1218,26 +1225,10 @@ pub(crate) mod _thread {
                             let iframe_ptr = slot.top_iframe.load(Ordering::Relaxed)
                                 as *const crate::frame::InterpreterFrame;
                             if !iframe_ptr.is_null() {
-                                // Materialize the entire frame chain and link
-                                // retained_back so f_back works after STW ends.
-                                let mut cur = iframe_ptr;
-                                let mut child_fo: Option<crate::PyRef<crate::frame::FrameObject>> =
-                                    None;
-                                while !cur.is_null() {
-                                    let iframe = unsafe { &*cur };
-                                    let fo = iframe.materialize(vm).to_owned();
-                                    if let Some(child) = child_fo.take() {
-                                        let mut guard = child.iframe().cold().retained_back.lock();
-                                        if guard.is_none() {
-                                            *guard = Some(fo.clone());
-                                        }
-                                    }
-                                    child_fo = Some(fo);
-                                    cur = iframe.previous();
-                                }
                                 let iframe = unsafe { &*iframe_ptr };
-                                let fo = iframe.materialize(vm);
-                                Some((*id, fo.to_owned()))
+                                // SAFETY: world stopped -> owning thread parked.
+                                let fo = unsafe { iframe.materialize_detached_chain(vm) };
+                                Some((*id, fo))
                             } else {
                                 None
                             }
@@ -1250,8 +1241,8 @@ pub(crate) mod _thread {
         {
             use core::sync::atomic::Ordering;
             let current_ident = get_ident();
-            vm.state.stop_the_world.stop_the_world(vm);
-            scopeguard::defer! { vm.state.stop_the_world.start_the_world(vm); }
+            vm.state.stop_the_world.stop_the_world(&vm.state);
+            scopeguard::defer! { vm.state.stop_the_world.start_the_world(&vm.state); }
             let registry = vm.state.thread_frames.lock();
             registry
                 .iter()
@@ -1267,24 +1258,10 @@ pub(crate) mod _thread {
                         let iframe_ptr = slot.top_iframe.load(Ordering::Relaxed)
                             as *const crate::frame::InterpreterFrame;
                         if !iframe_ptr.is_null() {
-                            let mut cur = iframe_ptr;
-                            let mut child_fo: Option<crate::PyRef<crate::frame::FrameObject>> =
-                                None;
-                            while !cur.is_null() {
-                                let iframe = unsafe { &*cur };
-                                let fo = iframe.materialize(vm).to_owned();
-                                if let Some(child) = child_fo.take() {
-                                    let mut guard = child.iframe().cold().retained_back.lock();
-                                    if guard.is_none() {
-                                        *guard = Some(fo.clone());
-                                    }
-                                }
-                                child_fo = Some(fo);
-                                cur = iframe.previous();
-                            }
                             let iframe = unsafe { &*iframe_ptr };
-                            let fo = iframe.materialize(vm);
-                            Some((*id, fo.to_owned()))
+                            // SAFETY: world stopped -> owning thread parked.
+                            let fo = unsafe { iframe.materialize_detached_chain(vm) };
+                            Some((*id, fo))
                         } else {
                             // Fall back to frames stack for FrameObject-only path
                             let frames = slot.frames.lock();
@@ -1386,6 +1363,19 @@ pub(crate) mod _thread {
         }
     }
 
+    /// Take a thread handle's completion mutex, detaching first.
+    ///
+    /// A joiner holds this mutex across its `allow_threads` wait, so it can
+    /// still hold it when stop-the-world stops it. An attached thread that
+    /// blocked on it would never reach a safepoint, so the stop could never
+    /// complete and the holder would never be resumed to release it.
+    fn lock_done<'a>(
+        lock: &'a parking_lot::Mutex<bool>,
+        vm: &VirtualMachine,
+    ) -> parking_lot::MutexGuard<'a, bool> {
+        vm.allow_threads(|| lock.lock())
+    }
+
     /// Reset a parking_lot::Mutex to unlocked state after fork.
     #[cfg(all(unix, feature = "host_env"))]
     fn reinit_parking_lot_mutex<T: ?Sized>(mutex: &parking_lot::Mutex<T>) {
@@ -1468,7 +1458,7 @@ pub(crate) mod _thread {
             // Wait for thread completion using Condvar (supports timeout)
             // Loop to handle spurious wakeups
             let (lock, cvar) = &**done_event;
-            let mut done = lock.lock();
+            let mut done = lock_done(lock, vm);
 
             // ThreadHandle_join semantics: self-join/finalizing checks
             // apply only while target thread has not reported it is exiting yet.
@@ -1528,7 +1518,7 @@ pub(crate) mod _thread {
                     drop(inner_guard);
                     // Wait on done_event
                     let (lock, cvar) = &**done_event;
-                    let mut done = lock.lock();
+                    let mut done = lock_done(lock, vm);
                     while !*done {
                         vm.allow_threads(|| cvar.wait(&mut done));
                     }
@@ -1590,7 +1580,7 @@ pub(crate) mod _thread {
             remove_from_shutdown_handles(vm, inner, done_event);
 
             let (lock, cvar) = &**done_event;
-            *lock.lock() = true;
+            *lock_done(lock, vm) = true;
             cvar.notify_all();
             Ok(())
         }
@@ -1660,7 +1650,7 @@ pub(crate) mod _thread {
             // before returning True.
             let done = {
                 let (lock, _) = &*self.done_event;
-                *lock.lock()
+                *lock_done(lock, vm)
             };
             if !done {
                 return Ok(false);
@@ -1823,6 +1813,11 @@ pub(crate) mod _thread {
             vm,
         )?;
 
+        if !vm.state.allow_threads() {
+            return Err(vm.new_runtime_error(
+                "thread is not supported for isolated subinterpreters".to_owned(),
+            ));
+        }
         if vm
             .state
             .finalizing
@@ -1856,7 +1851,7 @@ pub(crate) mod _thread {
         // Starting a handle always resets the completion event.
         {
             let (done_lock, _) = &*handle.done_event;
-            *done_lock.lock() = false;
+            *lock_done(done_lock, vm) = false;
         }
 
         // Add non-daemon threads to shutdown registry so _shutdown() will wait for them
@@ -1938,7 +1933,7 @@ pub(crate) mod _thread {
                     // This must be LAST to ensure all cleanup is complete before join() returns
                     {
                         let (lock, cvar) = &*done_event_for_cleanup;
-                        *lock.lock() = true;
+                        *lock_done(lock, vm) = true;
                         cvar.notify_all();
                     }
                 }
@@ -1973,7 +1968,7 @@ pub(crate) mod _thread {
                 }
                 {
                     let (done_lock, done_cvar) = &*handle.done_event;
-                    *done_lock.lock() = true;
+                    *lock_done(done_lock, vm) = true;
                     done_cvar.notify_all();
                 }
                 if !daemon {
@@ -2044,6 +2039,31 @@ pub(crate) mod _thread {
                     stack_size >= DEFAULT_THREAD_STACK_SIZE,
                     "Python thread stack size is {stack_size} bytes, expected at least {DEFAULT_THREAD_STACK_SIZE}"
                 );
+            });
+        }
+
+        /// A size small enough for CPython's frames is not small enough for an
+        /// unoptimized build's: `test_threading` asks for 256 KiB, which holds
+        /// three of them where starting a thread needs six. The size the
+        /// request set is still what `threading.stack_size()` answers with.
+        #[test]
+        #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "macos")))]
+        fn explicit_python_thread_stack_size_is_a_floor_debug() {
+            const REQUESTED: usize = 256 * 1024;
+
+            Interpreter::without_stdlib(Default::default()).enter(|vm| {
+                vm.state.stacksize.store(REQUESTED);
+                let builder = apply_thread_stack_size(thread::Builder::new(), vm);
+                let stack_size = builder
+                    .spawn(current_thread_stack_size)
+                    .expect("failed to spawn thread")
+                    .join()
+                    .expect("thread panicked");
+                assert!(
+                    stack_size >= DEFAULT_THREAD_STACK_SIZE,
+                    "Python thread stack size is {stack_size} bytes, expected at least {DEFAULT_THREAD_STACK_SIZE}"
+                );
+                assert_eq!(vm.state.stacksize.load(), REQUESTED);
             });
         }
 

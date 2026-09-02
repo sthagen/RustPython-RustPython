@@ -1,7 +1,6 @@
 use super::base::{CDATA_BUFFER_METHODS, StgInfoFlags};
 use super::{PyCData, PyCField, StgInfo};
 use crate::builtins::{PyList, PyStr, PyTuple, PyType, PyTypeRef, PyUtf8Str};
-use crate::common::wtf8::Wtf8Buf;
 use crate::convert::ToPyObject;
 use crate::function::{ArgBytesLike, FuncArgs, OptionalArg, PySetterValue};
 use crate::protocol::{BufferDescriptor, PyBuffer};
@@ -513,13 +512,10 @@ impl SetAttr for PyCUnionType {
         // Store in type's attributes dict
         match &value {
             PySetterValue::Assign(v) => {
-                pytype
-                    .attributes
-                    .write()
-                    .insert(attr_name_interned, v.clone());
+                pytype.attributes.set(attr_name_interned, v.clone());
             }
             PySetterValue::Delete => {
-                let prev = pytype.attributes.write().shift_remove(attr_name_interned);
+                let prev = pytype.attributes.remove(attr_name_interned);
                 if prev.is_none() {
                     return Err(vm.new_attribute_error(format!(
                         "type object '{}' has no attribute '{}'",
@@ -582,7 +578,7 @@ impl PyCUnion {
         self_obj: &Py<Self>,
         type_obj: &Py<PyType>,
         args: &[PyObjectRef],
-        kwargs: &indexmap::IndexMap<Wtf8Buf, PyObjectRef>,
+        kwargs: &crate::function::KwArgsMap<PyObjectRef>,
         index: usize,
         vm: &VirtualMachine,
     ) -> PyResult<usize> {
@@ -686,6 +682,7 @@ impl AsBuffer for PyCUnion {
         let buf = PyBuffer::new(
             zelf.to_owned().into(),
             BufferDescriptor {
+                offset: 0,
                 len: buffer_len,
                 readonly: false,
                 itemsize: buffer_len,

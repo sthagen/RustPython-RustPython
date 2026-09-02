@@ -15,7 +15,6 @@ mod _functools {
         recursion::ReprGuard,
         types::{Callable, Constructor, GetDescriptor, Representable},
     };
-    use indexmap::IndexMap;
     use rustpython_common::wtf8::Wtf8Buf;
 
     #[derive(FromArgs)]
@@ -33,7 +32,7 @@ mod _functools {
             iterator,
             initial,
         } = args;
-        let mut iter = iterator.iter_without_hint(vm)?;
+        let mut iter = iterator.iter(vm)?;
         // OptionalOption distinguishes between:
         // - Missing: no argument provided → use first element from iterator
         // - Present(None): explicitly passed None → use None as initial value
@@ -432,7 +431,7 @@ mod _functools {
             combined_args.extend(new_args_iter.cloned());
 
             // Merge keywords from self.keywords and args.kwargs
-            let mut final_kwargs = IndexMap::new();
+            let mut final_kwargs = crate::function::KwArgsMap::default();
 
             // Add keywords from self.keywords
             for (key, value) in &*keywords {

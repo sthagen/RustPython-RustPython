@@ -54,10 +54,7 @@ pub struct Context {
     pub(crate) string_pool: StringPool,
     pub(crate) slot_new_wrapper: PyMethodDef,
     pub names: ConstName,
-
     // GC module state (callbacks and garbage lists)
-    pub gc_callbacks: PyListRef,
-    pub gc_garbage: PyListRef,
 }
 
 macro_rules! declare_const_name {
@@ -106,6 +103,7 @@ declare_const_name! {
     __await__,
     __bases__,
     __bool__,
+    __buffer__,
     __build_class__,
     __builtins__,
     __bytes__,
@@ -208,6 +206,7 @@ declare_const_name! {
     __rdivmod__,
     __reduce__,
     __reduce_ex__,
+    __release_buffer__,
     __repr__,
     __reversed__,
     __rfloordiv__,
@@ -304,7 +303,7 @@ impl Context {
 
     fn init_genesis() -> Self {
         flame_guard!("init Context");
-        let types = TypeZoo::init();
+        let (types, empty_tuple) = TypeZoo::init();
         let exceptions = exceptions::ExceptionZoo::init();
 
         #[inline]
@@ -331,8 +330,17 @@ impl Context {
             })
             .collect();
 
+        let string_pool = StringPool::default();
+
+        // The one-character latin-1 strings are interned, so that every route
+        // to one of them lands on the same object.
         let latin1_char_cache = (u8::MIN..=u8::MAX)
-            .map(|b| create_object(PyStr::from(char::from(b)), types.str_type))
+            .map(|b| {
+                let s = unsafe {
+                    string_pool.intern(char::from(b).to_string(), types.str_type.to_owned())
+                };
+                s.to_owned()
+            })
             .collect::<Vec<PyRef<PyStr>>>();
 
         let ascii_char_cache = latin1_char_cache[..128].to_vec();
@@ -340,17 +348,12 @@ impl Context {
         let true_value = create_object(PyBool(PyInt::from(1)), types.bool_type);
         let false_value = create_object(PyBool(PyInt::from(0)), types.bool_type);
 
-        let empty_tuple = create_object(
-            PyTuple::new_unchecked(Vec::new().into_boxed_slice()),
-            types.tuple_type,
-        );
         let empty_frozenset = PyRef::new_ref(
             PyFrozenSet::default(),
             types.frozenset_type.to_owned(),
             None,
         );
 
-        let string_pool = StringPool::default();
         let names = unsafe { ConstName::new(&string_pool, types.str_type) };
 
         let slot_new_wrapper = PyMethodDef::new_const(
@@ -363,8 +366,6 @@ impl Context {
         let empty_bytes = create_object(PyBytes::from(Vec::new()), types.bytes_type);
 
         // GC callbacks and garbage lists
-        let gc_callbacks = PyRef::new_ref(PyList::default(), types.list_type.to_owned(), None);
-        let gc_garbage = PyRef::new_ref(PyList::default(), types.list_type.to_owned(), None);
 
         Self {
             true_value,
@@ -387,9 +388,6 @@ impl Context {
             string_pool,
             slot_new_wrapper,
             names,
-
-            gc_callbacks,
-            gc_garbage,
         }
     }
 
@@ -440,6 +438,14 @@ impl Context {
             return self.int_cache_pool[inner_idx].clone();
         }
         PyInt::from(i).into_ref(self)
+    }
+
+    /// Borrow a cached small integer whose lifetime is tied to this context.
+    #[inline(always)]
+    pub(crate) fn cached_int(&self, i: i32) -> &PyIntRef {
+        debug_assert!(Self::INT_CACHE_POOL_RANGE.contains(&i));
+        let inner_idx = (i - Self::INT_CACHE_POOL_MIN) as usize;
+        &self.int_cache_pool[inner_idx]
     }
 
     #[inline]
@@ -670,11 +676,7 @@ impl Context {
     }
 
     /// Creates a new [`PyGetSet`] with a heap type.
-    ///
-    /// # Safety
-    /// In practice, this constructor is safe because a getset is always owned by its `class` type.
-    /// However, it can be broken if used unconventionally.
-    pub unsafe fn new_getset<G, S, T, U>(
+    pub fn new_getset<G, S, T, U>(
         &self,
         name: &str,
         class: &Py<PyType>,
@@ -685,8 +687,8 @@ impl Context {
         G: IntoPyGetterFunc<T>,
         S: IntoPySetterFunc<U>,
     {
-        let class = unsafe { &*(class as *const _) };
-        self.new_static_getset(name, class, g, s)
+        let getset = PyGetSet::new(name, class).with_get(g).with_set(s);
+        PyRef::new_ref(getset, self.types.getset_type.to_owned(), None)
     }
 
     pub fn new_base_object(&self, class: PyTypeRef, dict: Option<PyDictRef>) -> PyObjectRef {

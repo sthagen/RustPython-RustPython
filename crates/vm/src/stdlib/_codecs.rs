@@ -381,6 +381,24 @@ mod _codecs_windows {
     use crate::{PyResult, VirtualMachine};
     use crate::{builtins::PyStrRef, builtins::PyUtf8StrRef, function::ArgBytesLike};
     use rustpython_host_env::windows as host_windows;
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+
+    fn string_from_utf16(
+        encoding: &str,
+        data: &[u8],
+        wide: &[u16],
+        vm: &VirtualMachine,
+    ) -> PyResult<String> {
+        String::from_utf16(wide).map_err(|err| {
+            vm.new_unicode_decode_error(
+                vm.ctx.new_str(encoding),
+                vm.ctx.new_bytes(data.to_vec()),
+                0,
+                data.len(),
+                vm.ctx.new_str(format!("{encoding}_decode failed: {err}")),
+            )
+        })
+    }
 
     #[derive(FromArgs)]
     struct MbcsEncodeArgs {
@@ -392,16 +410,12 @@ mod _codecs_windows {
 
     #[pyfunction]
     fn mbcs_encode(args: MbcsEncodeArgs, vm: &VirtualMachine) -> PyResult<(Vec<u8>, usize)> {
-        use crate::host_env::windows::ToWideString;
-
         let errors = args.errors.as_ref().map_or("strict", |s| s.as_str());
         let s = match args.s.to_str() {
             Some(s) => s,
             None => {
                 // String contains surrogates - not encodable with mbcs
-                return Err(vm.new_unicode_encode_error(
-                    "'mbcs' codec can't encode character: surrogates not allowed",
-                ));
+                return encode_code_page_errors(host_windows::CP_ACP, &args.s, errors, "mbcs", vm);
             }
         };
         let char_len = args.s.char_len();
@@ -411,7 +425,7 @@ mod _codecs_windows {
         }
 
         // Convert UTF-8 string to UTF-16
-        let wide: Vec<u16> = std::ffi::OsStr::new(s).to_wide();
+        let wide: Vec<_> = OsStr::new(s).encode_wide().collect();
 
         // Get the required buffer size
         let (size, _) = host_windows::wide_char_to_multi_byte_len(
@@ -433,9 +447,7 @@ mod _codecs_windows {
         .map_err(|err| vm.new_os_error(format!("mbcs_encode failed: {err}")))?;
 
         if errors == "strict" && used_default_char {
-            return Err(vm.new_unicode_encode_error(
-                "'mbcs' codec can't encode characters: invalid character",
-            ));
+            return encode_code_page_errors(host_windows::CP_ACP, &args.s, errors, "mbcs", vm);
         }
 
         buffer.truncate(result);
@@ -484,8 +496,7 @@ mod _codecs_windows {
             )
             .map_err(|err| vm.new_os_error(format!("mbcs_decode failed: {err}")))?;
             buffer.truncate(result);
-            let s = String::from_utf16(&buffer)
-                .map_err(|e| vm.new_unicode_decode_error(format!("mbcs_decode failed: {e}")))?;
+            let s = string_from_utf16("mbcs", data.as_ref(), &buffer, vm)?;
             return Ok((s, len));
         }
 
@@ -500,8 +511,7 @@ mod _codecs_windows {
         )
         .map_err(|err| vm.new_os_error(format!("mbcs_decode failed: {err}")))?;
         buffer.truncate(result);
-        let s = String::from_utf16(&buffer)
-            .map_err(|e| vm.new_unicode_decode_error(format!("mbcs_decode failed: {e}")))?;
+        let s = string_from_utf16("mbcs", data.as_ref(), &buffer, vm)?;
 
         Ok((s, len))
     }
@@ -516,16 +526,12 @@ mod _codecs_windows {
 
     #[pyfunction]
     fn oem_encode(args: OemEncodeArgs, vm: &VirtualMachine) -> PyResult<(Vec<u8>, usize)> {
-        use crate::host_env::windows::ToWideString;
-
         let errors = args.errors.as_ref().map_or("strict", |s| s.as_str());
         let s = match args.s.to_str() {
             Some(s) => s,
             None => {
                 // String contains surrogates - not encodable with oem
-                return Err(vm.new_unicode_encode_error(
-                    "'oem' codec can't encode character: surrogates not allowed",
-                ));
+                return encode_code_page_errors(host_windows::CP_OEMCP, &args.s, errors, "oem", vm);
             }
         };
         let char_len = args.s.char_len();
@@ -535,7 +541,7 @@ mod _codecs_windows {
         }
 
         // Convert UTF-8 string to UTF-16
-        let wide: Vec<u16> = std::ffi::OsStr::new(s).to_wide();
+        let wide: Vec<_> = OsStr::new(s).encode_wide().collect();
 
         // Get the required buffer size
         let (size, _) = host_windows::wide_char_to_multi_byte_len(
@@ -557,9 +563,7 @@ mod _codecs_windows {
         .map_err(|err| vm.new_os_error(format!("oem_encode failed: {err}")))?;
 
         if errors == "strict" && used_default_char {
-            return Err(vm.new_unicode_encode_error(
-                "'oem' codec can't encode characters: invalid character",
-            ));
+            return encode_code_page_errors(host_windows::CP_OEMCP, &args.s, errors, "oem", vm);
         }
 
         buffer.truncate(result);
@@ -609,8 +613,7 @@ mod _codecs_windows {
             )
             .map_err(|err| vm.new_os_error(format!("oem_decode failed: {err}")))?;
             buffer.truncate(result);
-            let s = String::from_utf16(&buffer)
-                .map_err(|e| vm.new_unicode_decode_error(format!("oem_decode failed: {e}")))?;
+            let s = string_from_utf16("oem", data.as_ref(), &buffer, vm)?;
             return Ok((s, len));
         }
 
@@ -625,8 +628,7 @@ mod _codecs_windows {
         )
         .map_err(|err| vm.new_os_error(format!("oem_decode failed: {err}")))?;
         buffer.truncate(result);
-        let s = String::from_utf16(&buffer)
-            .map_err(|e| vm.new_unicode_decode_error(format!("oem_decode failed: {e}")))?;
+        let s = string_from_utf16("oem", data.as_ref(), &buffer, vm)?;
 
         Ok((s, len))
     }
@@ -879,8 +881,6 @@ mod _codecs_windows {
         args: CodePageEncodeArgs,
         vm: &VirtualMachine,
     ) -> PyResult<(Vec<u8>, usize)> {
-        use crate::host_env::windows::ToWideString;
-
         if args.code_page < 0 {
             return Err(vm.new_value_error("invalid code page number"));
         }
@@ -897,7 +897,7 @@ mod _codecs_windows {
 
         // Fast path: try encoding the whole string at once (only if no surrogates)
         if let Some(str_data) = args.s.to_str() {
-            let wide: Vec<u16> = std::ffi::OsStr::new(str_data).to_wide();
+            let wide: Vec<_> = OsStr::new(str_data).encode_wide().collect();
             if let Some(result) = try_encode_code_page_strict(code_page, &wide, vm)? {
                 return Ok((result, char_len));
             }
@@ -1024,7 +1024,7 @@ mod _codecs_windows {
                 }
             }
             let object = vm.ctx.new_bytes(data.to_vec());
-            return Err(vm.new_unicode_decode_error_real(
+            return Err(vm.new_unicode_decode_error(
                 encoding_str,
                 object,
                 fail_pos,
@@ -1115,7 +1115,7 @@ mod _codecs_windows {
                     }
                     "strict" => {
                         let object = vm.ctx.new_bytes(data.to_vec());
-                        return Err(vm.new_unicode_decode_error_real(
+                        return Err(vm.new_unicode_decode_error(
                             encoding_str,
                             object,
                             pos,
@@ -1126,7 +1126,7 @@ mod _codecs_windows {
                     _ => {
                         // Custom error handler
                         let object = vm.ctx.new_bytes(data.to_vec());
-                        let exc = vm.new_unicode_decode_error_real(
+                        let exc = vm.new_unicode_decode_error(
                             encoding_str.clone(),
                             object,
                             pos,

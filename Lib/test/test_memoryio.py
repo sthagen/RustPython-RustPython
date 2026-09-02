@@ -587,7 +587,6 @@ class PyBytesIOTest(MemoryTestMixin, MemorySeekTestMixin, unittest.TestCase):
         self.ioclass(initial_bytes=buf)
         self.assertRaises(TypeError, self.ioclass, buf, foo=None)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; TypeError: a bytes-like object is required, not 'B'
     def test_write_concurrent_close(self):
         class B:
             def __buffer__(self, flags):
@@ -601,7 +600,6 @@ class PyBytesIOTest(MemoryTestMixin, MemorySeekTestMixin, unittest.TestCase):
     # concurrently mutates (e.g., closes or exports) 'memio'.
     # See: https://github.com/python/cpython/issues/143378.
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; TypeError: a bytes-like object is required, not 'B'
     def test_writelines_concurrent_close(self):
         class B:
             def __buffer__(self, flags):
@@ -611,7 +609,6 @@ class PyBytesIOTest(MemoryTestMixin, MemorySeekTestMixin, unittest.TestCase):
         memio = self.ioclass()
         self.assertRaises(ValueError, memio.writelines, [B()])
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; TypeError: a bytes-like object is required, not 'B'
     def test_write_concurrent_export(self):
         class B:
             buf = None
@@ -622,7 +619,6 @@ class PyBytesIOTest(MemoryTestMixin, MemorySeekTestMixin, unittest.TestCase):
         memio = self.ioclass()
         self.assertRaises(BufferError, memio.write, B())
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; TypeError: a bytes-like object is required, not 'B'
     def test_writelines_concurrent_export(self):
         class B:
             buf = None
@@ -633,7 +629,6 @@ class PyBytesIOTest(MemoryTestMixin, MemorySeekTestMixin, unittest.TestCase):
         memio = self.ioclass()
         self.assertRaises(BufferError, memio.writelines, [B()])
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; TypeError: a bytes-like object is required, not 'B'
     def test_write_mutating_buffer(self):
         # Test that buffer is exported only once during write().
         # See: https://github.com/python/cpython/issues/143602.
@@ -874,7 +869,10 @@ class CBytesIOTest(PyBytesIOTest):
 
     @support.cpython_only
     def test_sizeof(self):
-        basesize = support.calcobjsize('P2n2Pn')
+        if support.Py_GIL_DISABLED:
+            basesize = support.calcobjsize('P2n2Pni')
+        else:
+            basesize = support.calcobjsize('P2n2Pn')
         check = self.check_sizeof
         self.assertEqual(object.__sizeof__(io.BytesIO()), basesize)
         check(io.BytesIO(), basesize )
@@ -929,10 +927,6 @@ class CBytesIOTest(PyBytesIOTest):
     @unittest.expectedFailure  # TODO: RUSTPYTHON; AssertionError: ValueError not raised by writable
     def test_flags(self):
         return super().test_flags()
-
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AssertionError: ValueError not raised by write
-    def test_write(self):
-        return super().test_write()
 
 class CStringIOTest(PyStringIOTest):
     ioclass = io.StringIO
@@ -1004,9 +998,6 @@ class CStringIOTest(PyStringIOTest):
     def test_flags(self):
         return super().test_flags()
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AttributeError: 'StringIO' object has no attribute 'newlines'. Did you mean: 'readlines'?
-    def test_newlines_property(self):
-        return super().test_newlines_property()
 
 class CStringIOPickleTest(PyStringIOPickleTest):
     UnsupportedOperation = io.UnsupportedOperation
@@ -1017,9 +1008,6 @@ class CStringIOPickleTest(PyStringIOPickleTest):
         def __init__(self, *args, **kwargs):
             pass
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AttributeError: 'StringIO' object has no attribute 'newlines'. Did you mean: 'readlines'?
-    def test_newlines_property(self):
-        return super().test_newlines_property()
 
 if __name__ == '__main__':
     unittest.main()

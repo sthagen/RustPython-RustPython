@@ -1,6 +1,5 @@
 use super::base::{CDATA_BUFFER_METHODS, PyCData, PyCField, StgInfo, StgInfoFlags};
 use crate::builtins::{PyList, PyStr, PyTuple, PyType, PyTypeRef, PyUtf8Str};
-use crate::common::wtf8::Wtf8Buf;
 use crate::convert::ToPyObject;
 use crate::function::{FuncArgs, OptionalArg, PySetterValue};
 use crate::protocol::{BufferDescriptor, PyBuffer, PyNumberMethods};
@@ -627,7 +626,6 @@ impl SetAttr for PyCStructType {
             // Set the _fields_ attribute on the type
             pytype
                 .attributes
-                .write()
                 .insert(vm.ctx.intern_str("_fields_"), fields_value);
             return Ok(());
         }
@@ -645,9 +643,9 @@ impl SetAttr for PyCStructType {
 
         // Store in type's attributes dict
         if let PySetterValue::Assign(value) = value {
-            pytype.attributes.write().insert(attr_name_interned, value);
+            pytype.attributes.set(attr_name_interned, value);
         } else {
-            let prev = pytype.attributes.write().shift_remove(attr_name_interned);
+            let prev = pytype.attributes.remove(attr_name_interned);
             if prev.is_none() {
                 return Err(vm.new_attribute_error(format!(
                     "type object '{}' has no attribute '{}'",
@@ -713,7 +711,7 @@ impl PyCStructure {
         self_obj: &Py<Self>,
         type_obj: &Py<PyType>,
         args: &[PyObjectRef],
-        kwargs: &indexmap::IndexMap<Wtf8Buf, PyObjectRef>,
+        kwargs: &crate::function::KwArgsMap<PyObjectRef>,
         index: usize,
         vm: &VirtualMachine,
     ) -> PyResult<usize> {
@@ -823,6 +821,7 @@ impl AsBuffer for PyCStructure {
         let buf = PyBuffer::new(
             zelf.to_owned().into(),
             BufferDescriptor {
+                offset: 0,
                 len: buffer_len,
                 readonly: false,
                 itemsize: buffer_len,

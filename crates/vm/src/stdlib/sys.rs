@@ -669,7 +669,8 @@ pub mod sys {
             "_multiarch" => ctx.new_str(multiarch()),
             "version" => PyVersionInfo::from_data(VersionInfoData::IMPLEMENTATION, vm),
             "hexversion" => ctx.new_int(version::VERSION_HEX_IMPL),
-            "supports_isolated_interpreters" => ctx.new_bool(false),
+            "supports_isolated_interpreters" =>
+                ctx.new_bool(crate::vm::runtime::SUPPORTS_ISOLATED_INTERPRETERS),
         })
     }
 
@@ -1332,15 +1333,11 @@ pub mod sys {
             return Err(vm.new_type_error("argument is immutable"));
         }
 
-        let mut attributes = type_obj.attributes.write();
-
         // Remove __dict__ descriptor if present
-        attributes.swap_remove(identifier!(vm, __dict__));
+        type_obj.attributes.remove(identifier!(vm, __dict__));
 
         // Remove __weakref__ descriptor if present
-        attributes.swap_remove(identifier!(vm, __weakref__));
-
-        drop(attributes);
+        type_obj.attributes.remove(identifier!(vm, __weakref__));
 
         // Update slots to notify subclasses and recalculate cached values
         type_obj.update_slot::<true>(identifier!(vm, __dict__), &vm.ctx);

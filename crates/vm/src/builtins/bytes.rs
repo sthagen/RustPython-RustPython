@@ -1,27 +1,26 @@
 use super::{
-    PositionIterInternal, PyDictRef, PyGenericAlias, PyIntRef, PyStrRef, PyTuple, PyTupleRef,
-    PyType, PyTypeRef, iter::builtins_iter,
+    PositionIterInternal, PyDictRef, PyGenericAlias, PyStrRef, PyTuple, PyTupleRef, PyType,
+    PyTypeRef, iter::builtins_iter, locked_next,
 };
 use crate::common::lock::LazyLock;
 use crate::{
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
-    TryFromBorrowedObject, TryFromObject, VirtualMachine,
+    TryFromBorrowedObject, VirtualMachine,
     anystr::{self, AnyStr},
     atomic_func,
+    byte::bytes_from_object,
     bytes_inner::{
         ByteInnerFindOptions, ByteInnerHexOptions, ByteInnerNewOptions, ByteInnerPaddingOptions,
-        ByteInnerSplitOptions, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner, bytes_decode,
+        ByteInnerSplitOptions, ByteInnerSub, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner,
+        bytes_decode,
     },
-    class::PyClassImpl,
+    class::{PyClassDef, PyClassImpl},
     common::{hash::PyHash, lock::PyMutex},
     convert::{ToPyObject, ToPyResult},
-    function::{
-        ArgBytesLike, ArgIndex, ArgIterable, Either, FuncArgs, OptionalArg, OptionalOption,
-        PyComparisonValue,
-    },
+    function::{ArgBytesLike, ArgIndex, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue},
     protocol::{
-        BufferDescriptor, BufferMethods, PyBuffer, PyIterReturn, PyMappingMethods, PyNumberMethods,
-        PySequenceMethods,
+        BufferDescriptor, BufferFlags, BufferMethods, PyBuffer, PyIterReturn, PyMappingMethods,
+        PyNumberMethods, PySequenceMethods,
     },
     sliceable::{SequenceIndex, SliceableSequenceOp},
     types::{
@@ -96,7 +95,7 @@ impl Constructor for PyBytes {
     type Args = Vec<u8>;
 
     fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        let options: ByteInnerNewOptions = args.bind(vm)?;
+        let options: ByteInnerNewOptions = args.bind_for(vm, Self::NAME)?;
 
         // Optimizations for exact bytes type
         if cls.is(vm.ctx.types.bytes_type) {
@@ -137,8 +136,7 @@ impl Constructor for PyBytes {
             return payload.into_ref_with_type(vm, cls).map(Into::into);
         }
 
-        // Fallback to get_bytearray_inner
-        let elements = options.get_bytearray_inner(vm)?.elements;
+        let elements = options.get_inner(bytes_from_object, vm)?.elements;
 
         // Return empty bytes singleton for exact bytes types
         if elements.is_empty() && cls.is(vm.ctx.types.bytes_type) {
@@ -246,11 +244,8 @@ impl PyBytes {
         self.inner.add(&other.borrow_buf())
     }
 
-    fn __contains__(
-        &self,
-        needle: Either<PyBytesInner, PyIntRef>,
-        vm: &VirtualMachine,
-    ) -> PyResult<bool> {
+    fn __contains__(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
+        let needle = ByteInnerSub::from_contains_arg(needle, vm)?;
         self.inner.contains(needle, vm)
     }
 
@@ -329,8 +324,8 @@ impl PyBytes {
         options: ByteInnerHexOptions,
         vm: &VirtualMachine,
     ) -> PyResult<String> {
-        let ByteInnerHexOptions { sep, bytes_per_sep } = options;
-        self.inner.hex(sep, bytes_per_sep, vm)
+        let (sep, bytes_per_sep) = options.resolve(vm)?;
+        Ok(self.inner.hex(sep, bytes_per_sep))
     }
 
     #[pyclassmethod]
@@ -361,7 +356,7 @@ impl PyBytes {
     }
 
     #[pymethod]
-    fn join(&self, iter: ArgIterable<PyBytesInner>, vm: &VirtualMachine) -> PyResult<Self> {
+    fn join(&self, iter: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
         Ok(self.inner.join(iter, vm)?.into())
     }
 
@@ -507,8 +502,8 @@ impl PyBytes {
     }
 
     #[pymethod]
-    fn zfill(&self, width: isize) -> Self {
-        self.inner.zfill(width).into()
+    fn zfill(&self, width: isize, vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(self.inner.zfill(width, vm)?.into())
     }
 
     #[pymethod]
@@ -627,6 +622,18 @@ static BUFFER_METHODS: BufferMethods = BufferMethods {
 };
 
 impl AsBuffer for PyBytes {
+    fn slot_as_buffer(
+        zelf: &PyObject,
+        flags: BufferFlags,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyBuffer> {
+        let zelf = zelf
+            .downcast_ref::<Self>()
+            .ok_or_else(|| vm.new_type_error("unexpected payload for as_buffer"))?;
+        flags.fill_info_check(true, vm)?;
+        Self::as_buffer(zelf, vm)
+    }
+
     fn as_buffer(zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<PyBuffer> {
         let buf = PyBuffer::new(
             zelf.to_owned().into(),
@@ -673,9 +680,7 @@ impl AsSequence for PyBytes {
                     .map(|x| vm.ctx.new_bytes(vec![x]).into())
             }),
             contains: atomic_func!(|seq, other, vm| {
-                let other =
-                    <Either<PyBytesInner, PyIntRef>>::try_from_object(vm, other.to_owned())?;
-                PyBytes::sequence_downcast(seq).__contains__(other, vm)
+                PyBytes::sequence_downcast(seq).__contains__(other.to_owned(), vm)
             }),
             ..PySequenceMethods::NOT_IMPLEMENTED
         });
@@ -722,8 +727,8 @@ impl Comparable for PyBytes {
             return Err(vm.new_type_error(format!(
                 "'{}' not supported between instances of '{}' and '{}'",
                 op.operator_token(),
-                zelf.class().name(),
-                other.class().name()
+                zelf.class().slot_name(),
+                other.class().slot_name()
             )));
         } else {
             zelf.inner.cmp(other, op, vm)
@@ -789,7 +794,7 @@ impl PyBytesIterator {
 impl SelfIter for PyBytesIterator {}
 impl IterNext for PyBytesIterator {
     fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-        zelf.internal.lock().next(|bytes, pos| {
+        locked_next(&zelf.internal, |bytes, pos| {
             Ok(PyIterReturn::from_result(
                 bytes
                     .as_bytes()

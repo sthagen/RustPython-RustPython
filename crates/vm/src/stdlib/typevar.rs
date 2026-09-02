@@ -363,12 +363,10 @@ pub(crate) mod typevar {
             let default = kwargs.swap_remove("default");
 
             // Check for unexpected keyword arguments
-            if !kwargs.is_empty() {
-                let unexpected_keys = kwargs.keys().map(|s| s.to_string()).collect::<Vec<_>>();
-                return Err(vm.new_type_error(format!(
-                    "TypeVar() got unexpected keyword argument(s): {}",
-                    unexpected_keys.join(", ")
-                )));
+            if let Some(invalid_key) = kwargs.keys().next() {
+                return Err(
+                    vm.new_unexpected_keyword_type_error(Some("typevar"), &invalid_key.to_string())
+                );
             }
 
             // Check for invalid combinations
@@ -646,12 +644,11 @@ pub(crate) mod typevar {
             let default = kwargs.swap_remove("default");
 
             // Check for unexpected keyword arguments
-            if !kwargs.is_empty() {
-                let unexpected_keys = kwargs.keys().map(|s| s.to_string()).collect::<Vec<_>>();
-                return Err(vm.new_type_error(format!(
-                    "ParamSpec() got unexpected keyword argument(s): {}",
-                    unexpected_keys.join(", ")
-                )));
+            if let Some(invalid_key) = kwargs.keys().next() {
+                return Err(vm.new_unexpected_keyword_type_error(
+                    Some("paramspec"),
+                    &invalid_key.to_string(),
+                ));
             }
 
             // Check for invalid combinations
@@ -840,12 +837,11 @@ pub(crate) mod typevar {
             let default = kwargs.swap_remove("default");
 
             // Check for unexpected keyword arguments
-            if !kwargs.is_empty() {
-                let unexpected_keys = kwargs.keys().map(|s| s.to_string()).collect::<Vec<_>>();
-                return Err(vm.new_type_error(format!(
-                    "TypeVarTuple() got unexpected keyword argument(s): {}",
-                    unexpected_keys.join(", ")
-                )));
+            if let Some(invalid_key) = kwargs.keys().next() {
+                return Err(vm.new_unexpected_keyword_type_error(
+                    Some("typevartuple"),
+                    &invalid_key.to_string(),
+                ));
             }
 
             // Handle default value
@@ -923,11 +919,12 @@ pub(crate) mod typevar {
     impl Representable for ParamSpecArgs {
         #[inline(always)]
         fn repr_str(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
-            // Check if origin is a ParamSpec
-            if let Ok(name) = zelf.__origin__.get_attr("__name__", vm) {
-                return Ok(format!("{name}.args", name = name.str(vm)?));
+            // A ParamSpec origin is named; anything else is shown by its repr,
+            // which carries the recursion guard a Rust `{:?}` walk does not.
+            if let Some(param_spec) = zelf.__origin__.downcast_ref::<ParamSpec>() {
+                return Ok(format!("{}.args", param_spec.__name__().str_utf8(vm)?));
             }
-            Ok(format!("{:?}.args", zelf.__origin__))
+            Ok(format!("{}.args", zelf.__origin__.repr(vm)?))
         }
     }
 
@@ -986,11 +983,12 @@ pub(crate) mod typevar {
     impl Representable for ParamSpecKwargs {
         #[inline(always)]
         fn repr_str(zelf: &crate::Py<Self>, vm: &VirtualMachine) -> PyResult<String> {
-            // Check if origin is a ParamSpec
-            if let Ok(name) = zelf.__origin__.get_attr("__name__", vm) {
-                return Ok(format!("{name}.kwargs", name = name.str(vm)?));
+            // A ParamSpec origin is named; anything else is shown by its repr,
+            // which carries the recursion guard a Rust `{:?}` walk does not.
+            if let Some(param_spec) = zelf.__origin__.downcast_ref::<ParamSpec>() {
+                return Ok(format!("{}.kwargs", param_spec.__name__().str_utf8(vm)?));
             }
-            Ok(format!("{:?}.kwargs", zelf.__origin__))
+            Ok(format!("{}.kwargs", zelf.__origin__.repr(vm)?))
         }
     }
 

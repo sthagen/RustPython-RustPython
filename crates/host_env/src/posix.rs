@@ -1,5 +1,4 @@
 use alloc::ffi::CString;
-#[cfg(all(unix, not(target_os = "redox")))]
 use alloc::vec::Vec;
 use core::ffi::CStr;
 #[cfg(all(unix, not(target_os = "redox")))]
@@ -20,6 +19,12 @@ pub struct UnameInfo {
     pub release: String,
     pub version: String,
     pub machine: String,
+}
+
+#[derive(Debug)]
+pub struct UnameDecodeError {
+    pub bytes: Vec<u8>,
+    pub error: core::str::Utf8Error,
 }
 
 #[cfg(all(unix, not(target_os = "redox")))]
@@ -136,16 +141,6 @@ pub fn symlink(src: &CStr, dst: &CStr) -> std::io::Result<()> {
 #[cfg(not(target_os = "redox"))]
 pub fn chroot(path: &Path) -> std::io::Result<()> {
     nix::unistd::chroot(path).map_err(std::io::Error::from)
-}
-
-#[cfg(not(target_os = "redox"))]
-pub fn unlinkat(dir_fd: i32, path: &CStr) -> std::io::Result<()> {
-    let ret = unsafe { libc::unlinkat(dir_fd, path.as_ptr(), 0) };
-    if ret < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd"))]
@@ -354,14 +349,23 @@ pub fn fchownat(
     .map_err(std::io::Error::from)
 }
 
-pub fn uname_info() -> Result<UnameInfo, core::str::Utf8Error> {
+pub fn uname_info() -> Result<UnameInfo, UnameDecodeError> {
+    fn decode(value: &CStr) -> Result<String, UnameDecodeError> {
+        core::str::from_utf8(value.to_bytes())
+            .map(str::to_owned)
+            .map_err(|error| UnameDecodeError {
+                bytes: value.to_bytes().to_vec(),
+                error,
+            })
+    }
+
     let info = rustix::system::uname();
     Ok(UnameInfo {
-        sysname: info.sysname().to_str()?.into(),
-        nodename: info.nodename().to_str()?.into(),
-        release: info.release().to_str()?.into(),
-        version: info.version().to_str()?.into(),
-        machine: info.machine().to_str()?.into(),
+        sysname: decode(info.sysname())?,
+        nodename: decode(info.nodename())?,
+        release: decode(info.release())?,
+        version: decode(info.version())?,
+        machine: decode(info.machine())?,
     })
 }
 
@@ -793,11 +797,15 @@ pub fn setpgid_if_needed(pgid_to_set: libc::pid_t) -> nix::Result<()> {
     Ok(())
 }
 
-pub fn setgroups_if_needed(_groups: Option<&[u32]>) -> nix::Result<()> {
-    #[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "redox")))]
-    if let Some(groups) = _groups {
-        let groups = groups.iter().copied().map(gid_from_raw).collect::<Vec<_>>();
-        nix::unistd::setgroups(&groups)?;
+pub fn setgroups_if_needed(groups: Option<&[u32]>) -> nix::Result<()> {
+    #[cfg(not(any(target_os = "ios", target_os = "redox")))]
+    if let Some(groups) = groups {
+        // The caller prepares this array before fork.  Call libc directly so
+        // macOS performs the requested operation too, and so the child does
+        // not allocate a second array between fork and exec.
+        let ret =
+            unsafe { libc::setgroups(groups.len() as _, groups.as_ptr().cast::<libc::gid_t>()) };
+        nix::Error::result(ret)?;
     }
     Ok(())
 }
@@ -1392,10 +1400,6 @@ fn build_posix_spawn_attrs(
             target_os = "illumos",
             target_os = "hurd",
         )))]
-        #[expect(
-            clippy::std_instead_of_core,
-            reason = "false positive: core::io::ErrorKind is unstable (core_io); expect is co-gated with the usage so it is not left unfulfilled on platforms where this block is compiled out"
-        )]
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,

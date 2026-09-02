@@ -181,6 +181,16 @@ class StructTest(ComplexesAreIdenticalMixin, unittest.TestCase):
         self.assertGreaterEqual(struct.calcsize('n'), struct.calcsize('i'))
         self.assertGreaterEqual(struct.calcsize('n'), struct.calcsize('P'))
 
+    def test_cache_bytes_vs_str_bb(self):
+        # Mixing str and bytes formats must not raise BytesWarning under -bb.
+        code = (
+            'import struct\n'
+            'struct.calcsize(b"!d"); struct.calcsize("!d")\n'
+            'struct.calcsize(">d"); struct.calcsize(b">d")\n'
+            'struct.Struct(b"i"); struct.Struct("i")\n'
+        )
+        assert_python_ok('-bb', '-c', code)
+
     def test_integers(self):
         # Integer tests (bBhHiIlLqQnN).
         import binascii
@@ -498,12 +508,10 @@ class StructTest(ComplexesAreIdenticalMixin, unittest.TestCase):
         with self.assertRaises((IndexError, OverflowError)):
             pack_into(writable_buf, -2**1000, test_string)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; BufferError: non-contiguous buffer is not a bytes-like object
     def test_pack_into(self):
         s = struct.Struct('21s')
         self._test_pack_into(s.pack_into)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; BufferError: non-contiguous buffer is not a bytes-like object
     def test_pack_into_fn(self):
         pack_into = lambda *args: struct.pack_into('21s', *args)
         self._test_pack_into(pack_into)
@@ -603,7 +611,6 @@ class StructTest(ComplexesAreIdenticalMixin, unittest.TestCase):
                           'spam and eggs')
         self.assertRaises(struct.error, struct.unpack_from, '14s42', store, 0)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; AssertionError: '>h' != '>hh'
     def test_Struct_reinitialization(self):
         # Issue 9422: there was a memory leak when reinitializing a
         # Struct instance.  This test can be used to detect the leak
@@ -828,7 +835,6 @@ class StructTest(ComplexesAreIdenticalMixin, unittest.TestCase):
         test_error_propagation('N')
         test_error_propagation('n')
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON
     def test_struct_subclass_instantiation(self):
         # Regression test for https://github.com/python/cpython/issues/112358
         class MyStruct(struct.Struct):

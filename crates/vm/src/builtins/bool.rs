@@ -2,7 +2,7 @@ use super::{PyInt, PyStrRef, PyType, PyTypeRef, PyUtf8StrRef};
 use crate::common::format::FormatSpec;
 use crate::{
     AsObject, Context, Py, PyObject, PyObjectRef, PyResult, TryFromBorrowedObject, VirtualMachine,
-    class::PyClassImpl,
+    class::{PyClassDef, PyClassImpl},
     convert::{IntoPyException, ToPyObject, ToPyResult},
     function::{FuncArgs, OptionalArg},
     protocol::PyNumberMethods,
@@ -34,6 +34,7 @@ impl<'a> TryFromBorrowedObject<'a> for bool {
 
 impl PyObjectRef {
     /// Convert Python bool into Rust bool.
+    #[inline(always)]
     pub fn try_to_bool(self, vm: &VirtualMachine) -> PyResult<bool> {
         if self.is(&vm.ctx.true_value) {
             return Ok(true);
@@ -41,6 +42,12 @@ impl PyObjectRef {
             return Ok(false);
         }
 
+        self.try_to_bool_slow(vm)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn try_to_bool_slow(self, vm: &VirtualMachine) -> PyResult<bool> {
         let slots = &self.class().slots;
 
         // 1. Try nb_bool slot first
@@ -80,7 +87,7 @@ impl Constructor for PyBool {
     type Args = OptionalArg<PyObjectRef>;
 
     fn slot_new(zelf: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        let x: Self::Args = args.bind(vm)?;
+        let x: Self::Args = args.bind_for(vm, Self::NAME)?;
         if !zelf.fast_isinstance(vm.ctx.types.type_type) {
             return Err(vm.new_type_error(format!(
                 "requires a 'type' object but received a '{}'",
@@ -99,8 +106,8 @@ impl Constructor for PyBool {
 #[pyclass(with(Constructor, AsNumber, Representable), flags(_MATCH_SELF))]
 impl PyBool {
     #[pymethod]
-    fn __format__(obj: PyObjectRef, spec: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<String> {
-        let new_bool = obj.try_to_bool(vm)?;
+    fn __format__(zelf: PyObjectRef, spec: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<String> {
+        let new_bool = zelf.try_to_bool(vm)?;
         FormatSpec::parse(spec.as_str())
             .and_then(|format_spec| format_spec.format_bool(new_bool))
             .map_err(|err| err.into_pyexception(vm))

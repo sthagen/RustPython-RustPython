@@ -177,7 +177,9 @@ pub(crate) mod _signal {
         module: &Py<crate::builtins::PyModule>,
         vm: &VirtualMachine,
     ) {
-        if vm.state.config.settings.install_signal_handlers {
+        // Process-global signal disposition is owned by the main interpreter only.
+        // Subinterpreters (PEP 734) must not reinstall SIGINT / probe handlers.
+        if vm.state.is_main_interpreter() && vm.state.config.settings.install_signal_handlers {
             let sig_dfl = vm.new_pyobj(SIG_DFL as u8);
             let sig_ign = vm.new_pyobj(SIG_IGN as u8);
 
@@ -335,10 +337,6 @@ pub(crate) mod _signal {
         }
 
         #[cfg(windows)]
-        #[expect(
-            clippy::std_instead_of_core,
-            reason = "false positive: core::io::ErrorKind is unstable (core_io)"
-        )]
         let is_socket = if fd != INVALID_WAKEUP {
             host_signal::wakeup_fd_is_socket(fd).map_err(|err| {
                 if err.kind() == std::io::ErrorKind::InvalidInput {

@@ -7,7 +7,10 @@ pub(super) use _socket::{PySocket, SockWaitKind, sock_wait, timeout_error_msg};
 
 #[pymodule]
 mod _socket {
-    use crate::common::lock::{PyMappedRwLockReadGuard, PyRwLock, PyRwLockReadGuard};
+    use crate::common::{
+        inet,
+        lock::{PyMappedRwLockReadGuard, PyRwLock, PyRwLockReadGuard},
+    };
     #[cfg(all(unix, not(target_os = "redox")))]
     use crate::vm::convert::ToPyException;
     use crate::vm::{
@@ -40,7 +43,6 @@ mod _socket {
     }
 
     use core::{
-        mem::MaybeUninit,
         net::{Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
@@ -1589,7 +1591,10 @@ mod _socket {
             vm: &VirtualMachine,
         ) -> Result<Vec<u8>, IoOrPyException> {
             let flags = flags.unwrap_or(0);
-            let mut buffer = Vec::with_capacity(bufsize);
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(bufsize)
+                .map_err(|_| vm.new_memory_error(""))?;
             let sock = self.sock()?;
             let n = self.sock_op(vm, SockWaitKind::Read, || {
                 sock.recv_with_flags(buffer.spare_capacity_mut(), flags)
@@ -1608,8 +1613,6 @@ mod _socket {
         ) -> Result<usize, IoOrPyException> {
             let flags = flags.unwrap_or(0);
             let sock = self.sock()?;
-            let mut buf = buf.borrow_buf_mut();
-            let buf = &mut *buf;
 
             // Handle nbytes parameter
             let read_len = if let OptionalArg::Present(nbytes) = nbytes {
@@ -1621,10 +1624,13 @@ mod _socket {
                 buf.len()
             };
 
-            let buf = &mut buf[..read_len];
-            self.sock_op(vm, SockWaitKind::Read, || {
-                sock.recv_with_flags(unsafe { slice_as_uninit(buf) }, flags)
-            })
+            let mut scratch = alloc_recv_scratch(read_len, vm)?;
+            let n = self.sock_op(vm, SockWaitKind::Read, || {
+                sock.recv_with_flags(&mut scratch.spare_capacity_mut()[..read_len], flags)
+            })?;
+            unsafe { scratch.set_len(n) };
+            buf.borrow_buf_mut()[..n].copy_from_slice(&scratch);
+            Ok(n)
         }
 
         #[pymethod]
@@ -1638,7 +1644,10 @@ mod _socket {
             let bufsize = bufsize
                 .to_usize()
                 .ok_or_else(|| vm.new_value_error("negative buffersize in recvfrom"))?;
-            let mut buffer = Vec::with_capacity(bufsize);
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(bufsize)
+                .map_err(|_| vm.new_memory_error(""))?;
             let (n, addr) = self.sock_op(vm, SockWaitKind::Read, || {
                 self.sock()?
                     .recv_from_with_flags(buffer.spare_capacity_mut(), flags)
@@ -1655,24 +1664,28 @@ mod _socket {
             flags: OptionalArg<i32>,
             vm: &VirtualMachine,
         ) -> Result<(usize, PyObjectRef), IoOrPyException> {
-            let mut buf = buf.borrow_buf_mut();
-            let buf = &mut *buf;
-            let buf = match nbytes {
+            let read_len = match nbytes {
                 OptionalArg::Present(i) => {
                     let i = i.to_usize().ok_or_else(|| {
                         vm.new_value_error("negative buffersize in recvfrom_into")
                     })?;
-                    buf.get_mut(..i).ok_or_else(|| {
-                        vm.new_value_error("nbytes is greater than the length of the buffer")
-                    })?
+                    if i > buf.len() {
+                        return Err(vm
+                            .new_value_error("nbytes is greater than the length of the buffer")
+                            .into());
+                    }
+                    i
                 }
-                OptionalArg::Missing => buf,
+                OptionalArg::Missing => buf.len(),
             };
             let flags = flags.unwrap_or(0);
             let sock = self.sock()?;
+            let mut scratch = alloc_recv_scratch(read_len, vm)?;
             let (n, addr) = self.sock_op(vm, SockWaitKind::Read, || {
-                sock.recv_from_with_flags(unsafe { slice_as_uninit(buf) }, flags)
+                sock.recv_from_with_flags(&mut scratch.spare_capacity_mut()[..read_len], flags)
             })?;
+            unsafe { scratch.set_len(n) };
+            buf.borrow_buf_mut()[..n].copy_from_slice(&scratch);
             Ok((n, get_addr_tuple(&addr, vm)))
         }
 
@@ -1684,7 +1697,7 @@ mod _socket {
             vm: &VirtualMachine,
         ) -> Result<usize, IoOrPyException> {
             let flags = flags.unwrap_or(0);
-            let buf = bytes.borrow_buf();
+            let buf = bytes.borrow_buf_unlocked(vm)?;
             let buf = &*buf;
             self.sock_op(vm, SockWaitKind::Write, || {
                 self.sock()?.send_with_flags(buf, flags)
@@ -1704,7 +1717,7 @@ mod _socket {
 
             let deadline = timeout.map(Deadline::new);
 
-            let buf = bytes.borrow_buf();
+            let buf = bytes.borrow_buf_unlocked(vm)?;
             let buf = &*buf;
             let mut buf_offset = 0;
             // now we have like 3 layers of interrupt loop :)
@@ -1741,7 +1754,7 @@ mod _socket {
                 OptionalArg::Missing => (0, arg2),
             };
             let addr = self.extract_address(address, "sendto", vm)?;
-            let buf = bytes.borrow_buf();
+            let buf = bytes.borrow_buf_unlocked(vm)?;
             let buf = &*buf;
             self.sock_op(vm, SockWaitKind::Write, || {
                 self.sock()?.send_to_with_flags(buf, &addr, flags)
@@ -1771,8 +1784,8 @@ mod _socket {
 
             let buffers = buffers
                 .iter()
-                .map(|buf| buf.borrow_buf())
-                .collect::<Vec<_>>();
+                .map(|buf| buf.borrow_buf_unlocked(vm))
+                .collect::<PyResult<Vec<_>>>()?;
             let buffers = buffers
                 .iter()
                 .map(|buf| io::IoSlice::new(buf))
@@ -2319,19 +2332,17 @@ mod _socket {
 
     #[pyfunction]
     fn inet_aton(ip_string: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
-        ip_string
-            .as_str()
-            .parse::<Ipv4Addr>()
-            .map(|ip_addr| Vec::<u8>::from(ip_addr.octets()))
-            .map_err(|_| vm.new_os_error("illegal IP address string passed to inet_aton"))
+        inet::aton(ip_string.as_str().as_bytes())
+            .map(Vec::from)
+            .ok_or_else(|| vm.new_os_error("illegal IP address string passed to inet_aton"))
     }
 
     #[pyfunction]
     fn inet_ntoa(packed_ip: ArgBytesLike, vm: &VirtualMachine) -> PyResult<PyStrRef> {
         let packed_ip = packed_ip.borrow_buf();
-        let packed_ip = <&[u8; 4]>::try_from(&*packed_ip)
+        let packed_ip = <[u8; 4]>::try_from(&*packed_ip)
             .map_err(|_| vm.new_os_error("packed IP wrong length for inet_ntoa"))?;
-        Ok(vm.ctx.new_str(Ipv4Addr::from(*packed_ip).to_string()))
+        Ok(vm.ctx.new_str(inet::ntoa(packed_ip)))
     }
 
     fn cstr_opt_as_ptr(x: &OptionalArg<ffi::CString>) -> *const core::ffi::c_char {
@@ -2380,8 +2391,21 @@ mod _socket {
         Ok(s.to_string_lossy().into_owned())
     }
 
-    unsafe fn slice_as_uninit<T>(v: &mut [T]) -> &mut [MaybeUninit<T>] {
-        unsafe { &mut *(v as *mut [T] as *mut [MaybeUninit<T>]) }
+    /// Room to receive into that belongs to no Python object.
+    ///
+    /// A peer may never send, so the wait for it is unbounded. The export of
+    /// the caller's buffer is held for the whole call, which is what keeps it
+    /// from being resized, but the borrow that reaches its bytes is a lock
+    /// every other thread touching that object waits on, and a thread waiting
+    /// on a lock never reaches a safepoint — holding it across the wait stops
+    /// the world from being stopped at all. The bytes are copied over once
+    /// they have arrived.
+    fn alloc_recv_scratch(len: usize, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        let mut scratch = Vec::new();
+        scratch
+            .try_reserve_exact(len)
+            .map_err(|_| vm.new_memory_error(""))?;
+        Ok(scratch)
     }
 
     enum IoOrPyException {
@@ -2601,7 +2625,7 @@ mod _socket {
             Some(ArgStrOrBytesLike::Buf(b)) => {
                 let bytes = b.borrow_buf();
                 let host_str = core::str::from_utf8(&bytes).map_err(|e| {
-                    vm.new_unicode_decode_error_real(
+                    vm.new_unicode_decode_error(
                         vm.ctx.new_str("utf-8"),
                         vm.ctx.new_bytes(bytes.to_vec()),
                         e.valid_up_to(),
@@ -2643,7 +2667,7 @@ mod _socket {
                         let bytes = b.borrow_buf();
                         core::str::from_utf8(&bytes)
                             .map_err(|e| {
-                                vm.new_unicode_decode_error_real(
+                                vm.new_unicode_decode_error(
                                     vm.ctx.new_str("utf-8"),
                                     vm.ctx.new_bytes(bytes.to_vec()),
                                     e.valid_up_to(),
@@ -2724,40 +2748,34 @@ mod _socket {
 
     #[pyfunction]
     fn inet_pton(af_inet: i32, ip_string: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
-        static ERROR_MSG: &str = "illegal IP address string passed to inet_pton";
-        let ip_addr = match af_inet {
-            c::AF_INET => ip_string
-                .as_str()
-                .parse::<Ipv4Addr>()
-                .map_err(|_| vm.new_os_error(ERROR_MSG.to_owned()))?
-                .octets()
-                .to_vec(),
-            c::AF_INET6 => ip_string
-                .as_str()
-                .parse::<Ipv6Addr>()
-                .map_err(|_| vm.new_os_error(ERROR_MSG.to_owned()))?
-                .octets()
-                .to_vec(),
-            _ => return Err(vm.new_os_error("Address family not supported by protocol")),
+        let text = ip_string.as_str().as_bytes();
+        let packed = match af_inet {
+            c::AF_INET => inet::pton_v4(text).map(Vec::from),
+            c::AF_INET6 => inet::pton_v6(text).map(Vec::from),
+            // What the host would report for an address family it has no
+            // converter for.
+            _ => {
+                let unsupported = rustpython_host_env::errno::errors::EAFNOSUPPORT;
+                return Err(io::Error::from_raw_os_error(unsupported).into_pyexception(vm));
+            }
         };
-        Ok(ip_addr)
+        packed.ok_or_else(|| vm.new_os_error("illegal IP address string passed to inet_pton"))
     }
 
     #[pyfunction]
     fn inet_ntop(af_inet: i32, packed_ip: ArgBytesLike, vm: &VirtualMachine) -> PyResult<String> {
         let packed_ip = packed_ip.borrow_buf();
+        let wrong_length = || vm.new_value_error("invalid length of packed IP address string");
         match af_inet {
             c::AF_INET => {
-                let packed_ip = <&[u8; 4]>::try_from(&*packed_ip).map_err(|_| {
-                    vm.new_value_error("invalid length of packed IP address string")
-                })?;
-                Ok(Ipv4Addr::from(*packed_ip).to_string())
+                let packed_ip = <[u8; 4]>::try_from(&*packed_ip).map_err(|_| wrong_length())?;
+                Ok(inet::ntoa(packed_ip))
             }
             c::AF_INET6 => {
-                let packed_ip = <&[u8; 16]>::try_from(&*packed_ip).map_err(|_| {
-                    vm.new_value_error("invalid length of packed IP address string")
-                })?;
-                Ok(get_ipv6_addr_str(Ipv6Addr::from(*packed_ip)))
+                if packed_ip.len() != 16 {
+                    return Err(wrong_length());
+                }
+                Ok(inet::ntop_v6(&packed_ip))
             }
             _ => Err(vm.new_value_error(format!("unknown address family {af_inet}"))),
         }
@@ -3074,16 +3092,6 @@ mod _socket {
     }
     pub(crate) fn timeout_error_msg(vm: &VirtualMachine, msg: String) -> PyRef<PyOSError> {
         vm.new_os_subtype_error(timeout(vm), None, msg)
-    }
-
-    fn get_ipv6_addr_str(ipv6: Ipv6Addr) -> String {
-        match ipv6.to_ipv4() {
-            // instead of "::0.0.ddd.ddd" it's "::xxxx"
-            Some(v4) if !ipv6.is_unspecified() && matches!(v4.octets(), [0, 0, _, _]) => {
-                format!("::{:x}", u32::from(v4))
-            }
-            _ => ipv6.to_string(),
-        }
     }
 
     pub(crate) struct Deadline {

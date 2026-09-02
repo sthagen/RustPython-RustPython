@@ -13,9 +13,6 @@
 //!
 //! Warning: This library contains AI-generated code and comments. Do not trust any code or comment without verification. Please have a qualified expert review the code and remove this notice after review.
 
-// false positive: core::io::{Cursor, ErrorKind} are unstable (core_io), unusable on stable
-#![expect(clippy::std_instead_of_core)]
-
 // OID (Object Identifier) management module
 mod oid;
 
@@ -1158,19 +1155,19 @@ mod _ssl {
                 let pwd_result = callable.call((), vm)?;
 
                 // Convert callable result to string
-                let password_from_callable = if let Ok(pwd_str) =
-                    PyUtf8StrRef::try_from_object(vm, pwd_result.clone())
-                {
-                    pwd_str.as_str().to_owned()
-                } else if let Ok(pwd_bytes_like) = ArgBytesLike::try_from_object(vm, pwd_result) {
-                    String::from_utf8(pwd_bytes_like.borrow_buf().to_vec()).map_err(|_| {
-                        vm.new_type_error("password callback returned invalid UTF-8 bytes")
-                    })?
-                } else {
-                    return Err(
-                        vm.new_type_error("password callback must return a string or bytes")
-                    );
-                };
+                let password_from_callable =
+                    if let Ok(pwd_str) = PyUtf8StrRef::try_from_object(vm, pwd_result.clone()) {
+                        pwd_str.as_str().to_owned()
+                    } else if pwd_result.check_buffer() {
+                        let pwd_bytes_like = ArgBytesLike::try_from_object(vm, pwd_result)?;
+                        String::from_utf8(pwd_bytes_like.borrow_buf().to_vec()).map_err(|_| {
+                            vm.new_type_error("password callback returned invalid UTF-8 bytes")
+                        })?
+                    } else {
+                        return Err(
+                            vm.new_type_error("password callback must return a string or bytes")
+                        );
+                    };
 
                 // Validate callable password length
                 if password_from_callable.len() > PEM_BUFSIZE {
@@ -1808,7 +1805,8 @@ mod _ssl {
             // Validate filepath is str or bytes
             let path_str = if let Ok(s) = PyUtf8StrRef::try_from_object(vm, filepath.clone()) {
                 s.as_str().to_owned()
-            } else if let Ok(b) = ArgBytesLike::try_from_object(vm, filepath) {
+            } else if filepath.check_buffer() {
+                let b = ArgBytesLike::try_from_object(vm, filepath)?;
                 String::from_utf8(b.borrow_buf().to_vec())
                     .map_err(|_| vm.new_value_error("Invalid path encoding"))?
             } else {
@@ -1863,7 +1861,8 @@ mod _ssl {
             // Validate name is str or bytes
             let curve_name = if let Ok(s) = PyUtf8StrRef::try_from_object(vm, name.clone()) {
                 s.as_str().to_owned()
-            } else if let Ok(b) = ArgBytesLike::try_from_object(vm, name) {
+            } else if name.check_buffer() {
+                let b = ArgBytesLike::try_from_object(vm, name)?;
                 String::from_utf8(b.borrow_buf().to_vec())
                     .map_err(|_| vm.new_value_error("Invalid curve name encoding"))?
             } else {
@@ -2106,8 +2105,8 @@ mod _ssl {
                         Ok((Some(pwd_str.as_str().to_owned()), None))
                     }
                     // Try bytes-like
-                    else if let Ok(pwd_bytes_like) = ArgBytesLike::try_from_object(vm, p.clone())
-                    {
+                    else if p.check_buffer() {
+                        let pwd_bytes_like = ArgBytesLike::try_from_object(vm, p.clone())?;
                         let pwd = String::from_utf8(pwd_bytes_like.borrow_buf().to_vec())
                             .map_err(|_| vm.new_type_error("password bytes must be valid UTF-8"))?;
                         Ok((Some(pwd), None))
@@ -3769,7 +3768,7 @@ mod _ssl {
 
             // Use compat layer for unified read logic with proper EOF handling
             // This matches SSL_read_ex() approach
-            let mut buf = vec![0u8; len];
+            let mut buf = vm.new_zeroed_bytes(len)?;
             let read_result = {
                 let mut conn_guard = self.connection.lock();
                 let conn = conn_guard
@@ -5028,14 +5027,13 @@ mod _ssl {
     }
 
     #[pyfunction]
-    fn RAND_bytes(n: i64, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
+    fn RAND_bytes(n: i32, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
         // Validate n is not negative
         if n < 0 {
             return Err(vm.new_value_error("num must be positive"));
         }
 
-        let n_usize = n as usize;
-        let mut buf = vec![0u8; n_usize];
+        let mut buf = vm.new_zeroed_bytes(n as usize)?;
         CryptoExt::get_provider()
             .secure_random
             .fill(&mut buf)
@@ -5044,7 +5042,7 @@ mod _ssl {
     }
 
     #[pyfunction]
-    fn RAND_pseudo_bytes(n: i64, vm: &VirtualMachine) -> PyResult<(PyBytesRef, bool)> {
+    fn RAND_pseudo_bytes(n: i32, vm: &VirtualMachine) -> PyResult<(PyBytesRef, bool)> {
         // Rustls providers expose cryptographically strong random bytes.
         let bytes = RAND_bytes(n, vm)?;
         Ok((bytes, true))
